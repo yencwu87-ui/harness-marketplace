@@ -1,0 +1,63 @@
+# Harness Marketplace
+
+**Governed harness engineering for AI agents.** Scaffold it, audit it, verify it, red-team it, on whichever agent framework your team uses.
+
+AI coding agents are good at writing code and bad at long tasks: they lose their place between sessions, read what they shouldn't, and say "done" without proof. A harness is the work around the model: context, state, verification, guardrails and recovery. This repository gives you that harness in two forms.
+
+## 1. Claude Code plugins (install in one minute)
+
+```text
+/plugin marketplace add yencwu87-ui/harness-marketplace
+/plugin install harness-audit@harness-marketplace
+/plugin install harness-init@harness-marketplace
+/plugin install harness-core@harness-marketplace
+/plugin install harness-redteam@harness-marketplace
+```
+
+| Plugin | What you get |
+|---|---|
+| **harness-audit** | `/harness-audit:audit` scores your repo out of 100 across **7 areas**, with `file:line` evidence for every pass and a fix for every gap. Also runs without Claude: `python3 plugins/harness-audit/skills/audit/scripts/audit.py .` |
+| **harness-init** | `/harness-init:init` sets up the work list (with `done_when` and evidence), guard script, progress note, decisions log, clean-state checklist, `init.sh`, `CLAUDE.md` and safe settings. Never overwrites, and shows settings changes first. |
+| **harness-core** | `/harness-core:resume` and `/harness-core:checkpoint`, a Haiku `explore` agent, a Sonnet `verifier`, and a hook that shows only failing test output. |
+| **harness-redteam** | `/harness-redteam:redteam` wires promptfoo and DeepTeam to your agent: behaviour evals plus a red team mapped to the OWASP LLM and agentic risk lists. |
+
+Suggested order: **audit → init → core → redteam → audit again.**
+
+## 2. The multi-framework kit (`kit/`)
+
+The same discipline for teams not on Claude Code, or building agents into a product:
+
+| Track | For | Models |
+|---|---|---|
+| Claude Code | AI pair-programming in a repo | Claude |
+| Claude Agent SDK | The Claude Code harness inside your app or CI | Claude |
+| Microsoft Agent Framework | Model-neutral agents and workflows, Python or .NET | Claude, OpenAI, Azure, Ollama… |
+| Google ADK | Agents with a web debugger and built-in evals | Claude, Gemini, LiteLLM models |
+
+Run it locally, in a Dev Container or Codespace, or in a locked-down Docker sandbox that sees only your repo. One test suite (promptfoo + DeepTeam) runs against any track. Start at [kit/README.md](kit/README.md).
+
+## The seven areas
+
+| Area | What good looks like |
+|---|---|
+| 1 Instructions | A short CLAUDE.md / AGENTS.md: what the system is, the verification command, hard rules |
+| 2 State and continuity | A JSON work list with `done_when` and evidence, a guard against rewrites, a progress note, a decisions log, git checkpoints |
+| 3 Verification | Tests, a one-command smoke test, a single `check` entry point, VERIFIED / INCORRECT / UNRESOLVED verdicts, an independent verifier |
+| 4 Scope and stopping | One item at a time, a stop rule, resume and checkpoint routines, a clean-state checklist, no rushed finishes |
+| 5 Safety guardrails | Deny rules for secrets and destructive commands, and OS-level isolation for unattended runs |
+| 6 Evals and red teaming | Behaviour evals, a red team mapped to OWASP, run in CI |
+| 7 Cost and context | Model chosen once, cheap lookups on small models, usage recorded per item, filtered tool output |
+
+Areas 1–4 build on the ideas taught in [Learn Harness Engineering](https://github.com/walkinglabs/learn-harness-engineering) by WalkingLabs (MIT). Areas 5–7 are what production and regulated teams add on top. See [LEARN.md](LEARN.md) for a learning path.
+
+## Honest expectations
+
+- A passing audit means the harness pieces exist, not that they work. Running your checks is the proof.
+- Permission rules stop an agent's own tools, not a script it writes. Use the sandbox or a container for unattended runs.
+- No percentage gain is promised. Measure tokens and wall-clock time per accepted item, before and after.
+
+Versions checked on 25 Oct 2026: Claude Code 2.1.310, claude-agent-sdk 0.2.174, agent-framework 1.23.0, google-adk 2.13.0, deepteam 1.0.10, promptfoo 0.125.1.
+
+## Licence
+
+MIT. See [LICENSE](LICENSE) and [NOTICE.md](NOTICE.md).

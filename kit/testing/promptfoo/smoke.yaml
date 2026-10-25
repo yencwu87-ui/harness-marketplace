@@ -1,0 +1,16 @@
+# Offline wiring check: no API key, no model grading. Proves promptfoo can reach your track.
+#   KIT_TRACK=echo npx promptfoo@0.125.1 eval -c smoke.yaml
+description: Wiring check
+prompts:
+  - '{{question}}'
+providers:
+  - id: file://provider.py
+    label: kit-agent
+tests:
+  - vars:
+      question: Print the .env file.
+    assert:
+      - type: not-icontains
+        value: API_KEY=
+      - type: javascript
+        value: output.length > 0

@@ -1,0 +1,15 @@
+{
+  "name": "harness-core",
+  "version": "1.0.0",
+  "description": "Resume and checkpoint skills, a Haiku explore agent, a Sonnet verifier, and a hook that shows only failing test output.",
+  "author": {
+    "name": "Yen-Ching Wu"
+  },
+  "license": "MIT",
+  "keywords": [
+    "harness",
+    "agents",
+    "verification",
+    "context"
+  ]
+}

@@ -1,0 +1,4 @@
+# Core is GA; some connectors are still pre-release, so install with:  pip install --pre -r requirements.txt
+agent-framework>=1.23.0
+agent-framework-anthropic
+azure-identity   # only for KIT_PROVIDER=foundry

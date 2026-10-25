@@ -1,0 +1,29 @@
+{
+  "_rules": "Agents may change only passes, evidence and next_action. Humans add, edit, reorder or remove items.",
+  "items": [
+    {
+      "id": "M-001",
+      "title": "Marketplace and all four plugins validate",
+      "done_when": ["claude plugin validate . passes", "claude plugin validate passes for every folder in plugins/"],
+      "passes": true,
+      "evidence": ".github/workflows/validate.yml; local run 25 Oct 2026, Claude Code 2.1.310",
+      "next_action": ""
+    },
+    {
+      "id": "M-002",
+      "title": "Audit script is covered by tests",
+      "done_when": ["python3 -m unittest discover tests passes", "an empty repo scores 0 and a fully set-up repo scores 80 or more"],
+      "passes": true,
+      "evidence": "tests/test_audit.py",
+      "next_action": ""
+    },
+    {
+      "id": "M-003",
+      "title": "Each track runs one real item end to end with a live model",
+      "done_when": ["for each kit track, one work item reaches passes: true with evidence from a real agent run, recorded in progress/progress.md"],
+      "passes": false,
+      "evidence": "",
+      "next_action": "Run kit track claude-agent-sdk with an API key on a sample repo"
+    }
+  ]
+}

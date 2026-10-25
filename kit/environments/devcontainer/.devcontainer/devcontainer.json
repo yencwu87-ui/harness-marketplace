@@ -1,0 +1,14 @@
+{
+  "name": "harness-starter-kit",
+  "build": { "dockerfile": "Dockerfile" },
+  "remoteUser": "dev",
+  "containerEnv": {
+    "PROMPTFOO_DISABLE_TELEMETRY": "1"
+  },
+  "postCreateCommand": "make -C harness setup TRACK=${localEnv:KIT_TRACK:claude-code}",
+  "customizations": {
+    "vscode": {
+      "extensions": ["ms-python.python", "anthropic.claude-code"]
+    }
+  }
+}

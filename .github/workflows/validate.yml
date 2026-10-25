@@ -1,0 +1,26 @@
+name: validate
+on: [push, pull_request]
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: Audit script runs on itself and on the kit
+        run: |
+          python3 plugins/harness-audit/skills/audit/scripts/audit.py . --md
+          python3 -m py_compile plugins/harness-audit/skills/audit/scripts/audit.py kit/shared/scripts/check_feature_list.py
+      - uses: actions/setup-node@v4
+        with: { node-version: "22" }
+      - name: Validate the marketplace and every plugin
+        run: |
+          npm install -g @anthropic-ai/claude-code
+          claude plugin validate .
+          for p in plugins/*; do claude plugin validate "$p"; done
+      - name: Eval wiring check (promptfoo smoke against the offline echo track)
+        run: |
+          cd kit/testing/promptfoo
+          KIT_TRACK=echo PROMPTFOO_PYTHON=python3 npx --yes promptfoo@0.125.1 eval -c smoke.yaml --no-cache
+      - name: Work-list guard
+        run: python3 scripts/check_feature_list.py

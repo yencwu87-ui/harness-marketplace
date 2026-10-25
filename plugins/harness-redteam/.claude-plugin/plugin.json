@@ -1,0 +1,16 @@
+{
+  "name": "harness-redteam",
+  "version": "1.0.0",
+  "description": "Set up behaviour evals and a red team for your agent with promptfoo and DeepTeam, mapped to OWASP LLM and agentic risk lists.",
+  "author": {
+    "name": "Yen-Ching Wu"
+  },
+  "license": "MIT",
+  "keywords": [
+    "red-team",
+    "evals",
+    "owasp",
+    "promptfoo",
+    "deepteam"
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "name": "harness-init",
+  "version": "1.0.0",
+  "description": "Scaffold a harness into any repo: work list with done_when and evidence, progress note, decisions log, clean-state checklist, init.sh, guard script, CLAUDE.md and safe settings.",
+  "author": {
+    "name": "Yen-Ching Wu"
+  },
+  "license": "MIT",
+  "keywords": [
+    "harness",
+    "scaffold",
+    "feature-list"
+  ]
+}

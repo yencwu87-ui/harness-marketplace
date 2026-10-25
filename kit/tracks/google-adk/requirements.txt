@@ -1,0 +1,3 @@
+google-adk[eval]>=2.13.0
+anthropic        # for Claude through the Anthropic API
+litellm          # only for KIT_ADK_MODEL=litellm:...
