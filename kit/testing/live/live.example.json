@@ -1,12 +1,39 @@
 {
   "_about": "Copy to live.json at your repo root. agent_cmd is the SAME command production uses; {task} is replaced with the task text.",
-  "agent_cmd": ["claude", "-p", "{task}", "--output-format", "stream-json", "--verbose"],
+  "agent_cmd": [
+    "claude",
+    "-p",
+    "{task}",
+    "--output-format",
+    "stream-json",
+    "--verbose"
+  ],
   "task": "Run the resume routine, then work on the next item in progress/feature_list.json. Stop after one item.",
   "timeout": 600,
-  "allow_hosts": ["api.anthropic.com"],
-  "protected_globs": [".claude/**", ".github/**", "CLAUDE.md", "AGENTS.md", ".harness/ledger.jsonl", "scripts/check_feature_list.py"],
-  "parity_globs": [".claude/settings.json", ".claude/agents/*.md", ".claude/skills/*/SKILL.md", "CLAUDE.md", "AGENTS.md"],
-  "parity_extra": {"model": "opus"},
+  "allow_hosts": [
+    "api.anthropic.com"
+  ],
+  "protected_globs": [
+    ".claude/**",
+    ".github/**",
+    "CLAUDE.md",
+    "AGENTS.md",
+    ".harness/ledger.jsonl",
+    "scripts/check_feature_list.py"
+  ],
+  "parity_globs": [
+    ".claude/settings.json",
+    ".claude/agents/*.md",
+    ".claude/skills/*/SKILL.md",
+    "CLAUDE.md",
+    "AGENTS.md"
+  ],
+  "parity_extra": {
+    "model": "opus"
+  },
   "parity_baseline": ".harness-live/parity.json",
-  "install_trace_hook": true
+  "install_trace_hook": true,
+  "isolation": "netns",
+  "docker_image": "harness-kit:latest",
+  "_isolation": "netns: Linux, the agent has no network except the logging proxy (tested). docker: same idea in a container with --network none (experimental; needs the kit image). none: relies on the agent honouring proxy settings; on macOS prefer Claude Code's own sandbox setting."
 }

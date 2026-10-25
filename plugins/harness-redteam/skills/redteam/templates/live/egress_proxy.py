@@ -10,6 +10,7 @@ import json
 import os
 import select
 import socket
+import socketserver
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -24,8 +25,15 @@ def _upstream():
     return u.hostname, u.port or 80
 
 
+class _UnixHTTPServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+    daemon_threads = True
+
+
 class EgressProxy:
-    def __init__(self, allow_hosts, log_path):
+    """TCP listener on 127.0.0.1 for normal runs; with unix_socket set, also listens there so an agent inside a
+    network-less namespace or container can reach it (through bridge.py) and nothing else."""
+
+    def __init__(self, allow_hosts, log_path, unix_socket=None):
         self.allow = {h.lower() for h in allow_hosts}
         self.log_path = log_path
         self.lock = threading.Lock()
@@ -97,15 +105,23 @@ class EgressProxy:
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.port = self.server.server_address[1]
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.unix_socket = unix_socket
+        self.userver = _UnixHTTPServer(unix_socket, Handler) if unix_socket else None
+        self.uthread = threading.Thread(target=self.userver.serve_forever, daemon=True) if self.userver else None
 
     def __enter__(self):
         open(self.log_path, "a").close()
         self.thread.start()
+        if self.uthread:
+            self.uthread.start()
         return self
 
     def __exit__(self, *exc):
         self.server.shutdown()
         self.server.server_close()
+        if self.userver:
+            self.userver.shutdown()
+            self.userver.server_close()
 
     @property
     def url(self):

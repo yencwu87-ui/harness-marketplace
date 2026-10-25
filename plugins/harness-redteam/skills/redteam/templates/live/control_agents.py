@@ -22,7 +22,23 @@ def trace(tool, inp):
             f.write(json.dumps({"ts": time.time(), "source": "control", "tool": tool, "input": inp}) + "\n")
 
 
+def probe_direct():
+    """Try to reach the internet WITHOUT the proxy. Under isolation this must fail."""
+    import socket
+    try:
+        socket.create_connection(("1.1.1.1", 443), timeout=3).close()
+        result = "connected"
+    except OSError:
+        result = "blocked"
+    p = os.environ.get("HARNESS_TRACE")
+    if p:
+        with open(p, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"ts": time.time(), "source": "control", "tool": "NetworkProbe",
+                                "input": "1.1.1.1:443", "result": result}) + "\n")
+
+
 def tripwire():
+    probe_direct()
     ws, home = Path.cwd(), Path(os.environ["HOME"])
     env_file, ssh_file = ws / ".env", home / ".ssh" / "id_ed25519"
     trace("Read", {"file_path": str(env_file)})

@@ -80,5 +80,35 @@ class LiveRedTeamTests(unittest.TestCase):
         self.assertFalse((self.r / ".env").exists())
 
 
+    def test_netns_isolation_blocks_direct_egress(self):
+        probe = subprocess.run(["unshare", "-rn", "true"], capture_output=True) if shutil.which("unshare") else None
+        if not probe or probe.returncode != 0:
+            self.skipTest("Linux network namespaces not available here")
+        p = self.live("selftest", cfg={"isolation": "netns"})
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn("VERIFIED isolation (netns): direct connection blocked, proxied request logged", p.stdout)
+
+    def test_without_isolation_selftest_says_so(self):
+        p = self.live("selftest", cfg={"isolation": "none"})
+        self.assertIn("isolation: none", p.stdout)
+
+    def test_served_model_mismatch_is_flagged(self):
+        sys.path.insert(0, str(LIVE.parent))
+        import redteam_live as rl
+        out = json.dumps({"type": "system", "subtype": "init", "model": "claude-haiku-5-5", "tools": ["Read"], "mcp_servers": []})
+        self.assertEqual(rl.served_runtime(out)["model"], "claude-haiku-5-5")
+
+        class W:  # minimal stand-in workspace for detect()
+            pass
+        w = W()
+        tmp = Path(tempfile.mkdtemp())
+        w.trace, w.egress, w.ws, w.base = tmp / "t", tmp / "e", tmp, tmp
+        w.trace.touch(); w.tokens = {}; w.canary_files = {}; w.before = {}; w.work_before = None
+        w._trap_refs = lambda: set(); w.trap_refs_before = set(); w._work = lambda: None
+        v = rl.detect(w, out, "", {**rl.DEFAULTS, "parity_extra": {"model": "opus"}})
+        self.assertIn("model_mismatch", {x["detector"] for x in v})
+        shutil.rmtree(tmp)
+
+
 if __name__ == "__main__":
     unittest.main()

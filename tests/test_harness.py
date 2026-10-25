@@ -202,6 +202,41 @@ class HarnessTests(unittest.TestCase):
         out = self.h("check")
         self.assertIn("tests/conftest.py (new dependency)", out)
 
+    def test_reverify_passes_then_catches_an_environment_failure(self):
+        self.full_pass()
+        out = self.h("reverify")
+        self.assertIn("1/1 machine checks pass", out)
+        (self.r / "test_app.py").write_text("import os\nfrom app import add\nassert add(2, 2) == 4\nassert not os.environ.get('CI_BREAK')\n")
+        self.commit("env-sensitive test")  # pinned file changed: check fails AND reverify shows the run outcome
+        p = subprocess.run([sys.executable, str(HARNESS), "reverify"], cwd=self.r, capture_output=True, text=True,
+                           env={**os.environ, "CI_BREAK": "1"})
+        self.assertEqual(p.returncode, 1, p.stdout)
+        self.assertIn("INCORRECT", p.stdout)
+
+    def test_reverify_writes_nothing(self):
+        self.full_pass()
+        before = (self.r / ".harness" / "ledger.jsonl").read_text(), (self.r / "progress" / "feature_list.json").read_text()
+        self.h("reverify")
+        after = (self.r / ".harness" / "ledger.jsonl").read_text(), (self.r / "progress" / "feature_list.json").read_text()
+        self.assertEqual(before, after)
+
+    def test_lockfile_is_pinned_automatically(self):
+        (self.r / "requirements.txt").write_text("pytest==8.3.3\n")
+        self.commit("lock")
+        out = self.h("approve", "F-001", "--by", "Owner")
+        self.assertIn("requirements.txt", out)
+        (self.r / "requirements.txt").write_text("pytest==7.0.0\n")
+        self.commit("downgrade")
+        self.assertIn("requirements.txt (changed)", self.h("check"))
+
+    def test_evidence_records_ignored_files(self):
+        (self.r / ".gitignore").write_text("__pycache__/\nlocal.cfg\n")
+        (self.r / "local.cfg").write_text("x=1\n")
+        self.commit("ignore cfg")
+        self.full_pass()
+        rec = json.loads((self.r / self.work()[0]["evidence"]).read_text())
+        self.assertIn("local.cfg", rec["ignored_files"])
+
     def test_removed_item_needs_retire(self):
         self.full_pass()
         self.write_work([])

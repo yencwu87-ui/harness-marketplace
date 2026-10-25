@@ -38,7 +38,8 @@
       "title": "Live red team exercises the real tool path",
       "done_when": [
         "python3 tools/redteam_live/redteam_live.py --repo . selftest passes (positive and negative control)",
-        "python3 -m unittest tests.test_redteam_live passes (parity drift, baseline required, real repo untouched)"
+        "python3 -m unittest tests.test_redteam_live passes (parity drift, baseline required, real repo untouched)",
+        "python3 tools/redteam_live/redteam_live.py --repo . --config <netns config> selftest reports VERIFIED isolation (Linux)"
       ],
       "passes": true,
       "evidence": "tests/test_redteam_live.py; tools/redteam_live/redteam_live.py selftest",

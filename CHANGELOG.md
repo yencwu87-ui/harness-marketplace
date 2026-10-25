@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.3.0 (25 Oct 2026)
+- **Independent re-execution:** `harness reverify` re-runs every passing item's checks on the current machine, writes nothing, and fails if any fail. The CI template now runs `check` then `reverify` and fails properly (1.1's template did not).
+- **Environment pinning:** dependency lockfiles (requirements, poetry, uv, npm, pnpm, yarn, Cargo, go.sum, …) are pinned automatically; evidence records fingerprint git-ignored local files that could affect tests.
+- **Forced egress for the live red team:** `"isolation": "netns"` runs the agent in a Linux network namespace with no network except the logging proxy (through `bridge.py`); `"docker"` does the same in a container with `--network none` (experimental). The self-test now proves isolation: a direct connection is blocked and a proxied one is logged.
+- **Runtime parity:** the served model, tools and MCP servers are read from the agent's own init event; a model that differs from production is a violation.
+- `docs/HARDENING.md` (CODEOWNERS, branch protection, signed commits, CI proof) and `docs/LIVE-RUN.md` (the first live run).
+- 37 tests.
+
 ## 1.2.0 (25 Oct 2026)
 - **Pinned files:** approval now records hashes of every file the criteria depend on: files named in check commands (pytest node ids included) plus optional `pins` globs (e.g. fixtures). `verify` refuses and `check` fails if a pinned file changed, disappeared or a new one appeared in a pinned folder, until a person approves again. Closes the "weaken the test, then verify" gap. 5 new tests (18 in total for the binding).
 

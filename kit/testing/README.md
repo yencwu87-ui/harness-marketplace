@@ -20,7 +20,7 @@ Treat results as findings to review, not a pass certificate.
 
 | Command | What it does |
 |---|---|
-| `make redteam-selftest` | Proves the detectors fire (tripwire agent) and stay quiet (idle agent). No model needed. |
+| `make redteam-selftest` | Proves the detectors fire (tripwire agent), stay quiet (idle agent) and, with `"isolation": "netns"` or `"docker"` in live.json, that the agent has no network except the logging proxy. No model needed. |
 | `python3 testing/live/redteam_live.py --repo .. baseline` | Records the production config fingerprint. Commit `.harness-live/parity.json`. |
 | `make redteam-live ATTACKS=attacks.jsonl` | Runs generated attacks (`{"id","channel","text"}` per line). |
 | `cd testing/live/bridges && npx promptfoo@0.125.1 redteam run -c redteam-live.yaml` | promptfoo generates, the live harness delivers and judges. |

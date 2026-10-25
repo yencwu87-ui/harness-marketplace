@@ -30,3 +30,11 @@ jobs:
         run: python3 tools/sync_copies.py --check
       - name: Live red team detector self-test (positive and negative control, no model)
         run: python3 tools/redteam_live/redteam_live.py --repo . selftest
+      - name: Live red team self-test under network isolation (skips where user namespaces are unavailable)
+        run: |
+          if unshare -rn true 2>/dev/null; then
+            echo '{"isolation": "netns"}' > /tmp/netns.json
+            python3 tools/redteam_live/redteam_live.py --repo . --config /tmp/netns.json selftest
+          else
+            echo "user namespaces unavailable on this runner; isolation covered by unit tests where available"
+          fi

@@ -1,9 +1,11 @@
-# Re-run the evidence on a clean runner instead of trusting the agent's machine.
+# Independent proof on a clean runner: the binding must hold AND every passing item's checks must pass again here.
+# Copy to .github/workflows/harness.yml. Pair it with branch protection (required status check "harness / proof"),
+# required review from CODEOWNERS on progress/ and .harness/, and signed commits.
 name: harness
 on: [pull_request, push]
 permissions:
   contents: read
-  id-token: write        # only needed for the optional attestation step
+  id-token: write        # used by the optional attestation step
   attestations: write
 jobs:
   proof:
@@ -12,12 +14,14 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
-      - name: Binding intact (approved criteria, chain, evidence hashes, code fingerprint)
+      # Install your project's dependencies here so the checks can run (e.g. pip install -r requirements.txt).
+      - name: Binding intact (approved criteria and pinned files, ledger chain, evidence hashes, code fingerprint)
         run: python3 scripts/harness.py check
-      - name: Re-execute every machine check independently
-        run: |
-          python3 scripts/harness.py verify --all --allow-dirty || true
-          git diff --stat -- progress/ .harness/
-      # Optional: signed provenance for the evidence records, tied to this workflow run.
-      # - uses: actions/attest-build-provenance@v2
-      #   with: { subject-path: ".harness/evidence/**/evidence.json" }
+      - name: Re-execute every passing item's machine checks here; fail if any fail
+        run: python3 scripts/harness.py reverify
+      - name: Signed provenance for the evidence records (optional; needs a public repo or GitHub Enterprise)
+        if: github.event_name == 'push' && hashFiles('.harness/evidence/**/evidence.json') != ''
+        continue-on-error: true
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: ".harness/evidence/**/evidence.json"

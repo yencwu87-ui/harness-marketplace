@@ -10,6 +10,7 @@ Standard library only. Run from the repository root.
     harness retire ITEM --by NAME --reason TEXT   remove an approved item on purpose
     harness check [--allow-stale]                 the guard: chain intact, criteria approved, passes backed by evidence
     harness status                                one line per item
+    harness reverify [--all]                      CI: re-run every passing item's checks on this machine; fail if any fail
 
 Work list: progress/feature_list.json (or feature_list.json). Each item:
     {"id": "F-001", "title": "...", "done_when": [
@@ -43,11 +44,12 @@ import platform
 import shlex
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 GENESIS = "0" * 64
 EXCLUDE = ("progress/", ".harness/", "feature_list.json")
 ROOT = Path.cwd()
@@ -141,6 +143,9 @@ def criteria_sha(item) -> str:
 
 
 PIN_SKIP = {"__pycache__", ".git", "node_modules", ".venv", "venv"}
+LOCKFILES = ("requirements.txt", "requirements-dev.txt", "requirements.lock", "poetry.lock", "uv.lock", "Pipfile.lock",
+             "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "bun.lockb", "Cargo.lock", "go.sum", "Gemfile.lock",
+             "composer.lock", ".python-version", ".nvmrc", ".tool-versions")
 
 
 def _expand(path: Path) -> list[Path]:
@@ -155,6 +160,8 @@ def pinned_paths(item) -> list[str]:
     """Files the criteria depend on: explicit `pins` globs, plus every existing file or folder a check command names
     (e.g. tests/test_signup.py in `pytest -q tests/test_signup.py::test_create`). Editing any of them needs re-approval."""
     found: set[str] = set()
+    if any("run" in c for c in checks_of(item)):  # dependency locks decide what the checks actually run against
+        found.update(f for f in LOCKFILES if (ROOT / f).is_file())
     for pattern in item.get("pins", []):
         for p in ROOT.glob(pattern):
             found.update(f.relative_to(ROOT).as_posix() for f in _expand(p))
@@ -317,7 +324,12 @@ def verify_one(item_id: str, allow_dirty: bool, timeout: int) -> bool:
         print(f"Note: the checks wrote files outside progress/ and .harness/ ({', '.join(wrote[:5])}). "
               "Add them to .gitignore, or the next commit will change the code fingerprint and make this evidence stale.")
     ok = all(r.get("exit") == 0 for r in results if "run" in r) and all(r.get("signed_by") for r in results if "human" in r)
-    record = {"item": item_id, "criteria_sha": cs, "pins_sha": appr.get("pins_sha"), "code_sha": code_fingerprint(), "head": git("rev-parse", "HEAD").strip(),
+    ignored = {}
+    for rel in git("ls-files", "--others", "--ignored", "--exclude-standard", check=False).splitlines()[:500]:
+        fp = ROOT / rel
+        if not excluded(rel) and fp.is_file() and fp.stat().st_size < 2_000_000 and not set(Path(rel).parts) & PIN_SKIP:
+            ignored[rel] = sha(fp.read_bytes())
+    record = {"item": item_id, "ignored_files": ignored, "criteria_sha": cs, "pins_sha": appr.get("pins_sha"), "code_sha": code_fingerprint(), "head": git("rev-parse", "HEAD").strip(),
               "dirty": bool(dirty), "checks": results, "all_passed": ok, "started": started, "seconds": round(time.time() - started, 2),
               "env": {"harness": VERSION, "python": platform.python_version(), "platform": platform.platform(),
                       "git": git("--version").strip()}}
@@ -343,6 +355,35 @@ def cmd_verify(a):
     ids = [i["id"] for i in items] if a.all else [a.item]
     results = [verify_one(i, a.allow_dirty, a.timeout) for i in ids]
     sys.exit(0 if all(results) else 1)
+
+
+def cmd_reverify(a):
+    """Independent re-execution (for CI on a clean runner): re-run every machine check of every passing item, write
+    nothing to the work list or ledger, and fail if any check fails now. Run after `harness check`."""
+    _, _, items = load_work()
+    targets = [i for i in items if i.get("passes")] if not a.all else items
+    failures, ran = [], 0
+    with tempfile.TemporaryDirectory() as tmp:
+        for it in targets:
+            for c in checks_of(it):
+                if "run" not in c:
+                    continue
+                ran += 1
+                try:
+                    pr = subprocess.run(c["run"], shell=True, cwd=ROOT, capture_output=True, text=True, timeout=a.timeout)
+                    code, out = pr.returncode, (pr.stdout or "") + (pr.stderr or "")
+                except subprocess.TimeoutExpired:
+                    code, out = 124, "TIMEOUT"
+                log = Path(tmp) / f"{it['id']}-{c['id']}.log"
+                log.write_text(out, encoding="utf-8")
+                status = "VERIFIED" if code == 0 else "INCORRECT"
+                print(f"{status:<10} {it['id']}/{c['id']}: exit {code}  ({c['run']})")
+                if code != 0:
+                    failures.append(f"{it['id']}/{c['id']}")
+                    print("    " + "\n    ".join(out.strip().splitlines()[-8:]))
+    print(f"\nharness reverify {'FAILED' if failures else 'OK'}: {ran - len(failures)}/{ran} machine checks pass on this machine"
+          + (f"; failing: {', '.join(failures)}" if failures else ""))
+    sys.exit(1 if failures else 0)
 
 
 def check_all(allow_stale=False) -> tuple[list, list]:
@@ -436,6 +477,8 @@ def main(argv=None):
     p.add_argument("--timeout", type=int, default=900); p.set_defaults(f=cmd_verify)
     p = sp.add_parser("check"); p.add_argument("--allow-stale", action="store_true"); p.set_defaults(f=cmd_check)
     sp.add_parser("status").set_defaults(f=cmd_status)
+    p = sp.add_parser("reverify"); p.add_argument("--all", action="store_true", help="every item, not only passing ones")
+    p.add_argument("--timeout", type=int, default=900); p.set_defaults(f=cmd_reverify)
     a = ap.parse_args(argv)
     a.f(a)
 
