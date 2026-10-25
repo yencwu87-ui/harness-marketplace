@@ -16,7 +16,8 @@
 ## How work runs
 - Start every session with the `resume` skill. End every session with the `checkpoint` skill.
 - One item at a time, from `progress/feature_list.json`, first item with `passes: false`.
-- In `feature_list.json` change only `passes`, `evidence` and `next_action`. Never edit, reorder or delete items.
+- In `feature_list.json` never edit `done_when`, titles or item order: a person approves criteria with `harness approve`.
+- Never set `passes` yourself. Run `python3 scripts/harness.py verify ITEM`: it runs the checks and records hash-bound evidence.
 - Stop rule: stop when `done_when` is met, or after two failed attempts at the same step.
   Then record the blocker and its evidence in `progress/progress.md`.
 - Use the `Explore` agent for lookups and the `verifier` agent before setting `passes: true`.

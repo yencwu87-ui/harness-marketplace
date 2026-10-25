@@ -5,11 +5,11 @@ description: End-of-session routine. Use when an item is done, when stopping aft
 
 # Checkpoint
 
-1. **Verify.** If you think the item is done, call the `verifier` agent with the item id.
-   - OVERALL VERIFIED → set `passes: true` and put the evidence path in `evidence`.
-   - Otherwise leave `passes: false` and record what failed.
-2. **Update `progress/feature_list.json`.** Change only `passes`, `evidence` and
-   `next_action` for this item. Then run `python3 scripts/check_feature_list.py`.
+1. **Verify with the runner, not by hand.** Commit your work first (the runner refuses a dirty tree), then run
+   `python3 scripts/harness.py verify <id>`. It runs every machine check, stores the logs, chains their hashes into
+   `.harness/ledger.jsonl` and sets `passes` only if every check passed and every human check is signed off.
+   If `scripts/harness.py` is missing, call the `verifier` agent and leave `passes: false`.
+2. **Check the binding.** Run `python3 scripts/harness.py check`. Never edit `passes`, `evidence` or `done_when` by hand.
 3. **Rewrite `progress/progress.md`** (keep it to one screen):
    - date and item id
    - what changed (files)

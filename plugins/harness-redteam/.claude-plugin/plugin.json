@@ -1,7 +1,7 @@
 {
   "name": "harness-redteam",
-  "version": "1.0.0",
-  "description": "Set up behaviour evals and a red team for your agent with promptfoo and DeepTeam, mapped to OWASP LLM and agentic risk lists.",
+  "version": "1.1.0",
+  "description": "Red-team your agent two ways: promptfoo and DeepTeam evals mapped to OWASP, and a live harness that runs attacks through the real tool path with canaries, a tool trace, an egress log and action-based verdicts.",
   "author": {
     "name": "Yen-Ching Wu"
   },

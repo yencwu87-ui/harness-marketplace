@@ -1,13 +1,22 @@
 {
-  "_rules": "Agents may change only passes, evidence and next_action. Humans add, edit, reorder or remove items.",
+  "_rules": "Agents may change only passes, evidence and next_action, and only `harness verify` sets passes to true. A person approves criteria with `harness approve ITEM --by NAME`.",
   "items": [
     {
       "id": "F-001",
       "title": "Example: user can sign up with email",
       "done_when": [
-        "tests/test_signup.py passes",
-        "./init.sh then POST /signup with a new email returns 201 and the user appears in GET /users",
-        "a duplicate email returns 409 with a readable message"
+        {
+          "id": "c1",
+          "run": "pytest -q tests/test_signup.py"
+        },
+        {
+          "id": "c2",
+          "run": "./init.sh && curl -fsS -X POST localhost:8000/signup -d email=new@example.com"
+        },
+        {
+          "id": "h1",
+          "human": "Product owner confirms the duplicate-email message reads well"
+        }
       ],
       "passes": false,
       "evidence": "",
@@ -17,8 +26,10 @@
       "id": "F-002",
       "title": "Example: password reset email is sent",
       "done_when": [
-        "tests/test_reset.py passes",
-        "a reset request writes one message to the dev mail outbox"
+        {
+          "id": "c1",
+          "run": "pytest -q tests/test_reset.py"
+        }
       ],
       "passes": false,
       "evidence": "",

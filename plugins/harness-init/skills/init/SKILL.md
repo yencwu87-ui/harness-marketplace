@@ -18,13 +18,17 @@ The templates are in `templates/` next to this file. Never overwrite an existing
    - `templates/DECISIONS.md` → `DECISIONS.md`
    - `templates/init.sh` → `init.sh` (make it executable)
    - `templates/check_feature_list.py` → `scripts/check_feature_list.py`
+   - `templates/harness.py` → `scripts/harness.py`, then run `python3 scripts/harness.py init` (creates `.harness/ledger.jsonl`)
    - `templates/CLAUDE.md` → `CLAUDE.md` only if neither CLAUDE.md nor AGENTS.md exists
 4. **Settings need care.** If `.claude/settings.json` does not exist, show `templates/.claude/settings.json` and create it
    only after a yes. If it exists, show a proposed merge that **only adds** deny rules; never remove or loosen a rule.
    Tell the user plainly: deny rules stop Claude's own tools, not a script Claude writes; for unattended runs use the
    sandbox setting or a container.
 5. **Fill in with the user:** project name and test command in CLAUDE.md; the start and smoke-test commands in init.sh;
-   the first three work items, each with a `done_when` someone could check without asking.
-6. Run `python3 scripts/check_feature_list.py` and `./init.sh`, then commit locally with a message that says why.
-   Do not push.
-7. If the audit plugin is installed, re-run it and show the before and after score.
+   the first three work items. Each `done_when` entry is either `{"id": "c1", "run": "<command>"}` (a machine check)
+   or `{"id": "h1", "human": "<what a person confirms>"}`.
+6. **Approval is the user's step, not yours.** Show the items and tell the user to run
+   `python3 scripts/harness.py approve <ID> --by "<their name>"` for each one they accept. Never run `approve` or
+   `signoff` on their behalf. Suggest CODEOWNERS and required review on `progress/` and `.harness/`.
+7. Run `python3 scripts/harness.py check` and `./init.sh`, then commit locally with a message that says why. Do not push.
+8. If the audit plugin is installed, re-run it and show the before and after score.

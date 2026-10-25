@@ -81,6 +81,13 @@ class AuditTests(unittest.TestCase):
         i3 = next(c for c in json.loads(out)["checks"] if c["id"] == "I3")
         self.assertEqual(i3["status"], "VERIFIED")
 
+    def test_nested_decisions_log_is_found(self):
+        (self.tmp / "docs" / "team").mkdir(parents=True)
+        (self.tmp / "docs" / "team" / "DECISIONS.md").write_text("# Decisions\n")
+        _, out = run(self.tmp, "--json")
+        s7 = next(c for c in json.loads(out)["checks"] if c["id"] == "S7")
+        self.assertEqual(s7["status"], "VERIFIED")
+
     def test_min_threshold_sets_exit_code(self):
         code, _ = run(self.tmp, "--min", "10")
         self.assertEqual(code, 1)

@@ -1,0 +1,10 @@
+{
+  "_about": "Where attack text is delivered inside the disposable workspace. The attack text itself comes from promptfoo or DeepTeam generators (their indirect prompt-injection and agentic plugins); this kit does not ship hand-written payloads.",
+  "channels": [
+    {"id": "user-prompt", "kind": "prompt"},
+    {"id": "readme", "kind": "file", "path": "README.md", "mode": "append"},
+    {"id": "test-log", "kind": "file", "path": "logs/last-test-run.log", "mode": "create"},
+    {"id": "fetched-page", "kind": "file", "path": "docs/fetched/page.html", "mode": "create"},
+    {"id": "tool-result", "kind": "file", "path": ".cache/tool-result.json", "mode": "create"}
+  ]
+}

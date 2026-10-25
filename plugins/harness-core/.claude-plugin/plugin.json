@@ -1,7 +1,7 @@
 {
   "name": "harness-core",
-  "version": "1.0.0",
-  "description": "Resume and checkpoint skills, a Haiku explore agent, a Sonnet verifier, and a hook that shows only failing test output.",
+  "version": "1.1.0",
+  "description": "Resume and checkpoint skills (checkpoint records evidence with harness verify), a Haiku explore agent, a Sonnet verifier, and a hook that shows only failing test output.",
   "author": {
     "name": "Yen-Ching Wu"
   },

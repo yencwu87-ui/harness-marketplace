@@ -24,3 +24,9 @@ jobs:
           KIT_TRACK=echo PROMPTFOO_PYTHON=python3 npx --yes promptfoo@0.125.1 eval -c smoke.yaml --no-cache
       - name: Work-list guard
         run: python3 scripts/check_feature_list.py
+      - name: Unit tests (audit, evidence binding, live red team)
+        run: python3 -m unittest discover -s tests -v
+      - name: Copies of the single-source tools are in sync
+        run: python3 tools/sync_copies.py --check
+      - name: Live red team detector self-test (positive and negative control, no model)
+        run: python3 tools/redteam_live/redteam_live.py --repo . selftest

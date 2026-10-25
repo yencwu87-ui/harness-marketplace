@@ -27,7 +27,7 @@ import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-VERSION = "1.0.1"
+VERSION = "1.1.0"
 SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", "dist", "build", ".next", "target", "site-packages", "third_party", "vendor"}
 MAX_FILES = 60000
 MAX_FILE_BYTES = 400_000
@@ -206,7 +206,14 @@ def audit(root: Path) -> Report:
     add("S6", A, "Git history exists (checkpoints to resume from)", 2, bool(git_root), f".git at {git_root}" if git_root else "",
         "Initialise git and commit at every checkpoint.")
 
-    dec = r.first("DECISIONS.md", "docs/DECISIONS.md", "docs/decisions", "docs/adr", "adr")
+    led = r.first(".harness/ledger.jsonl")
+    hb = r.glob("**/harness.py")
+    hb_hit = r.grep_any(hb, r"criteria_sha")
+    add("S8", A, "Approved criteria are hash-bound to execution evidence (ledger + runner)", 2, bool(led) and bool(hb_hit),
+        (r.rel(led) + " + " + hb_hit) if led and hb_hit else "",
+        "Use a runner that records criteria fingerprints, logs and code fingerprint in a hash-chained ledger (harness approve / verify / check).",
+        unresolved=bool(hb_hit) and not led)
+    dec = r.first("DECISIONS.md", "docs/DECISIONS.md", "docs/decisions", "docs/adr", "adr") or next(iter(r.glob("**/DECISIONS.md", "**/decisions.md", "**/adr/*.md", "**/decisions/*.md")), None)
     add("S7", A, "Decisions are written down (DECISIONS.md or ADRs) so later sessions don't relitigate them", 1, bool(dec),
         r.rel(dec) if dec else "", "Add DECISIONS.md: one line per decision, who made it, why, date.")
 
@@ -284,6 +291,9 @@ def audit(root: Path) -> Report:
     rt_hit = r.grep_any(rt + pf, r"(redteam|red_team|owasp|jailbreak|prompt-injection)")
     add("E2", A, "Red-team suite (promptfoo redteam or DeepTeam), mapped to OWASP LLM / agentic", 2, bool(rt_hit), rt_hit,
         "Add a red-team run (promptfoo redteam or DeepTeam) covering prompt leakage, excessive agency and injection.")
+    live = r.grep_any(r.glob("**/redteam_live.py"), r"canary")
+    add("E4", A, "Red team exercises the real tool path (canaries, tool trace, egress log, action-based verdicts)", 2, bool(live), live,
+        "Run attacks through the real agent command in a throwaway workspace with canary secrets; judge tool calls, egress and file changes, not text.")
     ci = r.grep_any(r.glob(".github/workflows/*.yml", ".github/workflows/*.yaml", ".gitlab-ci.yml"), r"(promptfoo|deepteam|red.?team|eval)")
     add("E3", A, "Evals run in CI, not only by hand", 1, bool(ci), ci, "Run the eval suite in CI on every PR that touches prompts, tools or agent config.")
 

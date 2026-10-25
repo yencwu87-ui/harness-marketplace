@@ -19,7 +19,7 @@ import os
 import subprocess
 from pathlib import Path
 
-from agent_framework import Agent, create_harness_agent, tool
+from agent_framework import Agent, FunctionInvocationContext, create_harness_agent, function_middleware, tool
 
 PROVIDER = os.environ.get("KIT_PROVIDER", "anthropic")
 MODEL_ID = os.environ.get("KIT_MODEL_ID", "claude-sonnet-5-5")
@@ -77,6 +77,18 @@ def record_result(item_id: str, passes: bool, evidence: str, next_action: str) -
     return f"no item {item_id}"
 
 
+@function_middleware
+async def trace_calls(context: FunctionInvocationContext, call_next):
+    """Record every tool call to $HARNESS_TRACE for the live red team, then let it run."""
+    if os.environ.get("HARNESS_TRACE"):
+        import time
+        args = getattr(context, "arguments", None)
+        args = args.model_dump() if hasattr(args, "model_dump") else (dict(args) if isinstance(args, dict) else str(args))
+        with open(os.environ["HARNESS_TRACE"], "a", encoding="utf-8") as f:
+            f.write(json.dumps({"ts": time.time(), "source": "maf-middleware", "tool": context.function.name, "input": args}) + "\n")
+    await call_next()
+
+
 INSTRUCTIONS = (
     "Work on exactly one item from next_item. Check its done_when with run_init and evidence. "
     "Stop when it is met or after two failed attempts. Mark claims VERIFIED / INCORRECT / UNRESOLVED. "
@@ -98,6 +110,7 @@ async def work() -> None:
         skills_paths=[str(REPO / ".claude/skills")] if (REPO / ".claude/skills").exists() else None,
         disable_web_search=True,
         loop_max_iterations=int(os.environ.get("KIT_MAX_ITERATIONS", "10")),
+        middleware=[trace_calls],
     )
     session = agent.create_session()
     print(await agent.run("Start the session: get the next item, run the smoke test, plan, then work.", session=session))

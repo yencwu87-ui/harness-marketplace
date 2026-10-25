@@ -1,0 +1,23 @@
+# Re-run the evidence on a clean runner instead of trusting the agent's machine.
+name: harness
+on: [pull_request, push]
+permissions:
+  contents: read
+  id-token: write        # only needed for the optional attestation step
+  attestations: write
+jobs:
+  proof:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: Binding intact (approved criteria, chain, evidence hashes, code fingerprint)
+        run: python3 scripts/harness.py check
+      - name: Re-execute every machine check independently
+        run: |
+          python3 scripts/harness.py verify --all --allow-dirty || true
+          git diff --stat -- progress/ .harness/
+      # Optional: signed provenance for the evidence records, tied to this workflow run.
+      # - uses: actions/attest-build-provenance@v2
+      #   with: { subject-path: ".harness/evidence/**/evidence.json" }

@@ -7,7 +7,7 @@ PY    := $(VENV)/bin/python
 PF    := npx --yes promptfoo@0.125.1
 TRACKS := claude-code claude-agent-sdk microsoft-agent-framework google-adk
 
-.PHONY: help install devcontainer setup setup-redteam check audit run smoke eval redteam-promptfoo redteam-deepteam
+.PHONY: help install devcontainer setup setup-redteam check proof audit redteam-live redteam-selftest run smoke eval redteam-promptfoo redteam-deepteam
 
 help:
 	@echo "TRACK = one of: $(TRACKS)   (now: $(TRACK))"
@@ -19,6 +19,9 @@ help:
 	@echo "make setup-redteam TRACK=..  add DeepTeam to the track's venv"
 	@echo "make audit                   score REPO's harness across 7 areas (evidence + fixes)"
 	@echo "make check                   validate REPO/progress/feature_list.json"
+	@echo "make proof                   harness check: criteria approved, every pass backed by hash-bound evidence"
+	@echo "make redteam-live             live red team on the real tool path (needs live.json + baseline)"
+	@echo "make redteam-selftest         prove the live detectors fire and stay quiet (no model needed)"
 	@echo "make run TRACK=..            run the track's harness on the next failing item in REPO"
 	@echo "make smoke                   offline wiring check through promptfoo (no API key)"
 	@echo "make eval TRACK=..           promptfoo behaviour evals against the track"
@@ -30,7 +33,8 @@ install:
 	@mkdir -p "$(REPO)/progress" "$(REPO)/scripts"
 	@cp -n shared/progress/feature_list.json shared/progress/progress.md shared/progress/clean-state.md "$(REPO)/progress/" 2>/dev/null || true
 	@cp -n shared/progress/DECISIONS.md "$(REPO)/DECISIONS.md" 2>/dev/null || true
-	@cp -n shared/scripts/check_feature_list.py "$(REPO)/scripts/" 2>/dev/null || true
+	@cp -n shared/scripts/check_feature_list.py shared/scripts/harness.py "$(REPO)/scripts/" 2>/dev/null || true
+	@(cd "$(REPO)" && git rev-parse --git-dir >/dev/null 2>&1 && python3 scripts/harness.py init >/dev/null) || true
 	@(cp -n shared/init.sh "$(REPO)/init.sh" 2>/dev/null; chmod +x "$(REPO)/init.sh") || true
 	@if [ "$(TRACK)" = "claude-code" ] || [ "$(TRACK)" = "claude-agent-sdk" ]; then \
 	  cp -n tracks/claude-code/CLAUDE.md "$(REPO)/CLAUDE.md" 2>/dev/null || true; \
@@ -84,3 +88,12 @@ redteam-promptfoo:
 FRAMEWORK ?= agentic
 redteam-deepteam:
 	KIT_TRACK=$(TRACK) KIT_REPO="$(REPO)" $(PY) testing/deepteam/red_team.py --framework $(FRAMEWORK)
+
+proof:
+	cd "$(REPO)" && python3 scripts/harness.py check
+
+redteam-selftest:
+	python3 testing/live/redteam_live.py --repo "$(REPO)" selftest
+
+redteam-live:
+	python3 testing/live/redteam_live.py --repo "$(REPO)" run --attacks "$(ATTACKS)"

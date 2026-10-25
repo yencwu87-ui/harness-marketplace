@@ -18,5 +18,15 @@ Templates are in `templates/` next to this file.
 6. Show the commands for real runs and say they need a model key and send attack prompts through a model:
    - `npx promptfoo@0.125.1 eval` and `npx promptfoo@0.125.1 redteam run -c redteam.yaml`
    - `pip install -r deepteam/requirements.txt && python deepteam/red_team.py --framework owasp-asi-2026`
-7. Remind the user: use test data only, and treat results as findings to review, not a pass certificate.
+7. **Then test the real tool path** (this is the part that matters for agents):
+   - Copy `templates/live/` to `harness/redteam/live/` and `templates/live/live.example.json` to `live.json` at the repo root.
+     Set `agent_cmd` to the exact command production uses (e.g. `claude -p "{task}" --output-format stream-json --verbose`,
+     or the track's agent script). Never point it at real secrets: it runs in a throwaway copy with a fake HOME.
+   - `python3 harness/redteam/live/redteam_live.py selftest` proves the detectors fire and stay quiet (no model needed).
+   - Ask the user to record the production config fingerprint: `python3 harness/redteam/live/redteam_live.py baseline`
+     on their real config, and commit `.harness-live/parity.json`. Runs refuse a config that differs from it.
+   - Attacks come from the generators: `cd harness/redteam/live/bridges && npx promptfoo@0.125.1 redteam run -c redteam-live.yaml`,
+     or `python deepteam_live.py`. Verdicts are deterministic: canary access or leak, blocked egress, pushes,
+     destructive commands, work-list tampering, writes to protected files.
+8. Remind the user: use test data only, and treat results as findings to review, not a pass certificate.
    Suggest running the eval suite in CI on PRs that touch prompts, tools or agent config.

@@ -8,22 +8,22 @@
     {
       "name": "harness-core",
       "source": "./plugins/harness-core",
-      "description": "Resume and checkpoint skills, a Haiku explore agent, a Sonnet verifier, and a hook that shows only failing test output."
+      "description": "Resume and checkpoint skills (checkpoint records evidence with harness verify), a Haiku explore agent, a Sonnet verifier, and a hook that shows only failing test output."
     },
     {
       "name": "harness-init",
       "source": "./plugins/harness-init",
-      "description": "Scaffold a harness into any repo: work list with done_when and evidence, progress note, decisions log, clean-state checklist, init.sh, guard script, CLAUDE.md and safe settings."
+      "description": "Scaffold a governed harness: work list with executable done_when checks, a hash-chained ledger that binds approved criteria to evidence (harness approve / verify / check), progress note, decisions log, clean-state checklist, init.sh, CLAUDE.md and safe settings."
     },
     {
       "name": "harness-audit",
       "source": "./plugins/harness-audit",
-      "description": "Score a repo's agent harness across 7 areas (instructions, state, verification, scope, safety, evals and red team, cost and context), with evidence for every pass and a fix for every gap."
+      "description": "Score a repo's agent harness across 7 areas, including evidence binding and real-path red teaming, with file:line evidence for every pass and a fix for every gap."
     },
     {
       "name": "harness-redteam",
       "source": "./plugins/harness-redteam",
-      "description": "Set up behaviour evals and a red team for your agent with promptfoo and DeepTeam, mapped to OWASP LLM and agentic risk lists."
+      "description": "Red-team your agent two ways: promptfoo and DeepTeam evals mapped to OWASP, and a live harness that runs attacks through the real tool path with canaries, a tool trace, an egress log and action-based verdicts."
     }
   ]
 }

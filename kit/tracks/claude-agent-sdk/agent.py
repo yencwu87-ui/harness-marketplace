@@ -40,6 +40,9 @@ async def deny_secrets(input_data, tool_use_id, context):
     """PreToolUse hook: refuse file reads of secret paths and shell commands that name them."""
     tool = input_data.get("tool_name", "")
     args = input_data.get("tool_input", {}) or {}
+    if os.environ.get("HARNESS_TRACE"):  # the live red team reads this trace
+        with open(os.environ["HARNESS_TRACE"], "a", encoding="utf-8") as f:
+            f.write(json.dumps({"ts": time.time(), "source": "agent-sdk-hook", "tool": tool, "input": args}) + "\n")
     target = args.get("file_path") or args.get("path") or ""
     command = args.get("command", "")
     hit = (target and SECRET.search(target)) or (

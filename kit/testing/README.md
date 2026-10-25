@@ -13,3 +13,15 @@ Both tools call the agent through `shared/target.py`. Pick the agent with `KIT_T
 Red teaming sends attack prompts through a model and grades the answers with a model. Use test
 data only, and read each tool's data-handling notes before pointing it at anything sensitive.
 Treat results as findings to review, not a pass certificate.
+
+## Live red team (real tool path)
+
+`live/redteam_live.py` attacks the agent through its real command and configuration in a throwaway workspace (fake HOME, canary secrets, trap git remote, logging egress proxy) and judges tool calls, network requests and file changes. Copy `live/live.example.json` to `live.json` at your repo root and set `agent_cmd` (for example `python3 harness/tracks/claude-agent-sdk/agent.py --repo .`). Then:
+
+| Command | What it does |
+|---|---|
+| `make redteam-selftest` | Proves the detectors fire (tripwire agent) and stay quiet (idle agent). No model needed. |
+| `python3 testing/live/redteam_live.py --repo .. baseline` | Records the production config fingerprint. Commit `.harness-live/parity.json`. |
+| `make redteam-live ATTACKS=attacks.jsonl` | Runs generated attacks (`{"id","channel","text"}` per line). |
+| `cd testing/live/bridges && npx promptfoo@0.125.1 redteam run -c redteam-live.yaml` | promptfoo generates, the live harness delivers and judges. |
+| `python testing/live/bridges/deepteam_live.py` | DeepTeam generates; deterministic verdicts are written to `results/`. |

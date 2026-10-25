@@ -4,7 +4,10 @@
     {
       "id": "M-001",
       "title": "Marketplace and all four plugins validate",
-      "done_when": ["claude plugin validate . passes", "claude plugin validate passes for every folder in plugins/"],
+      "done_when": [
+        "claude plugin validate . passes",
+        "claude plugin validate passes for every folder in plugins/"
+      ],
       "passes": true,
       "evidence": ".github/workflows/validate.yml; local run 25 Oct 2026, Claude Code 2.1.310",
       "next_action": ""
@@ -12,15 +15,41 @@
     {
       "id": "M-002",
       "title": "Audit script is covered by tests",
-      "done_when": ["python3 -m unittest discover tests passes", "an empty repo scores 0 and a fully set-up repo scores 80 or more"],
+      "done_when": [
+        "python3 -m unittest discover tests passes",
+        "an empty repo scores 0 and a fully set-up repo scores 80 or more"
+      ],
       "passes": true,
       "evidence": "tests/test_audit.py",
       "next_action": ""
     },
     {
+      "id": "M-004",
+      "title": "Approved criteria are hash-bound to execution evidence",
+      "done_when": [
+        "python3 -m unittest tests.test_harness passes (13 tests: full cycle, unapproved, hand-set pass, criteria change, stale code, progress-only edit, log tamper, ledger tamper, failing check, missing sign-off, dirty tree, retire, files written by checks)"
+      ],
+      "passes": true,
+      "evidence": "tests/test_harness.py",
+      "next_action": ""
+    },
+    {
+      "id": "M-005",
+      "title": "Live red team exercises the real tool path",
+      "done_when": [
+        "python3 tools/redteam_live/redteam_live.py --repo . selftest passes (positive and negative control)",
+        "python3 -m unittest tests.test_redteam_live passes (parity drift, baseline required, real repo untouched)"
+      ],
+      "passes": true,
+      "evidence": "tests/test_redteam_live.py; tools/redteam_live/redteam_live.py selftest",
+      "next_action": ""
+    },
+    {
       "id": "M-003",
       "title": "Each track runs one real item end to end with a live model",
-      "done_when": ["for each kit track, one work item reaches passes: true with evidence from a real agent run, recorded in progress/progress.md"],
+      "done_when": [
+        "for each kit track, one work item reaches passes: true with evidence from a real agent run, recorded in progress/progress.md"
+      ],
       "passes": false,
       "evidence": "",
       "next_action": "Run kit track claude-agent-sdk with an API key on a sample repo"

@@ -1,7 +1,7 @@
 {
   "name": "harness-init",
-  "version": "1.0.0",
-  "description": "Scaffold a harness into any repo: work list with done_when and evidence, progress note, decisions log, clean-state checklist, init.sh, guard script, CLAUDE.md and safe settings.",
+  "version": "1.1.0",
+  "description": "Scaffold a governed harness: work list with executable done_when checks, a hash-chained ledger that binds approved criteria to evidence (harness approve / verify / check), progress note, decisions log, clean-state checklist, init.sh, CLAUDE.md and safe settings.",
   "author": {
     "name": "Yen-Ching Wu"
   },

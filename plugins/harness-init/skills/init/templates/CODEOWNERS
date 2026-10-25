@@ -1,0 +1,4 @@
+# Copy to .github/CODEOWNERS. Changes to criteria, approvals and evidence need a named human reviewer.
+/progress/        @your-github-user
+/.harness/        @your-github-user
+/scripts/harness.py @your-github-user
