@@ -71,6 +71,16 @@ class AuditTests(unittest.TestCase):
         i2 = next(c for c in json.loads(out)["checks"] if c["id"] == "I2")
         self.assertEqual(i2["status"], "UNRESOLVED")
 
+    def test_pytest_fixture_is_not_a_verification_command(self):
+        (self.tmp / "CLAUDE.md").write_text("# P\nUse @pytest.fixture(autouse=True) in tests.\n")
+        _, out = run(self.tmp, "--json")
+        i3 = next(c for c in json.loads(out)["checks"] if c["id"] == "I3")
+        self.assertEqual(i3["status"], "MISSING")
+        (self.tmp / "CLAUDE.md").write_text("# P\n- Full check: `make check`\n")
+        _, out = run(self.tmp, "--json")
+        i3 = next(c for c in json.loads(out)["checks"] if c["id"] == "I3")
+        self.assertEqual(i3["status"], "VERIFIED")
+
     def test_min_threshold_sets_exit_code(self):
         code, _ = run(self.tmp, "--min", "10")
         self.assertEqual(code, 1)

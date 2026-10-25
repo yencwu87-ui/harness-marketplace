@@ -27,8 +27,9 @@ import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-VERSION = "1.0.0"
-SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", "dist", "build", ".next", "target"}
+VERSION = "1.0.1"
+SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", "dist", "build", ".next", "target", "site-packages", "third_party", "vendor"}
+MAX_FILES = 60000
 MAX_FILE_BYTES = 400_000
 
 
@@ -59,16 +60,33 @@ class Repo:
         self._files = None
 
     def files(self):
+        """Walk the tree once (skipping vendored and build folders); every pattern match reuses this list."""
         if self._files is None:
             out = []
             for dp, dns, fns in os.walk(self.root):
-                dns[:] = [d for d in dns if d not in SKIP_DIRS]
-                for f in fns:
-                    out.append(Path(dp) / f)
-                    if len(out) > 20000:
-                        break
+                dns[:] = [d for d in dns if d not in SKIP_DIRS and not d.startswith(".") or d in (".claude", ".github", ".devcontainer")]
+                out += [Path(dp) / f for f in fns]
+                if len(out) > MAX_FILES:
+                    break
             self._files = out
+            self._rel = [p.relative_to(self.root).as_posix() for p in out]
         return self._files
+
+    @staticmethod
+    def _rx(pattern: str):
+        out, i = "", 0
+        while i < len(pattern):
+            if pattern.startswith("**/", i):
+                out += "(?:.*/)?"; i += 3
+            elif pattern.startswith("**", i):
+                out += ".*"; i += 2
+            elif pattern[i] == "*":
+                out += "[^/]*"; i += 1
+            elif pattern[i] == "?":
+                out += "[^/]"; i += 1
+            else:
+                out += re.escape(pattern[i]); i += 1
+        return re.compile(out + "$")
 
     def rel(self, p: Path) -> str:
         return str(p.relative_to(self.root))
@@ -81,10 +99,12 @@ class Repo:
         return None
 
     def glob(self, *patterns):
+        files = self.files()
         hits = []
         for pat in patterns:
-            hits += [p for p in self.root.glob(pat) if not (set(p.parts) & SKIP_DIRS)]
-        return hits
+            rx = self._rx(pat)
+            hits += [f for f, rel in zip(files, self._rel) if rx.match(rel)]
+        return list(dict.fromkeys(hits))
 
     def text(self, p: Path | None) -> str:
         if not p or not p.is_file() or p.stat().st_size > MAX_FILE_BYTES:
@@ -147,9 +167,9 @@ def audit(root: Path) -> Report:
         f"{r.rel(instr)}: {lines} lines" if instr else "",
         f"Trim to about 200 lines; move workflow detail into skills that load on demand." if instr else "Create the file first.",
         unresolved=bool(instr) and lines > 200)
+    VCMD = r"(`[^`]*(?<![\w@])(make (check|test|verify)|pytest|python3? -m pytest|npm (run )?test|cargo test|go test|yarn test|pnpm test|\./init\.sh|tox|nox)\b[^`]*`|^\s*\$?\s*(make (check|test)|pytest|npm test|cargo test|go test|\./init\.sh)\b)"
     add("I3", A, "Instructions name the verification command", 3,
-        bool(r.grep(instr, r"(make (check|test)|pytest|npm (run )?test|cargo test|go test|yarn test|pnpm test|\./init\.sh|verify)")),
-        r.grep(instr, r"(make (check|test)|pytest|npm (run )?test|cargo test|go test|yarn test|pnpm test|\./init\.sh|verify)"),
+        bool(r.grep(instr, VCMD)), r.grep(instr, VCMD),
         "List the one command that proves the code works (e.g. `make check`).")
     add("I4", A, "Hard rules are stated (MUST / NEVER)", 2, bool(r.grep(instr, r"\b(must not|must|never|do not|forbidden)\b")),
         r.grep(instr, r"\b(must not|must|never|do not|forbidden)\b"), "Add a short 'Hard rules' list: secrets, destructive commands, scope.")
@@ -206,7 +226,10 @@ def audit(root: Path) -> Report:
     verdict = r.grep_any(docs_for_rules + agent_files, r"\b(VERIFIED|INCORRECT|UNRESOLVED)\b", 0)
     add("V4", A, "Claims carry evidence verdicts (VERIFIED / INCORRECT / UNRESOLVED)", 2, bool(verdict), verdict,
         "Require every claim in reports to be marked VERIFIED (with evidence path), INCORRECT or UNRESOLVED.")
-    verifier = next((p for p in agent_files if re.search(r"verif|review|qa|evaluat", p.stem, re.I)), None) or r.first("evaluator-rubric.md", "docs/evaluator-rubric.md")
+    def _desc(p):
+        m = re.search(r"^description:\s*(.+)$", r.text(p), re.M)
+        return m.group(1) if m else ""
+    verifier = next((p for p in agent_files if re.search(r"verif|review|qa|evaluat", p.stem + " " + _desc(p), re.I)), None) or r.first("evaluator-rubric.md", "docs/evaluator-rubric.md")
     add("V5", A, "An independent verifier (subagent or evaluator rubric) checks the work", 1, bool(verifier),
         r.rel(verifier) if verifier else "", "Add a read-only verifier agent that checks an item against done_when before it passes.")
 
@@ -217,10 +240,10 @@ def audit(root: Path) -> Report:
     stop = r.grep_any(docs_for_rules, r"(two failed attempts|stop rule|max(imum)? (turns|attempts)|after \d+ (failed )?attempts)")
     add("P2", A, "A stop rule (bounded attempts or turns, then report the blocker)", 3, bool(stop), stop,
         "Add: stop when done_when is met or after two failed attempts at the same step; record the blocker.")
-    resume = r.grep_any(docs_for_rules, r"(resume|session[- ]start|clock[- ]in|start of (every|each) session)")
+    resume = r.grep_any(docs_for_rules, r"(resume`? (skill|routine)|start (every|each) session with|session[- ]start (routine|checklist)|start of (every|each) session|clock[- ]in|at the start of (a|each|every) session)")
     add("P3", A, "Start-of-session routine (read progress, git log, smoke test)", 2, bool(resume), resume,
         "Add a resume routine: git status, git log -10, read progress, run init.sh, pick one item.")
-    ckpt = r.grep_any(docs_for_rules, r"(checkpoint|end[- ]of[- ]session|clock[- ]out|hand ?over)")
+    ckpt = r.grep_any(docs_for_rules, r"(checkpoint`? (skill|routine)|end (every|each) session with|end[- ]of[- ]session|clock[- ]out|session hand-?off|at the end of (a|each|every) session)")
     add("P4", A, "End-of-session routine (update progress, record evidence, commit)", 2, bool(ckpt), ckpt,
         "Add a checkpoint routine: verify, update the work list and progress note, commit locally.")
 
@@ -272,7 +295,7 @@ def audit(root: Path) -> Report:
     cheap = next((p for p in agent_files if re.search(r"^model:\s*haiku", r.text(p), re.M)), None) or next((p for p in agent_files if re.search(r"^model:\s*sonnet", r.text(p), re.M)), None)
     add("C2", A, "Cheap lookups routed to a smaller model (e.g. Explore on Haiku)", 1, bool(cheap),
         r.grep(cheap, r"^model:", re.M) if cheap else "", "Add a read-only Explore agent with model: haiku that returns file:line evidence.")
-    usage = r.grep_any([p for p in (progress, instr) if p] + r.glob(".claude/skills/*/SKILL.md"), r"(tokens|usage|wall[- ]clock|/usage|cost)")
+    usage = r.grep_any([p for p in (progress, instr) if p] + r.glob(".claude/skills/*/SKILL.md"), r"(tokens? (per|used)|token usage|usage per|wall[- ]clock|/usage|cost per (item|task|run))")
     add("C3", A, "Usage (tokens / time) recorded per accepted item", 1, bool(usage), usage,
         "Record wall-clock time and tokens per accepted item, so you can measure the harness instead of guessing.")
     filt = r.grep_any(settings + r.glob(".claude/hooks/*", "hooks/hooks.json", "**/hooks/hooks.json"), r"(PreToolUse|filter|grep -A)")
