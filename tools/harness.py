@@ -16,11 +16,14 @@ Work list: progress/feature_list.json (or feature_list.json). Each item:
         {"id": "c1", "run": "pytest -q tests/test_signup.py"},      machine check, run by `harness verify`
         {"id": "h1", "human": "Product owner confirms the wording"}  human check, needs `harness signoff`
      ], "passes": false, "evidence": "", "next_action": ""}
-A plain string in done_when is treated as a human check.
+A plain string in done_when is treated as a human check. Optional "pins": ["tests/fixtures/**"] adds files the
+criteria depend on. Files named in check commands (e.g. tests/test_signup.py) are pinned automatically: approval
+records their hashes, and editing one (for example, weakening a test) needs a fresh approval before it can pass.
 
 Only `harness verify` may set passes to true. `harness check` fails when:
   - the ledger's hash chain is broken (history was edited);
-  - an item's criteria (id, title, done_when) differ from its latest approval, or were never approved;
+  - an item's criteria (id, title, done_when, pins) differ from its latest approval, or were never approved;
+  - a file the criteria depend on (a test named in a check, or a pinned path) changed since approval;
   - an item passes without an evidence record for its current criteria;
   - the evidence was recorded against different code (the code fingerprint excludes progress/ and .harness/);
   - an evidence record or log no longer matches the hash in the ledger;
@@ -37,13 +40,14 @@ import hashlib
 import json
 import os
 import platform
+import shlex
 import subprocess
 import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 GENESIS = "0" * 64
 EXCLUDE = ("progress/", ".harness/", "feature_list.json")
 ROOT = Path.cwd()
@@ -132,7 +136,61 @@ def checks_of(item) -> list[dict]:
 
 
 def criteria_sha(item) -> str:
-    return sha(canon({"id": item.get("id"), "title": item.get("title"), "done_when": item.get("done_when", [])}))
+    return sha(canon({"id": item.get("id"), "title": item.get("title"), "done_when": item.get("done_when", []),
+                      "pins": item.get("pins", [])}))
+
+
+PIN_SKIP = {"__pycache__", ".git", "node_modules", ".venv", "venv"}
+
+
+def _expand(path: Path) -> list[Path]:
+    if path.is_file():
+        return [path]
+    if path.is_dir():
+        return sorted(p for p in path.rglob("*") if p.is_file() and not (set(p.relative_to(ROOT).parts) & PIN_SKIP))
+    return []
+
+
+def pinned_paths(item) -> list[str]:
+    """Files the criteria depend on: explicit `pins` globs, plus every existing file or folder a check command names
+    (e.g. tests/test_signup.py in `pytest -q tests/test_signup.py::test_create`). Editing any of them needs re-approval."""
+    found: set[str] = set()
+    for pattern in item.get("pins", []):
+        for p in ROOT.glob(pattern):
+            found.update(f.relative_to(ROOT).as_posix() for f in _expand(p))
+    for c in checks_of(item):
+        if "run" not in c:
+            continue
+        try:
+            tokens = shlex.split(c["run"])
+        except ValueError:
+            tokens = c["run"].split()
+        for tok in tokens:
+            tok = tok.split("::", 1)[0].strip("'\"")
+            if not tok or tok.startswith("-") or "=" in tok or len(tok) > 300:
+                continue
+            p = (ROOT / tok)
+            try:
+                p = p.resolve()
+                p.relative_to(ROOT.resolve())
+            except (ValueError, OSError):
+                continue
+            if p.exists() and p != ROOT.resolve():
+                found.update(f.resolve().relative_to(ROOT.resolve()).as_posix() for f in _expand(p))
+    return sorted(x for x in found if not excluded(x))
+
+
+def pin_hashes(item) -> dict:
+    return {rel: sha((ROOT / rel).read_bytes()) for rel in pinned_paths(item)}
+
+
+def pin_drift(approved: dict, item) -> list[str]:
+    """Pinned files that changed, appeared or disappeared since approval."""
+    now = pin_hashes(item)
+    drift = [f"{p} (changed)" for p in approved if p in now and now[p] != approved[p]]
+    drift += [f"{p} (missing)" for p in approved if p not in now]
+    drift += [f"{p} (new dependency)" for p in now if p not in approved]
+    return sorted(drift)
 
 
 # ---------------------------------------------------------------- ledger
@@ -192,9 +250,11 @@ def cmd_approve(a):
     _, _, items = load_work()
     it = find(items, a.item)
     checks_of(it)
+    pins = pin_hashes(it)
     e = append({"type": "approve", "item": a.item, "criteria_sha": criteria_sha(it), "by": a.by,
-                "checks": [c["id"] for c in checks_of(it)]})
-    print(f"Approved {a.item} by {a.by}: criteria {e['criteria_sha'][:12]} (ledger #{e['seq']})")
+                "checks": [c["id"] for c in checks_of(it)], "pins": pins, "pins_sha": sha(canon(pins))})
+    print(f"Approved {a.item} by {a.by}: criteria {e['criteria_sha'][:12]}, {len(pins)} pinned file(s)"
+          f"{': ' + ', '.join(list(pins)[:6]) if pins else ''} (ledger #{e['seq']})")
 
 
 def cmd_signoff(a):
@@ -222,8 +282,13 @@ def verify_one(item_id: str, allow_dirty: bool, timeout: int) -> bool:
     led = read_ledger()
     if chain_errors(led):
         raise SystemExit("Ledger chain is broken; run `harness check` and fix that first.")
-    if not latest(led, item_id, "approve", criteria_sha=cs):
+    appr = latest(led, item_id, "approve", criteria_sha=cs)
+    if not appr:
         raise SystemExit(f"{item_id}: current criteria are not approved; a person must run `harness approve {item_id} --by NAME`")
+    drift = pin_drift(appr.get("pins", {}), it)
+    if drift:
+        raise SystemExit(f"{item_id}: files the criteria depend on changed since approval #{appr['seq']}: {', '.join(drift[:6])}. "
+                         f"A person must review them and run `harness approve {item_id} --by NAME` again.")
     dirty = dirty_paths()
     if dirty and not allow_dirty:
         raise SystemExit(f"Refusing to verify on a dirty tree (commit or stash first): {', '.join(dirty[:5])}")
@@ -252,13 +317,14 @@ def verify_one(item_id: str, allow_dirty: bool, timeout: int) -> bool:
         print(f"Note: the checks wrote files outside progress/ and .harness/ ({', '.join(wrote[:5])}). "
               "Add them to .gitignore, or the next commit will change the code fingerprint and make this evidence stale.")
     ok = all(r.get("exit") == 0 for r in results if "run" in r) and all(r.get("signed_by") for r in results if "human" in r)
-    record = {"item": item_id, "criteria_sha": cs, "code_sha": code_fingerprint(), "head": git("rev-parse", "HEAD").strip(),
+    record = {"item": item_id, "criteria_sha": cs, "pins_sha": appr.get("pins_sha"), "code_sha": code_fingerprint(), "head": git("rev-parse", "HEAD").strip(),
               "dirty": bool(dirty), "checks": results, "all_passed": ok, "started": started, "seconds": round(time.time() - started, 2),
               "env": {"harness": VERSION, "python": platform.python_version(), "platform": platform.platform(),
                       "git": git("--version").strip()}}
     rec = run_dir / "evidence.json"
     rec.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
-    e = append({"type": "evidence", "item": item_id, "criteria_sha": cs, "code_sha": record["code_sha"], "dirty": bool(dirty),
+    e = append({"type": "evidence", "item": item_id, "criteria_sha": cs, "pins_sha": appr.get("pins_sha"),
+                "code_sha": record["code_sha"], "dirty": bool(dirty),
                 "record": rec.relative_to(ROOT).as_posix(), "record_sha": sha(rec.read_bytes()), "all_passed": ok})
     failed = [r["id"] for r in results if ("run" in r and r["exit"] != 0) or ("human" in r and not r["signed_by"])]
     it["passes"] = ok and not dirty
@@ -303,6 +369,10 @@ def check_all(allow_stale=False) -> tuple[list, list]:
         if appr["criteria_sha"] != cs:
             rows.append((iid, sev, f"criteria changed since approval #{appr['seq']} by {appr['by']} "
                                    f"({appr['criteria_sha'][:12]} → {cs[:12]}); needs re-approval")); continue
+        drift = pin_drift(appr.get("pins", {}), it)
+        if drift:
+            rows.append((iid, sev, f"files the criteria depend on changed since approval #{appr['seq']}: "
+                                   f"{', '.join(drift[:4])}; needs re-approval")); continue
         ev = latest(led, iid, "evidence", criteria_sha=cs)
         if not it.get("passes"):
             rows.append((iid, "UNRESOLVED", "not passing yet" + (f"; last evidence #{ev['seq']} failed" if ev else ""))); continue
@@ -321,6 +391,8 @@ def check_all(allow_stale=False) -> tuple[list, list]:
             rows.append((iid, "INCORRECT", "evidence does not cover every check")); continue
         if it.get("evidence") != ev["record"]:
             rows.append((iid, "INCORRECT", f"evidence field points at {it.get('evidence')!r}, ledger says {ev['record']}")); continue
+        if ev.get("pins_sha") != appr.get("pins_sha"):
+            rows.append((iid, "INCORRECT", f"evidence #{ev['seq']} was recorded under a different approval of the pinned files")); continue
         if ev["code_sha"] != current_code:
             if allow_stale:
                 rows.append((iid, "UNRESOLVED", f"evidence #{ev['seq']} predates code changes; re-run `harness verify {iid}`")); continue

@@ -27,7 +27,7 @@
       "id": "M-004",
       "title": "Approved criteria are hash-bound to execution evidence",
       "done_when": [
-        "python3 -m unittest tests.test_harness passes (13 tests: full cycle, unapproved, hand-set pass, criteria change, stale code, progress-only edit, log tamper, ledger tamper, failing check, missing sign-off, dirty tree, retire, files written by checks)"
+        "python3 -m unittest tests.test_harness passes (18 tests, including pinned test files: a weakened test fails check and blocks verify until re-approved)"
       ],
       "passes": true,
       "evidence": "tests/test_harness.py",

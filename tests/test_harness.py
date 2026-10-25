@@ -147,6 +147,61 @@ class HarnessTests(unittest.TestCase):
         out = self.h("verify", "F-001", ok=False)
         self.assertIn("dirty tree", out)
 
+    def test_weakened_test_after_pass_fails_check(self):
+        self.full_pass()
+        (self.r / "test_app.py").write_text("print('ok')\n")  # assertion removed
+        self.commit("weaken test")
+        out = self.h("check", ok=False)
+        self.assertIn("test_app.py (changed)", out)
+        self.assertIn("needs re-approval", out)
+
+    def test_weakened_test_blocks_verify_until_reapproved(self):
+        self.h("approve", "F-001", "--by", "Owner")
+        self.h("signoff", "F-001", "h1", "--by", "Owner")
+        (self.r / "test_app.py").write_text("print('ok')\n")
+        self.commit("weaken test")
+        out = self.h("verify", "F-001", ok=False)
+        self.assertIn("changed since approval", out)
+        self.h("approve", "F-001", "--by", "Owner")  # a person reviews the new test and approves it
+        self.h("signoff", "F-001", "h1", "--by", "Owner")
+        self.commit("re-approve")
+        self.h("verify", "F-001")
+        self.commit("evidence")
+        self.h("check", ok=True)
+
+    def test_approval_lists_pinned_files(self):
+        out = self.h("approve", "F-001", "--by", "Owner")
+        self.assertIn("1 pinned file(s): test_app.py", out)
+        led = [json.loads(l) for l in (self.r / ".harness" / "ledger.jsonl").read_text().splitlines()]
+        self.assertIn("test_app.py", led[-1]["pins"])
+
+    def test_explicit_pins_and_pytest_node_ids(self):
+        (self.r / "tests" / "fixtures").mkdir(parents=True)
+        (self.r / "tests" / "test_x.py").write_text("def test_a():\n    assert True\n")
+        (self.r / "tests" / "fixtures" / "data.json").write_text("{}")
+        self.write_work([{"id": "F-002", "title": "x", "pins": ["tests/fixtures/**"],
+                          "done_when": [{"id": "c1", "run": "pytest -q tests/test_x.py::test_a"}],
+                          "passes": False, "evidence": "", "next_action": ""}])
+        self.commit("f2")
+        out = self.h("approve", "F-002", "--by", "Owner")
+        self.assertIn("2 pinned file(s)", out)
+        (self.r / "tests" / "fixtures" / "data.json").write_text('{"changed": true}')
+        self.commit("edit fixture")
+        out = self.h("check")
+        self.assertIn("tests/fixtures/data.json (changed)", out)
+
+    def test_new_file_in_pinned_folder_needs_reapproval(self):
+        (self.r / "tests").mkdir()
+        (self.r / "tests" / "test_a.py").write_text("assert True\n")
+        self.write_work([{"id": "F-003", "title": "x", "done_when": [{"id": "c1", "run": f"{sys.executable} -m pytest -q tests"}],
+                          "passes": False, "evidence": "", "next_action": ""}])
+        self.commit("f3")
+        self.h("approve", "F-003", "--by", "Owner")
+        (self.r / "tests" / "conftest.py").write_text("import pytest\n")
+        self.commit("add conftest")
+        out = self.h("check")
+        self.assertIn("tests/conftest.py (new dependency)", out)
+
     def test_removed_item_needs_retire(self):
         self.full_pass()
         self.write_work([])

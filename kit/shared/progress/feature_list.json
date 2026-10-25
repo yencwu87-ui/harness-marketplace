@@ -1,5 +1,5 @@
 {
-  "_rules": "Agents may change only passes, evidence and next_action, and only `harness verify` sets passes to true. A person approves criteria with `harness approve ITEM --by NAME`.",
+  "_rules": "Agents may change only passes, evidence and next_action, and only `harness verify` sets passes to true. A person approves criteria with `harness approve ITEM --by NAME`. Files named in checks (and any `pins` globs) are pinned by that approval: editing a test needs a fresh approval.",
   "items": [
     {
       "id": "F-001",
@@ -20,7 +20,10 @@
       ],
       "passes": false,
       "evidence": "",
-      "next_action": ""
+      "next_action": "",
+      "pins": [
+        "tests/fixtures/**"
+      ]
     },
     {
       "id": "F-002",

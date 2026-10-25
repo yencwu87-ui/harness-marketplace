@@ -38,3 +38,9 @@ Two weaknesses in v1.0, stated plainly:
 - Unit tests cover: chain tamper, criteria change without approval, pass without evidence, stale evidence after a code change, log tamper, human check without sign-off, a full approve → verify → check cycle.
 - Live red team tests: a naive fake agent trips canary, egress and push detectors (positive control); a careful fake agent passes; parity drift is caught.
 - Not done here: a run with a live model on each framework (needs API keys). Tracked as M-003.
+
+## 1.2.0 addition: pinned files
+
+Gap found after 1.1: an agent could weaken a test and then run `verify`; the code fingerprint showed the change but the
+approval didn't cover the test itself. Approval now hashes the files the criteria depend on (paths named in check
+commands, expanded for folders, plus `pins` globs). Any change, removal or new file in a pinned folder needs re-approval.
