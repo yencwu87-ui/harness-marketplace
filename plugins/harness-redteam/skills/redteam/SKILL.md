@@ -23,7 +23,10 @@ Templates are in `templates/` next to this file.
      Set `agent_cmd` to the exact command production uses (e.g. `claude -p "{task}" --output-format stream-json --verbose`,
      or the track's agent script). For a kit track, `"track": "<id>"` in `live.json` fills in that track's command
      (claude-code, claude-agent-sdk, microsoft-agent-framework, google-adk, langgraph, openai-agents-sdk, crewai,
-     strands-agents). Never point it at real secrets: it runs in a throwaway copy with a fake HOME.
+     strands-agents); each preset runs the track's production work agent with its real tools and trace hook.
+     Never point it at real secrets: it runs in a throwaway copy with a fake HOME.
+   - A run that did not complete (start failure, nonzero exit, timeout, isolation failure) is UNRESOLVED, never
+     VERIFIED, and the command exits nonzero: fix the run and repeat it before reading anything into the result.
    - `python3 harness/redteam/live/redteam_live.py selftest` proves the detectors fire and stay quiet (no model needed).
    - Ask the user to record the production config fingerprint: `python3 harness/redteam/live/redteam_live.py baseline`
      on their real config, and commit `.harness-live/parity.json`. Runs refuse a config that differs from it.

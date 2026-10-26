@@ -55,7 +55,7 @@ The hooks only observe. They return without changing the call, so the agent's ow
 
 ## Adding a track
 
-1. Copy the closest full track. Keep `next_item` and `run_init`, the `ask(prompt)` coroutine and the `--repo` / `--ask` CLI.
+1. Copy the closest full track. Keep `next_item` and `run_init`, the `ask(prompt)` coroutine and the `--repo` / `--ask` CLI. If `--ask` does not run the work agent with its real tools, add `--task` that does, and point the live red-team preset at it.
 2. Write the trace hook with the framework's own mechanism, and point model calls at a base URL from the environment.
 3. Add the track to `shared/target.py`, the `TRACKS` list and the `run` target in `kit/Makefile`, `CHOOSING.md` and the README table.
 4. Add an offline smoke test in `tests/test_tracks.py`, driven by `tests/llm_stub.py`, with no hosted model calls.

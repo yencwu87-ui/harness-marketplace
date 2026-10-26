@@ -11,6 +11,8 @@ make run TRACK=microsoft-agent-framework
 `harness_agent.py` uses `create_harness_agent`, which wires in a todo list, plan/execute mode,
 file memory, context compaction, skills (it reads `.claude/skills` if present) and tool approval.
 `record_result` is marked `approval_mode="always_require"`, so a human approves every change to the
-work list. Next steps: workflows (`WorkflowBuilder`, sequential/concurrent/handoff orchestrations),
+work list. `--ask` is a one-shot answer with no tools; `--repo . --task "..."` runs the same work agent
+(its tools, instructions and trace middleware) on a given task, and the live red team's preset uses it.
+Next steps: workflows (`WorkflowBuilder`, sequential/concurrent/handoff orchestrations),
 MCP tools (`MCPStdioTool`), DevUI for local debugging, and `evaluate_agent` for built-in evals.
 .NET: `dotnet add package Microsoft.Agents.AI`.

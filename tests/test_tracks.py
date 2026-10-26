@@ -126,12 +126,17 @@ class TrackSpecTests(unittest.TestCase):
 
 
 # ------------------------------------------------------------------ offline smoke tests
-SMOKE = {  # track -> (module the framework installs, env var that points model calls at the stub)
-    "langgraph": ("langgraph", "ANTHROPIC_BASE_URL"),
-    "openai-agents-sdk": ("agents", "OPENAI_BASE_URL"),
-    "crewai": ("crewai", "ANTHROPIC_BASE_URL"),
-    "strands-agents": ("strands", "ANTHROPIC_BASE_URL"),
+# track -> (framework module, provider connector modules for the default provider, env var for the stub endpoint)
+SMOKE = {
+    "langgraph": ("langgraph", ["langchain", "langchain_anthropic"], "ANTHROPIC_BASE_URL"),
+    "openai-agents-sdk": ("agents", ["openai"], "OPENAI_BASE_URL"),
+    "crewai": ("crewai", ["anthropic"], "ANTHROPIC_BASE_URL"),
+    "strands-agents": ("strands", ["anthropic"], "ANTHROPIC_BASE_URL"),
 }
+# Selectors a developer's shell may carry. The smoke clears every one, then sets only the stub (R1-11).
+CONFLICTING = ["KIT_PROVIDER", "KIT_MODEL", "KIT_MODEL_ID", "KIT_BASE_URL", "KIT_ADK_MODEL", "OPENAI_BASE_URL", "OPENAI_API_BASE",
+               "ANTHROPIC_BASE_URL", "ANTHROPIC_API_URL", "AZURE_OPENAI_ENDPOINT", "LANGSMITH_TRACING", "LANGCHAIN_TRACING_V2",
+               "KIT_OPENAI_TRACING", "KIT_CREWAI_TELEMETRY", "HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY"]
 
 
 def _has(mod: str) -> bool:
@@ -141,11 +146,53 @@ def _has(mod: str) -> bool:
         return False
 
 
+def smoke_availability(tid: str, has=_has):
+    """(runnable, reason). A missing framework or a missing provider connector is an environment without the track:
+    skip. With both present the smoke runs, so a broken install fails instead of hiding (R1-09)."""
+    framework, connectors, _ = SMOKE[tid]
+    if not has(framework):
+        return False, f"{framework} not installed in this Python (make setup TRACK={tid})"
+    missing = [c for c in connectors if not has(c)]
+    if missing:
+        return False, f"provider connector {', '.join(missing)} not installed for {tid} (make setup TRACK={tid})"
+    return True, ""
+
+
+def smoke_env(stub_url: str, base_env: str, trace: Path, repo: Path) -> dict:
+    env = {k: v for k, v in os.environ.items() if k not in CONFLICTING}
+    env.update({"HARNESS_TRACE": str(trace), "KIT_REPO": str(repo), base_env: stub_url, "NO_PROXY": "127.0.0.1,localhost",
+                "no_proxy": "127.0.0.1,localhost", "ANTHROPIC_API_KEY": "stub-not-a-key", "OPENAI_API_KEY": "stub-not-a-key"})
+    return env
+
+
+class SmokeAvailability(unittest.TestCase):
+    def test_absent_framework_absent_connector_and_complete_environment(self):
+        for tid, (fw, conns, _) in SMOKE.items():
+            with self.subTest(track=tid):
+                self.assertFalse(smoke_availability(tid, has=lambda m: False)[0])
+                ok, why = smoke_availability(tid, has=lambda m, fw=fw: m == fw)
+                self.assertFalse(ok)
+                self.assertIn("provider connector", why)
+                self.assertTrue(smoke_availability(tid, has=lambda m: True)[0])
+
+    def test_smoke_env_clears_conflicting_selectors(self):
+        saved = dict(os.environ)
+        try:
+            for k in CONFLICTING:
+                os.environ[k] = "sentinel-" + k.lower()
+            env = smoke_env("http://127.0.0.1:1", "ANTHROPIC_BASE_URL", Path("/t"), Path("/r"))
+            self.assertEqual(env["ANTHROPIC_BASE_URL"], "http://127.0.0.1:1")
+            self.assertFalse([k for k in CONFLICTING if k in env and env[k].startswith("sentinel-")])
+        finally:
+            os.environ.clear(); os.environ.update(saved)
+
+
 class TrackSmokeTests(unittest.TestCase):
-    def _smoke(self, tid: str):
-        mod, base_env = SMOKE[tid]
-        if not _has(mod):
-            self.skipTest(f"{mod} not installed in this Python (make setup TRACK={tid})")
+    def _smoke(self, tid: str, sentinels: bool = False):
+        ok, why = smoke_availability(tid)
+        if not ok:
+            self.skipTest(why)
+        _, _, base_env = SMOKE[tid]
         from llm_stub import Stub
 
         with Stub() as stub, tempfile.TemporaryDirectory() as d:
@@ -155,9 +202,16 @@ class TrackSmokeTests(unittest.TestCase):
                 {"items": [{"id": "F-001", "passes": False, "done_when": []}]}))
             trace = Path(d) / "trace.jsonl"
             saved = dict(os.environ)
-            os.environ.update({"HARNESS_TRACE": str(trace), "KIT_REPO": str(repo), base_env: stub.url,
-                               "ANTHROPIC_API_KEY": "stub-not-a-key", "OPENAI_API_KEY": "stub-not-a-key"})
+            trap = Stub() if sentinels else None
             try:
+                if trap:   # a developer shell pointing everywhere else; the smoke must still only reach the stub
+                    trap.__enter__()
+                    for k in CONFLICTING:
+                        os.environ[k] = trap.url if ("URL" in k or "BASE" in k or "ENDPOINT" in k) else "sentinel-" + k.lower()
+                    os.environ["KIT_PROVIDER"] = "openai" if tid == "langgraph" else "sentinel-provider"
+                env = smoke_env(stub.url, base_env, trace, repo)
+                os.environ.clear()
+                os.environ.update(env)
                 entry = TRACKS / tid / tracks()[tid]["entry"]
                 spec = importlib.util.spec_from_file_location(f"kit_track_smoke_{tid.replace('-', '_')}", entry)
                 m = importlib.util.module_from_spec(spec)
@@ -166,8 +220,13 @@ class TrackSmokeTests(unittest.TestCase):
             finally:
                 os.environ.clear()
                 os.environ.update(saved)
+                if trap:
+                    trap_calls = trap.calls
+                    trap.__exit__()
             self.assertIn("F-001", out)                       # the tool result reached the answer
             self.assertTrue(stub.calls, "no model call reached the local stub")
+            if trap:
+                self.assertEqual(trap_calls, [], "a model request went to a sentinel endpoint, not the stub")
             lines = [json.loads(x) for x in trace.read_text().splitlines() if x.strip()]
             self.assertEqual([x["tool"] for x in lines], ["next_item"])
             self.assertEqual(set(lines[0]), {"ts", "source", "tool", "input"})
@@ -183,6 +242,11 @@ class TrackSmokeTests(unittest.TestCase):
 
     def test_strands_agents(self):
         self._smoke("strands-agents")
+
+    def test_smokes_reach_only_the_stub_with_conflicting_selectors_set(self):
+        for tid in SMOKE:
+            with self.subTest(track=tid):
+                self._smoke(tid, sentinels=True)
 
 
 if __name__ == "__main__":

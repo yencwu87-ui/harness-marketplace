@@ -24,7 +24,7 @@ if os.environ.get("KIT_CREWAI_TELEMETRY") != "1":
     os.environ.setdefault("OTEL_SDK_DISABLED", "true")
 
 from crewai import LLM, Agent, Crew, Task  # noqa: E402
-from crewai.hooks import ToolCallHookContext, register_before_tool_call_hook  # noqa: E402
+from crewai.hooks import ToolCallHookContext, get_before_tool_call_hooks, register_before_tool_call_hook  # noqa: E402
 from crewai.tools import tool  # noqa: E402
 
 MODEL = os.environ.get("KIT_MODEL", "anthropic/claude-sonnet-5-5")
@@ -65,7 +65,9 @@ def trace_tool(ctx: ToolCallHookContext):
     return None
 
 
-register_before_tool_call_hook(trace_tool)
+trace_tool.kit_trace = True
+if not any(getattr(h, "kit_trace", False) for h in get_before_tool_call_hooks()):   # once per process, even if re-imported
+    register_before_tool_call_hook(trace_tool)
 
 BACKSTORY = (
     "You help a software team work through progress/feature_list.json one item at a time. Stop when "

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import builtins
 import json
 import os
 import re
@@ -28,7 +29,7 @@ import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-VERSION = "1.4.1"
+VERSION = "1.4.2"
 SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", "dist", "build", ".next", "target", "site-packages", "third_party", "vendor"}
 MAX_FILES = 60000
 MAX_FILE_BYTES = 400_000
@@ -181,38 +182,6 @@ GUARD_FIX = {
 }
 CATEGORY_WORDS = {"shell": "shell or code execution", "write": "file-write anywhere", "fetch": "web fetch",
                   "computer": "computer use", "read": "file-read anywhere"}
-G2_CATS = {"shell", "fetch", "computer", "read"}   # can reach or send secrets
-G3_CATS = {"shell", "write", "computer"}           # can destroy or change things irreversibly
-NATIVE_BROAD = [  # framework tools that are broad by design
-    (r"^(ShellTool|LocalShellTool|BashTool|PythonREPLTool|PythonAstREPLTool|CodeInterpreterTool|python_repl|shell|CodeAgent)$", "shell"),
-    (r"^(WriteFileTool|FileWriterTool|FileManagementToolkit|file_write|editor|ApplyPatchTool)$", "write"),
-    (r"^(WebSearchTool|RequestsGetTool|RequestsPostTool|ScrapeWebsiteTool|http_request|WebFetch|WebSearch|FileSearchTool)$", "fetch"),
-    (r"^(ComputerTool|use_computer|computer)$", "computer"),
-    (r"^(ReadFileTool|FileReadTool|file_read)$", "read"),
-]
-SDK_TOOL_CATS = {"Bash": "shell", "Write": "write", "Edit": "write", "MultiEdit": "write", "NotebookEdit": "write",
-                 "WebFetch": "fetch", "WebSearch": "fetch", "Read": "read", "Grep": "read", "Glob": "read"}
-APPROVAL_RX = [  # a person decides before the call runs
-    (r"needs_approval\s*=\s*True", "needs_approval=True"),
-    (r"\binterrupt\s*\(|interrupt_before\s*=|interrupt_on\s*=|HumanInTheLoopMiddleware", "interrupt / HumanInTheLoopMiddleware"),
-    (r"human_input\s*=\s*True", "human_input=True"),
-    (r"approval_mode\s*=\s*[\"']always_require", "approval_mode=always_require"),
-]
-DENY_RX = [  # code refuses the call
-    (r"tool_input_guardrail|input_guardrails\s*=", "tool input guardrail"),
-    (r"[\"']permissionDecision[\"']\s*:\s*[\"']deny|disallowed_tools\s*=", "PreToolUse deny / disallowed_tools"),
-    (r"cancel_tool\s*=", "BeforeToolCallEvent cancel_tool"),
-]
-SECRET_RX = r"(\.env\b|\.pem\b|\.ssh\b|\.aws\b|\.key\b)"
-DESTRUCTIVE_RX = r"(git push|reset --hard|rm -rf)"
-DECLARE_RX = {
-    "G1": r"^\s*(#{1,6}\s+|[-*]\s+)?(tools|tool allow ?list|allowed tools|tool list)\b",
-    "G2": r"^\s*(#{1,6}\s+|[-*]\s+)?secrets?\b",
-    "G3": r"^\s*(#{1,6}\s+|[-*]\s+)?(destructive|irreversible)\b",
-}
-DECLARED_CREDIT = 0.5   # declared evidence earns half a check's weight; derived evidence earns all of it
-
-
 def _is_test_path(rel: str) -> bool:
     parts = rel.split("/")
     return any(p in ("tests", "test", "testing") for p in parts[:-1]) or parts[-1].startswith("test_") or parts[-1].endswith("_test.py")
@@ -260,6 +229,58 @@ def detect_tracks(r: "Repo") -> dict:
     return out
 
 
+G1_CATS = {"shell", "write", "fetch", "computer"}   # broad: every one needs a guard
+G2_CATS = {"shell", "fetch", "computer", "read"}    # can reach or send secrets
+G3_CATS = {"shell", "write", "computer"}           # can destroy or change things irreversibly
+SECRET_RX = r"(\.env\b|\.pem\b|\.ssh\b|\.aws\b|\.key\b|id_rsa|credentials)"
+DESTRUCTIVE_RX = r"(git push|reset --hard|rm -rf)"
+PATH_RX = r"(is_relative_to|relative_to\(|commonpath|startswith\(\s*(str\()?\s*(ROOT|REPO|repo|root|BASE|base|cwd))"
+DECLARE_RX = {
+    "G1": r"^\s*(#{1,6}\s+|[-*]\s+)?(tools|tool allow ?list|allowed tools|tool list)\b",
+    "G2": r"^\s*(#{1,6}\s+|[-*]\s+)?secrets?\b",
+    "G3": r"^\s*(#{1,6}\s+|[-*]\s+)?(destructive|irreversible)\b",
+}
+DECLARED_CREDIT = 0.5   # declared evidence earns half a check's weight; derived evidence earns all of it
+
+# Framework tools that are broad by design (matched on the last name of what is placed in the tool list).
+NATIVE_BROAD = [
+    (r"^(ShellTool|LocalShellTool|BashTool|PythonREPLTool|PythonAstREPLTool|CodeInterpreterTool|python_repl|shell|CodeAgent|ShellExecTool)$", "shell"),
+    (r"^(WriteFileTool|FileWriterTool|FileManagementToolkit|file_write|editor|ApplyPatchTool)$", "write"),
+    (r"^(WebSearchTool|RequestsGetTool|RequestsPostTool|ScrapeWebsiteTool|http_request|FileSearchTool|HostedWebSearchTool)$", "fetch"),
+    (r"^(ComputerTool|use_computer|computer)$", "computer"),
+    (r"^(ReadFileTool|FileReadTool|file_read)$", "read"),
+]
+CLAUDE_TOOL_CATS = {"Bash": "shell", "Write": "write", "Edit": "write", "MultiEdit": "write", "NotebookEdit": "write",
+                    "WebFetch": "fetch", "WebSearch": "fetch", "Read": "read", "Grep": "read", "Glob": "read"}
+CLAUDE_BUILTINS = list(CLAUDE_TOOL_CATS)
+SHELL_FUNCS = {"subprocess.run", "subprocess.call", "subprocess.Popen", "subprocess.check_output", "subprocess.check_call",
+               "subprocess.getoutput", "subprocess.getstatusoutput", "os.system", "os.popen", "os.execv", "os.execvp",
+               "os.spawnl", "pty.spawn", "exec", "eval", "compile", "asyncio.create_subprocess_shell",
+               "asyncio.create_subprocess_exec", "builtins.exec", "builtins.eval"}
+WRITE_FUNCS = {"shutil.copy", "shutil.copyfile", "shutil.copy2", "shutil.move", "shutil.rmtree", "os.remove", "os.unlink",
+               "os.rename", "os.replace", "os.rmdir", "os.removedirs", "os.makedirs", "os.mkdir"}
+FETCH_HEADS = {"requests", "httpx", "aiohttp", "urllib3", "http", "socket", "ftplib", "smtplib"}
+COMPUTER_HEADS = {"pyautogui", "pynput", "pywinauto", "playwright", "selenium"}
+WRITE_ATTRS = {"write_text", "write_bytes", "unlink", "rmdir", "touch", "rename", "replace", "mkdir", "chmod"}
+READ_ATTRS = {"read_text", "read_bytes"}
+SAFE_HEADS = {"json", "re", "math", "datetime", "time", "logging", "typing", "textwrap", "shlex", "hashlib", "base64",
+              "itertools", "collections", "functools", "string", "uuid", "random", "statistics", "decimal", "fractions",
+              "dataclasses", "enum", "copy", "pprint", "operator", "html", "difflib", "fnmatch", "glob", "pathlib",
+              "os.path", "asyncio"}
+SAFE_CALLS = {"os.environ.get", "os.getenv", "os.getcwd", "pathlib.Path", "Path", "glob.glob",
+              # path arithmetic and directory listing: names only, no file contents, no commands
+              "os.path.expanduser", "os.path.join", "os.path.basename", "os.path.dirname", "os.path.abspath",
+              "os.path.realpath", "os.path.normpath", "os.path.exists", "os.path.isfile", "os.path.isdir",
+              "os.path.splitext", "os.walk", "os.listdir", "os.scandir", "fnmatch.fnmatch"}
+TAINT_SKIP = {"self", "cls", "ctx", "context", "tool_context", "config", "run_context", "wrapper", "runtime", "state"}
+_BUILTIN_SAFE = set(dir(builtins)) - {"open", "exec", "eval", "compile", "__import__", "input", "breakpoint"}
+AGENT_CTORS = {"Agent", "LlmAgent", "ChatAgent", "create_agent", "create_react_agent", "create_harness_agent",
+               "ClaudeAgentOptions"}
+FRAMEWORK_OF = [("claude_agent_sdk", "claude-agent-sdk"), ("agent_framework", "microsoft-agent-framework"),
+                ("google.adk", "google-adk"), ("langgraph", "langgraph"), ("langchain", "langgraph"),
+                ("agents", "openai-agents-sdk"), ("crewai", "crewai"), ("strands", "strands-agents")]
+
+
 def _dotted(node) -> str:
     if isinstance(node, ast.Name):
         return node.id
@@ -271,168 +292,799 @@ def _dotted(node) -> str:
     return ""
 
 
-def _uses(node, params) -> bool:
-    return any(isinstance(n, ast.Name) and n.id in params for n in ast.walk(node))
+def _uses(node, names) -> bool:
+    return any(isinstance(n, ast.Name) and n.id in names for n in ast.walk(node))
 
 
-def _fn_categories(fn) -> dict:
-    """Broad capabilities a tool function's body gives the model, judged from where its parameters flow."""
-    params = {a.arg for a in fn.args.args + fn.args.kwonlyargs} - {"self", "ctx", "context", "tool_context"}
-    cats = {}
-    for call in (n for n in ast.walk(fn) if isinstance(n, ast.Call)):
-        name = _dotted(call.func)
-        args = list(call.args) + [k.value for k in call.keywords]
-        hit_param = any(_uses(a, params) for a in args)
-        base = name.split(".")[0]
-        if base in ("pyautogui", "pynput"):
-            cats.setdefault("computer", call.lineno)
-        elif not hit_param and not (isinstance(call.func, ast.Attribute) and _uses(call.func.value, params)):
-            continue
-        elif name in ("subprocess.run", "subprocess.call", "subprocess.Popen", "subprocess.check_output",
-                      "subprocess.check_call", "os.system", "os.popen", "exec", "eval", "compile",
-                      "asyncio.create_subprocess_shell", "asyncio.create_subprocess_exec"):
-            cats.setdefault("shell", call.lineno)
-        elif name == "open":
-            mode = call.args[1] if len(call.args) > 1 else next((k.value for k in call.keywords if k.arg == "mode"), None)
-            m = mode.value if isinstance(mode, ast.Constant) and isinstance(mode.value, str) else "r"
-            if call.args and _uses(call.args[0], params):
-                cats.setdefault("write" if any(c in m for c in "wax+") else "read", call.lineno)
-        elif isinstance(call.func, ast.Attribute) and call.func.attr in ("write_text", "write_bytes", "unlink", "rmdir") \
-                and _uses(call.func.value, params):
-            cats.setdefault("write", call.lineno)
-        elif isinstance(call.func, ast.Attribute) and call.func.attr in ("read_text", "read_bytes") and _uses(call.func.value, params):
-            cats.setdefault("read", call.lineno)
-        elif name in ("shutil.copy", "shutil.copyfile", "shutil.move", "shutil.rmtree", "os.remove", "os.unlink", "os.rename"):
-            cats.setdefault("write", call.lineno)
-        elif base in ("requests", "httpx", "aiohttp") or name.endswith("urlopen") or name.endswith("urlretrieve"):
-            cats.setdefault("fetch", call.lineno)
-    return cats
+class Guard:
+    """A guard on a capability: a person approves it, or code refuses it under a condition."""
+
+    def __init__(self, kind, where, label, secret=False, destructive=False, path=False, unresolved="", tools=None):
+        self.kind, self.where, self.label = kind, where, label          # kind: approval | refusal
+        self.secret, self.destructive, self.path = secret, destructive, path
+        self.unresolved = unresolved                                   # why its coverage can't be read
+        self.tools = tools                                             # None = every tool of the agent
+
+    def covers(self, cid, cat):
+        if self.unresolved:
+            return None
+        if self.kind == "approval":
+            return True
+        if cid == "G1":
+            return True
+        if cid == "G2":
+            return self.secret
+        return self.destructive or (cat == "write" and self.path)
+
+    def __repr__(self):
+        return f"{self.label} at {self.where}"
 
 
-def _returns(fn, kind) -> bool:
-    for n in ast.walk(fn):
-        if isinstance(n, ast.Return) and n.value is not None:
-            if kind == "false" and isinstance(n.value, ast.Constant) and n.value.value is False:
-                return True
-            if kind == "dict" and isinstance(n.value, ast.Dict):
-                return True
+class Module:
+    """One parsed Python file. Read with ast only: never imported or run."""
+
+    def __init__(self, idx, path: Path):
+        self.idx, self.path = idx, path
+        self.text = idx.r.text(path)
+        self.rel = idx.r.rel(path)
+        try:
+            self.tree = ast.parse(self.text or "")
+        except SyntaxError:
+            self.tree = ast.parse("")
+        self.alias, self.funcs, self.classes, self.assigns = {}, {}, {}, {}
+        for n in self.tree.body:
+            if isinstance(n, ast.Import):
+                for a in n.names:
+                    self.alias[a.asname or a.name.split(".")[0]] = a.name if a.asname else a.name.split(".")[0]
+            elif isinstance(n, ast.ImportFrom) and n.module:
+                base = ("." * n.level) + n.module
+                for a in n.names:
+                    self.alias[a.asname or a.name] = f"{base}.{a.name}"
+            elif isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                self.funcs[n.name] = n
+            elif isinstance(n, ast.ClassDef):
+                self.classes[n.name] = n
+            elif isinstance(n, ast.Assign):
+                for t in n.targets:
+                    if isinstance(t, ast.Name):
+                        self.assigns[t.id] = n.value
+        for n in ast.walk(self.tree):   # nested defs (e.g. inside a factory) are reachable by name too
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                self.funcs.setdefault(n.name, n)
+
+    def where(self, node) -> str:
+        return f"{self.rel}:{getattr(node, 'lineno', 0)}"
+
+    def full(self, node) -> str:
+        """Dotted name with the first part resolved through this file's imports and aliases."""
+        d = _dotted(node)
+        if not d:
+            return ""
+        head, _, rest = d.partition(".")
+        if head in self.alias:
+            return self.alias[head] + ("." + rest if rest else "")
+        return d
+
+    def src(self, node) -> str:
+        return ast.get_source_segment(self.text, node) or ""
+
+    def framework(self):
+        mods = set(self.alias.values())
+        for prefix, tid in FRAMEWORK_OF:
+            if any(m == prefix or m.startswith(prefix + ".") for m in mods):
+                return tid
+        return None
+
+
+class Index:
+    """Every non-test Python file of the repo, parsed on demand."""
+
+    def __init__(self, r: "Repo"):
+        self.r, self._mods = r, {}
+        self.files = {}
+        for f in r.files():
+            rel = r.rel(f).replace(os.sep, "/")
+            if f.suffix == ".py" and not _is_test_path(rel):
+                self.files[rel] = f
+
+    def module(self, path: Path) -> Module:
+        if path not in self._mods:
+            self._mods[path] = Module(self, path)
+        return self._mods[path]
+
+    def find(self, dotted: str, from_mod: Module):
+        """Repo file for a module name (absolute or relative), or None for anything outside the repo."""
+        level = len(dotted) - len(dotted.lstrip("."))
+        name = dotted.lstrip(".").replace(".", "/")
+        bases = []
+        if level:
+            base = Path(from_mod.rel).parent
+            for _ in range(level - 1):
+                base = base.parent
+            bases.append(base.as_posix())
+        else:
+            bases += [Path(from_mod.rel).parent.as_posix(), ""]
+        for b in bases:
+            for cand in (f"{name}.py", f"{name}/__init__.py"):
+                rel = (f"{b}/{cand}" if b not in ("", ".") else cand)
+                if rel in self.files:
+                    return self.module(self.files[rel])
+        return None
+
+    def resolve(self, mod: Module, node, depth=0):
+        """('def', Module, FunctionDef) | ('class', Module, ClassDef) | ('value', Module, node) |
+        ('external', dotted) | ('unknown', text) for a name used in `mod`."""
+        if depth > 6:
+            return ("unknown", _dotted(node))
+        if isinstance(node, ast.Name):
+            n = node.id
+            if n in mod.funcs:
+                return ("def", mod, mod.funcs[n])
+            if n in mod.classes:
+                return ("class", mod, mod.classes[n])
+            if n in mod.assigns:
+                return ("value", mod, mod.assigns[n])
+            if n in mod.alias:
+                return self.resolve_dotted(mod, mod.alias[n], depth + 1)
+            return ("external" if n in _BUILTIN_SAFE else "unknown", n)
+        if isinstance(node, ast.Attribute):
+            return self.resolve_dotted(mod, mod.full(node), depth + 1)
+        return ("unknown", mod.src(node)[:60])
+
+    def resolve_dotted(self, mod: Module, dotted: str, depth=0):
+        lead = len(dotted) - len(dotted.lstrip("."))
+        parts = dotted.lstrip(".").split(".")
+        for cut in range(len(parts), 0, -1):          # longest module prefix that is a repo file
+            target = self.find("." * lead + ".".join(parts[:cut]), mod)
+            if target is None:
+                continue
+            rest = parts[cut:]
+            if not rest:
+                return ("module", target)
+            if len(rest) == 1:
+                return self.resolve(target, ast.Name(id=rest[0]), depth + 1)
+            return ("unknown", dotted)
+        return ("external", dotted.lstrip("."))
+
+
+class Reach:
+    """What one tool can do: capability occurrences, each with the guards in front of it."""
+
+    def __init__(self):
+        self.caps = []          # [(cat, where, [Guard])]
+        self.unresolved = []    # reasons the audit could not follow the tool
+
+    def merge(self, other, extra_guards=()):
+        self.caps += [(c, w, list(g) + list(extra_guards)) for c, w, g in other.caps]
+        self.unresolved += other.unresolved
+
+
+def _taint(fn, tainted) -> set:
+    """Names inside `fn` that carry its input (parameters and anything assigned from them)."""
+    tainted = set(tainted)
+    for _ in range(3):
+        for n in ast.walk(fn):
+            if isinstance(n, (ast.Assign, ast.AnnAssign, ast.AugAssign)) and n.value is not None and _uses(n.value, tainted):
+                for t in (n.targets if isinstance(n, ast.Assign) else [n.target]):
+                    tainted |= {x.id for x in ast.walk(t) if isinstance(x, ast.Name)}
+            elif isinstance(n, (ast.For, ast.AsyncFor, ast.comprehension)) and _uses(n.iter, tainted):
+                tainted |= {x.id for x in ast.walk(n.target) if isinstance(x, ast.Name)}
+            elif isinstance(n, (ast.With, ast.AsyncWith)):
+                for item in n.items:
+                    if item.optional_vars is not None and _uses(item.context_expr, tainted):
+                        tainted |= {x.id for x in ast.walk(item.optional_vars) if isinstance(x, ast.Name)}
+    return tainted
+
+
+def _cover_text(idx: Index, mod: Module, test, fn=None):
+    """Source of a guard condition with the local variables, constants and helpers it uses expanded.
+    Returns (text, unresolved): unresolved names a call in the condition the audit cannot read."""
+    text, unresolved, seen, seen_calls = mod.src(test), "", set(), set()
+    local = {}
+    if fn is not None:
+        for n in ast.walk(fn):
+            if isinstance(n, ast.Assign):
+                for t in n.targets:
+                    if isinstance(t, ast.Name):
+                        local.setdefault(t.id, n.value)
+    todo = [test]
+    while todo:
+        node = todo.pop()
+        for n in ast.walk(node):
+            if isinstance(n, ast.Name) and n.id not in seen:
+                seen.add(n.id)
+                if n.id in local:
+                    text += " " + mod.src(local[n.id]); todo.append(local[n.id]); continue
+                kind = idx.resolve(mod, n)
+                if kind[0] in ("value", "def"):
+                    text += " " + kind[1].src(kind[2])
+                    if kind[1] is mod and len(seen) < 40:
+                        todo.append(kind[2])     # a helper's own constants decide too (e.g. is_secret -> SECRET_PART)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id not in _BUILTIN_SAFE \
+                    and n.func.id not in local and n.func.id not in seen_calls:
+                seen_calls.add(n.func.id)
+                kind = idx.resolve(mod, n.func)
+                if kind[0] != "def" and not (kind[0] == "external" and kind[1].split(".")[0] in SAFE_HEADS):
+                    unresolved = f"{mod.where(n)} {mod.full(n.func)}(...) decides, and the audit cannot read it"
+    return text, unresolved
+
+
+def _refusal_from_if(idx, mod, node: ast.If, label, fn=None):
+    text, unresolved = _cover_text(idx, mod, node.test, fn)
+    names = set()
+    is_name = lambda e: bool(re.search(r"(tool_name|\.name|\[[\"']name[\"']\])\s*$", mod.src(e)))
+    consts = lambda e: {x.value for x in (e.elts if isinstance(e, (ast.Tuple, ast.List, ast.Set)) else [e])
+                        if isinstance(x, ast.Constant) and isinstance(x.value, str)}
+    for cmp in (n for n in ast.walk(node.test) if isinstance(n, ast.Compare) and len(n.ops) == 1):
+        left, right, op = cmp.left, cmp.comparators[0], cmp.ops[0]
+        if isinstance(op, (ast.Eq, ast.In)) and is_name(left):
+            names |= consts(right)
+        elif isinstance(op, ast.Eq) and is_name(right):
+            names |= consts(left)
+    return Guard("refusal", mod.where(node), label, secret=bool(re.search(SECRET_RX, text)),
+                 destructive=bool(re.search(DESTRUCTIVE_RX, text)), path=bool(re.search(PATH_RX, text)),
+                 unresolved=unresolved, tools=names or None)
+
+
+def _is_refusal_body(body, kind) -> bool:
+    for st in body:
+        if kind == "early" and isinstance(st, (ast.Return, ast.Raise, ast.Continue)):
+            return True
+        if kind == "false" and isinstance(st, ast.Return) and isinstance(st.value, ast.Constant) and st.value.value is False:
+            return True
+        if kind == "dict" and isinstance(st, ast.Return) and isinstance(st.value, ast.Dict):
+            return True
+        if kind == "cancel" and isinstance(st, ast.Assign) and any(isinstance(t, ast.Attribute) and t.attr == "cancel_tool" for t in st.targets):
+            return True
+        if kind == "deny" and isinstance(st, ast.Return) and st.value is not None and "deny" in ast.dump(st.value):
+            return True
     return False
 
 
-def analyse_surface(r: "Repo", files) -> dict:
-    """Static facts about one framework surface: explicit tool lists, broad tools and gates, each with file:line."""
-    pyfiles = [f for f in files if f.suffix == ".py"]
-    trees, funcs, named_lists = {}, {}, {}
-    for f in pyfiles:
-        try:
-            trees[f] = ast.parse(r.text(f) or "")
-        except SyntaxError:
+def function_reach(idx: Index, mod: Module, fn, tainted=None, depth=0) -> Reach:
+    """Follow the data a tool receives into calls that run commands, write or read files, fetch or use a computer."""
+    reach = Reach()
+    if tainted is None:
+        tainted = {a.arg for a in fn.args.args + fn.args.kwonlyargs + ([fn.args.vararg] if fn.args.vararg else [])
+                   + ([fn.args.kwarg] if fn.args.kwarg else [])} - TAINT_SKIP
+    tainted = _taint(fn, tainted)
+    refusals = [(n.lineno, _refusal_from_if(idx, mod, n, "inline refusal (early return)", fn))
+                for n in ast.walk(fn) if isinstance(n, ast.If) and _uses(n.test, tainted) and _is_refusal_body(n.body, "early")]
+
+    def before(line):
+        return [g for l, g in refusals if l < line]
+
+    def add(cat, node):
+        if not any(c == cat and w == mod.where(node) for c, w, _ in reach.caps):
+            reach.caps.append((cat, mod.where(node), before(node.lineno)))
+
+    for call in (n for n in ast.walk(fn) if isinstance(n, ast.Call)):
+        full = mod.full(call.func)
+        head = full.split(".")[0]
+        args = list(call.args) + [k.value for k in call.keywords]
+        hit = any(_uses(a, tainted) for a in args)
+        on_tainted = isinstance(call.func, ast.Attribute) and _uses(call.func.value, tainted)
+        if head in COMPUTER_HEADS:
+            add("computer", call); continue
+        if not hit and not on_tainted:
             continue
-        for n in ast.walk(trees[f]):
-            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                funcs.setdefault(n.name, (f, n))
-            elif isinstance(n, ast.Assign) and isinstance(n.value, (ast.List, ast.Tuple)):
-                for t in n.targets:   # TOOLS = [a, b] passed later as tools=TOOLS
-                    if isinstance(t, ast.Name):
-                        named_lists.setdefault(t.id, n.value)
-    lists, cats, gate, secret, destructive = [], {}, None, None, None
-    approval = False
+        attr = call.func.attr if isinstance(call.func, ast.Attribute) else ""
+        if attr and isinstance(call.func.value, ast.Call) and attr not in WRITE_ATTRS | READ_ATTRS:
+            continue     # e.g. urlopen(url).read(): the inner call is the capability
+        if full in SHELL_FUNCS or full.split(".")[-1] in ("system", "popen") and head == "os":
+            add("shell", call)
+        elif full in ("open", "io.open", "builtins.open", "codecs.open"):
+            mode = call.args[1] if len(call.args) > 1 else next((k.value for k in call.keywords if k.arg == "mode"), None)
+            m = mode.value if isinstance(mode, ast.Constant) and isinstance(mode.value, str) else "r"
+            if call.args and _uses(call.args[0], tainted):
+                add("write" if any(c in m for c in "wax+") else "read", call)
+        elif on_tainted and attr in WRITE_ATTRS:
+            add("write", call)
+        elif on_tainted and attr in READ_ATTRS:
+            add("read", call)
+        elif full in WRITE_FUNCS:
+            add("write", call)
+        elif head in FETCH_HEADS or full.startswith("urllib.request") or full.endswith("urlopen") or full.endswith("urlretrieve"):
+            add("fetch", call)
+        elif isinstance(call.func, ast.Attribute) and not on_tainted and full.split(".")[0] not in mod.alias:
+            continue     # a method on some local object: not followed (data methods such as dict.get)
+        elif full in SAFE_CALLS or head in SAFE_HEADS or full in _BUILTIN_SAFE or on_tainted:
+            continue
+        else:
+            kind = idx.resolve(mod, call.func) if isinstance(call.func, (ast.Name, ast.Attribute)) else ("unknown", full)
+            if kind[0] == "def" and depth < 4:
+                callee_mod, callee = kind[1], kind[2]
+                params = [a.arg for a in callee.args.args]
+                passed = set()
+                for i, a in enumerate(call.args):
+                    if i < len(params) and _uses(a, tainted):
+                        passed.add(params[i])
+                for k in call.keywords:
+                    if k.arg and _uses(k.value, tainted):
+                        passed.add(k.arg)
+                reach.merge(function_reach(idx, callee_mod, callee, passed or set(params), depth + 1), before(call.lineno))
+            elif kind[0] == "external" and kind[1].split(".")[0] in SAFE_HEADS:
+                continue
+            else:
+                reach.unresolved.append(f"{mod.where(call)} {full}(...) receives the tool's input and the audit cannot follow it")
+    return reach
 
-    def where(f, line):
-        return f"{r.rel(f)}:{line}"
 
-    def note(cat, f, line, what):
-        cats.setdefault(cat, f"{where(f, line)} {what} ({CATEGORY_WORDS[cat]})")
+def _decorator_guards(idx, mod, fn):
+    guards, name = [], fn.name
+    for d in fn.decorator_list:
+        if isinstance(d, ast.Call):
+            for c in d.args[:1]:
+                if isinstance(c, ast.Constant) and isinstance(c.value, str):
+                    name = c.value          # @tool("name") / SDK @tool("name", ...)
+            for k in d.keywords:
+                if k.arg == "needs_approval" and isinstance(k.value, ast.Constant) and k.value.value is True:
+                    guards.append(Guard("approval", mod.where(k.value), "needs_approval=True"))
+                if k.arg == "approval_mode" and isinstance(k.value, ast.Constant) and k.value.value == "always_require":
+                    guards.append(Guard("approval", mod.where(k.value), 'approval_mode="always_require"'))
+                if k.arg in ("tool_input_guardrails", "input_guardrails") and isinstance(k.value, (ast.List, ast.Tuple)):
+                    for el in k.value.elts:
+                        guards += _callable_guards(idx, mod, el, "tool input guardrail", ("early", "dict", "false", "deny"))
+    return guards, name
 
-    for f, tree in trees.items():
-        text = r.text(f)
-        for n in ast.walk(tree):
-            if isinstance(n, ast.Call):
-                fname = _dotted(n.func).split(".")[-1]
-                seqs = [k.value for k in n.keywords if k.arg in ("tools", "allowed_tools")]
-                if fname in ("create_agent", "create_react_agent") and len(n.args) > 1:
-                    seqs.append(n.args[1])
-                for seq in seqs:
-                    if isinstance(seq, ast.Name) and seq.id in named_lists:
-                        seq = named_lists[seq.id]
-                    if not isinstance(seq, (ast.List, ast.Tuple)):
-                        continue
-                    lists.append(where(f, seq.lineno))
-                    for el in seq.elts:
-                        if isinstance(el, ast.Constant) and isinstance(el.value, str):
-                            tool = el.value.split("(")[0]
-                            if tool in SDK_TOOL_CATS:
-                                note(SDK_TOOL_CATS[tool], f, el.lineno, el.value)
-                            elif "computer" in tool.lower():
-                                note("computer", f, el.lineno, el.value)
+
+def _callable_guards(idx, mod, node, label, kinds) -> list:
+    """A guard given as a function or object: read every refusing condition, or mark it unresolved.
+    Conditions that apply to every tool are combined into one guard (a hook that refuses secrets in one `if` and
+    destructive commands in another covers both); conditions limited to named tools stay separate guards."""
+    kind = idx.resolve(mod, node.func if isinstance(node, ast.Call) else node)
+    if kind[0] != "def":
+        return [Guard("refusal", mod.where(node), label, unresolved=f"{mod.where(node)} {mod.src(node)[:50]} is not followed by the audit")]
+    gm, fn = kind[1], kind[2]
+    tainted = _taint(fn, {a.arg for a in fn.args.args + fn.args.kwonlyargs} - {"self"})
+    found = [_refusal_from_if(idx, gm, n, label, fn) for n in ast.walk(fn)
+             if isinstance(n, ast.If) and any(_is_refusal_body(n.body, k) for k in kinds) and _uses(n.test, tainted)]
+    if not found:
+        return [Guard("refusal", gm.where(fn), label, unresolved=f"{gm.where(fn)} {fn.name} never refuses a call that the audit can see")]
+    general = [g for g in found if g.tools is None]
+    specific = [g for g in found if g.tools is not None]
+    out = []
+    if general:
+        readable = [g for g in general if not g.unresolved]
+        if readable:
+            out.append(Guard("refusal", readable[0].where, label, secret=any(g.secret for g in readable),
+                             destructive=any(g.destructive for g in readable), path=any(g.path for g in readable)))
+        else:
+            out.append(general[0])
+    return out + specific
+
+
+def _callable_guard(idx, mod, node, label, kinds):
+    """The guard a callable gives every tool (the first guard when all are tool-specific)."""
+    return _callable_guards(idx, mod, node, label, kinds)[0]
+
+
+def tool_reach(idx: Index, mod: Module, el):
+    """(name, Reach, [Guard]) for one entry of an agent's tool list."""
+    reach = Reach()
+    if isinstance(el, ast.Starred):
+        reach.unresolved.append(f"{mod.where(el)} *{mod.src(el.value)} spreads a tool list the audit does not follow")
+        return mod.src(el), reach, []
+    label = mod.src(el)[:60]
+    target = el.func if isinstance(el, ast.Call) else el
+    last = _dotted(target).split(".")[-1]
+    for rx, cat in NATIVE_BROAD:
+        if re.match(rx, last):
+            reach.caps.append((cat, mod.where(el), []))
+            return last, reach, []
+    kind = idx.resolve(mod, target)
+    for _ in range(3):
+        if kind[0] == "value" and isinstance(kind[2], (ast.Name, ast.Attribute, ast.Call)):
+            nxt = kind[2].func if isinstance(kind[2], ast.Call) else kind[2]
+            last = _dotted(nxt).split(".")[-1]
+            for rx, cat in NATIVE_BROAD:
+                if re.match(rx, last):
+                    reach.caps.append((cat, mod.where(el), []))
+                    return last, reach, []
+            kind = idx.resolve(kind[1], nxt)
+    if kind[0] == "def":
+        fmod, fn = kind[1], kind[2]
+        guards, name = _decorator_guards(idx, fmod, fn)
+        reach.merge(function_reach(idx, fmod, fn))
+        return name, reach, guards
+    if kind[0] == "class":
+        cmod, cls = kind[1], kind[2]
+        meth = next((m for m in cls.body if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef))
+                     and m.name in ("_run", "_arun", "run", "__call__", "forward", "invoke")), None)
+        if meth:
+            reach.merge(function_reach(idx, cmod, meth))
+            return cls.name, reach, []
+    reach.unresolved.append(f"{mod.where(el)} {label} ({kind[1] if len(kind) == 2 else kind[0]}) is not followed by the audit")
+    return label, reach, []
+
+
+def _tool_list(idx, mod, node):
+    if isinstance(node, ast.Name):
+        k = idx.resolve(mod, node)
+        if k[0] == "value":
+            return k[1], k[2]
+    return mod, node
+
+
+def _kw(call, name):
+    return next((k.value for k in call.keywords if k.arg == name), None)
+
+
+def _agent_guards(idx: Index, mod: Module, call: ast.Call, track: str) -> list:
+    guards = []
+    if track == "langgraph":
+        mw = _kw(call, "middleware")
+        if mw is not None:
+            lmod, lst = _tool_list(idx, mod, mw)
+            for el in (lst.elts if isinstance(lst, (ast.List, ast.Tuple)) else [lst]):
+                k = idx.resolve(lmod, el) if not isinstance(el, ast.Call) else ("value", lmod, el)
+                if k[0] == "value" and isinstance(k[2], ast.Call) and _dotted(k[2].func).endswith("HumanInTheLoopMiddleware"):
+                    io = _kw(k[2], "interrupt_on")
+                    names = {kk.value for kk, vv in zip(io.keys, io.values)
+                             if isinstance(kk, ast.Constant) and not (isinstance(vv, ast.Constant) and vv.value is False)} if isinstance(io, ast.Dict) else None
+                    guards.append(Guard("approval", k[1].where(k[2]), "HumanInTheLoopMiddleware", tools=names))
+                else:
+                    guards.append(Guard("refusal", lmod.where(el), "middleware", unresolved=f"{lmod.where(el)} middleware {lmod.src(el)[:40]} is not read by the audit"))
+        ib = _kw(call, "interrupt_before")
+        if isinstance(ib, (ast.List, ast.Tuple)) and any(isinstance(e, ast.Constant) and e.value == "tools" for e in ib.elts):
+            guards.append(Guard("approval", mod.where(ib), "interrupt_before=['tools']"))
+    elif track == "strands-agents":
+        hooks = _kw(call, "hooks")
+        if hooks is not None:
+            hmod, lst = _tool_list(idx, mod, hooks)
+            for el in (lst.elts if isinstance(lst, (ast.List, ast.Tuple)) else [lst]):
+                k = idx.resolve(hmod, el.func if isinstance(el, ast.Call) else el)
+                if k[0] == "class":
+                    cm, cls = k[1], k[2]
+                    methods = {m.name: m for m in cls.body if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef))}
+                    found = False
+                    for c in (n for n in ast.walk(cls) if isinstance(n, ast.Call) and _dotted(n.func).endswith("add_callback")):
+                        if c.args and _dotted(c.args[0]).endswith("BeforeToolCallEvent") and len(c.args) > 1:
+                            mname = _dotted(c.args[1]).split(".")[-1]
+                            m = methods.get(mname)
+                            if m:
+                                found = True
+                                ifs = [n for n in ast.walk(m) if isinstance(n, ast.If) and _is_refusal_body(n.body, "cancel")]
+                                guards += [_refusal_from_if(idx, cm, n, "BeforeToolCallEvent cancel_tool", m) for n in ifs] or \
+                                    [Guard("refusal", cm.where(m), "hook", unresolved=f"{cm.where(m)} hook never cancels a call the audit can see")]
+                    if not found:
+                        guards.append(Guard("refusal", hmod.where(el), "hook provider", unresolved=f"{hmod.where(el)} hook provider registers no BeforeToolCallEvent callback the audit can read"))
+                else:
+                    guards.append(Guard("refusal", hmod.where(el), "hook", unresolved=f"{hmod.where(el)} hook {hmod.src(el)[:40]} is not followed"))
+    elif track == "google-adk":
+        cb = _kw(call, "before_tool_callback")
+        if cb is not None:
+            guards += _callable_guards(idx, mod, cb, "before_tool_callback", ("dict",))
+    elif track == "microsoft-agent-framework":
+        mw = _kw(call, "middleware")
+        if mw is not None:
+            mmod, lst = _tool_list(idx, mod, mw)
+            for el in (lst.elts if isinstance(lst, (ast.List, ast.Tuple)) else [lst]):
+                for g in _callable_guards(idx, mmod, el, "function middleware", ("early",)):
+                    if g.unresolved and "never refuses" in g.unresolved:
+                        continue   # an observing middleware (e.g. a trace) is not a guard and hides nothing
+                    guards.append(g)
+    elif track == "crewai":
+        for n in mod.tree.body:   # hooks registered in this module apply to its agents
+            if isinstance(n, ast.Expr) and isinstance(n.value, ast.Call) and _dotted(n.value.func).endswith("register_before_tool_call_hook") and n.value.args:
+                for g in _callable_guards(idx, mod, n.value.args[0], "before-tool-call hook", ("false",)):
+                    if not (g.unresolved and "never refuses" in g.unresolved):
+                        guards.append(g)
+        for n in ast.walk(mod.tree):  # Task(agent=this_agent, human_input=True)
+            if isinstance(n, ast.Call) and _dotted(n.func).split(".")[-1] == "Task":
+                hi = _kw(n, "human_input")
+                if isinstance(hi, ast.Constant) and hi.value is True:
+                    guards.append(Guard("approval", mod.where(hi), "human_input=True", tools=None))
+    return guards
+
+
+def _const_str(idx, mod, n, depth=0):
+    """A string the audit can read: a literal, a module constant, or an f-string of those. None otherwise."""
+    if depth > 4 or n is None:
+        return None
+    if isinstance(n, ast.Constant) and isinstance(n.value, str):
+        return n.value
+    if isinstance(n, ast.Name):
+        k = idx.resolve(mod, n)
+        return _const_str(idx, k[1], k[2], depth + 1) if k[0] == "value" else None
+    if isinstance(n, ast.JoinedStr):
+        parts = [_const_str(idx, mod, v.value if isinstance(v, ast.FormattedValue) else v, depth + 1) for v in n.values]
+        return None if None in parts else "".join(parts)
+    if isinstance(n, ast.BinOp) and isinstance(n.op, ast.Add):
+        a, b = _const_str(idx, mod, n.left, depth + 1), _const_str(idx, mod, n.right, depth + 1)
+        return None if a is None or b is None else a + b
+    return None
+
+
+def _str_list(idx, mod, n, depth=0):
+    """A list of strings the audit can read (literals, module constants, list + list). None otherwise."""
+    if depth > 4 or n is None:
+        return None
+    if isinstance(n, (ast.List, ast.Tuple)):
+        out = []
+        for e in n.elts:
+            if isinstance(e, ast.Starred):
+                sub = _str_list(idx, mod, e.value, depth + 1)
+                if sub is None:
+                    return None
+                out += sub
+            else:
+                v = _const_str(idx, mod, e, depth + 1)
+                if v is None:
+                    return None
+                out.append(v)
+        return out
+    if isinstance(n, ast.Name):
+        k = idx.resolve(mod, n)
+        return _str_list(idx, k[1], k[2], depth + 1) if k[0] == "value" else None
+    if isinstance(n, ast.BinOp) and isinstance(n.op, ast.Add):
+        a, b = _str_list(idx, mod, n.left, depth + 1), _str_list(idx, mod, n.right, depth + 1)
+        return None if a is None or b is None else a + b
+    return None
+
+
+def _matches(pattern, name):
+    try:
+        return bool(re.fullmatch(pattern, name))
+    except re.error:
+        return pattern == name
+
+
+def _unresolved_reach(why):
+    r = Reach()
+    r.unresolved.append(why)
+    return r
+
+
+def _sdk_agent(idx, mod, call):
+    """Claude Agent SDK options: built-in tools by name, permission rules, hooks and in-process MCP tools."""
+    tools_kw, allowed_kw = _kw(call, "tools"), _kw(call, "allowed_tools")
+    strs = lambda n: _str_list(idx, mod, n)
+    available = strs(tools_kw) if tools_kw is not None else list(CLAUDE_BUILTINS)
+    if available is None:
+        return [("tools", _unresolved_reach(f"{mod.where(call)} tools={mod.src(tools_kw)[:40]} is not a list the audit can read"), [])]
+    allowed = strs(allowed_kw) if allowed_kw is not None else []
+    if allowed is None:      # unknown auto-approvals: nothing can be assumed to need a person
+        allowed = list(available)
+    mode = _kw(call, "permission_mode")
+    mode = mode.value if isinstance(mode, ast.Constant) else "default"
+    deny_rules = strs(_kw(call, "disallowed_tools")) if _kw(call, "disallowed_tools") is not None else []
+    if deny_rules is None:   # an unreadable deny list removes nothing and refuses nothing
+        deny_rules = []
+    hooks_kw = _kw(call, "hooks")
+    hook_guards = []
+    if isinstance(hooks_kw, ast.Dict):
+        for k, v in zip(hooks_kw.keys, hooks_kw.values):
+            if not (isinstance(k, ast.Constant) and k.value == "PreToolUse") or not isinstance(v, (ast.List, ast.Tuple)):
+                continue
+            for hm in v.elts:
+                if not isinstance(hm, ast.Call):
+                    continue
+                matcher = _kw(hm, "matcher")
+                pattern = ".*" if matcher is None or (isinstance(matcher, ast.Constant) and matcher.value is None) \
+                    else _const_str(idx, mod, matcher)
+                hl = _kw(hm, "hooks")
+                for h in (hl.elts if isinstance(hl, (ast.List, ast.Tuple)) else []):
+                    for g in _callable_guards(idx, mod, h, "PreToolUse deny hook", ("deny",)):
+                        if g.unresolved and "never refuses" in g.unresolved:
                             continue
-                        name = _dotted(el).split(".")[-1]
-                        for rx, cat in NATIVE_BROAD:
-                            if re.match(rx, name):
-                                note(cat, f, el.lineno, name)
-                        if name in funcs:
-                            ff, fn = funcs[name]
-                            for cat, line in _fn_categories(fn).items():
-                                note(cat, ff, line, name)
-                for k in n.keywords:
-                    if k.arg == "allow_code_execution" and isinstance(k.value, ast.Constant) and k.value.value is True:
-                        note("shell", f, n.lineno, "allow_code_execution=True")
-                if fname == "register_before_tool_call_hook" and n.args and isinstance(n.args[0], ast.Name) \
-                        and n.args[0].id in funcs and _returns(funcs[n.args[0].id][1], "false"):
-                    gate = gate or f"{where(f, n.lineno)} before-tool-call hook that blocks (return False)"
-                for k in n.keywords:
-                    if k.arg == "before_tool_callback" and isinstance(k.value, ast.Name) and k.value.id in funcs \
-                            and _returns(funcs[k.value.id][1], "dict"):
-                        gate = gate or f"{where(f, k.value.lineno)} before_tool_callback that blocks (returns a dict)"
-        for i, line in enumerate(text.splitlines(), 1):
-            for rx, label in APPROVAL_RX:
-                if re.search(rx, line):
-                    gate, approval = gate or f"{where(f, i)} {label}", True
-            for rx, label in DENY_RX:
-                if re.search(rx, line):
-                    gate = gate or f"{where(f, i)} {label}"
-            if secret is None and re.search(SECRET_RX, line) and re.search(r"(re\.|compile|search|match|deny|SECRET|\[|\()", line):
-                secret = f"{where(f, i)}  {line.strip()[:70]}"
-            if destructive is None and re.search(DESTRUCTIVE_RX, line):
-                destructive = f"{where(f, i)}  {line.strip()[:70]}"
-    # functions decorated as tools but never listed still count when no explicit list exists
-    if not lists:
-        for name, (ff, fn) in funcs.items():
-            if any(_dotted(d).split(".")[-1].endswith("tool") for d in fn.decorator_list):
-                for cat, line in _fn_categories(fn).items():
-                    note(cat, ff, line, name)
-    return {"lists": lists, "cats": cats, "gate": gate, "approval": approval, "secret": secret, "destructive": destructive}
+                        if pattern is None:
+                            g = Guard("refusal", g.where, g.label, unresolved=f"{mod.where(matcher)} hook matcher {mod.src(matcher)[:40]} is not readable")
+                        hook_guards.append((pattern or ".*", g))
+    tools = []
+    for name in available + [a for a in allowed if a.startswith("mcp__") and a not in available]:
+        base = name.split("(")[0]
+        reach, guards = Reach(), []
+        if any(d.split("(")[0] == base and d.split("(")[1:] in ([], ["*)"], ["**)"]) for d in deny_rules):
+            continue     # removed entirely
+        cat = CLAUDE_TOOL_CATS.get(base) or ("computer" if "computer" in base.lower() else None)
+        if base.startswith("mcp__"):
+            fn = _sdk_mcp_tool(idx, mod, base)
+            if fn is None:
+                reach.unresolved.append(f"{mod.where(call)} {base} is not followed by the audit")
+            else:
+                fmod, f = fn
+                reach.merge(function_reach(idx, fmod, f))
+        elif cat:
+            reach.caps.append((cat, mod.where(call), []))
+        auto = base in allowed or name in allowed or mode == "bypassPermissions" or (mode == "acceptEdits" and cat == "write") \
+            or cat == "read"
+        if not auto:
+            guards.append(Guard("approval", mod.where(call), f"{base} not in allowed_tools (a person approves)"))
+        for d in deny_rules:
+            if d.split("(")[0] == base and "(" in d:
+                guards.append(Guard("refusal", mod.where(call), f"disallowed_tools {d}", secret=bool(re.search(SECRET_RX, d)),
+                                    destructive=bool(re.search(DESTRUCTIVE_RX, d))))
+        for pattern, g in hook_guards:      # the matcher picks the tools; a name test inside the hook narrows further
+            if _matches(pattern, base) and (g.tools is None or base in g.tools):
+                guards.append(g)
+        tools.append((base, reach, guards))
+    return tools
 
 
-def guard_results(tid: str, s: dict) -> dict:
-    """G1-G3 for a code framework surface. Same rule on every framework (see TRACK_SPEC / CHANGELOG 1.4.1)."""
-    name = TRACK_SIGNATURES[tid]["name"]
-    fix1, fix2, fix3 = GUARD_FIX[tid]
+def _sdk_mcp_tool(idx, mod, name):
+    _, server, tool = (name.split("__") + ["", ""])[:3]
+    for m in [mod] + [idx.module(p) for p in idx.files.values()]:
+        for n in ast.walk(m.tree):
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                for d in n.decorator_list:
+                    if isinstance(d, ast.Call) and d.args and isinstance(d.args[0], ast.Constant) and d.args[0].value == tool:
+                        return m, n
+    return None
+
+
+def find_agents(idx: Index, tid: str, files) -> list:
+    """Agents of one framework: (label, where, [(tool name, Reach, [Guard])], [agent Guard], problem)."""
+    agents = []
+    for f in files:
+        if f.suffix != ".py":
+            continue
+        mod = idx.module(f)
+        if mod.framework() != tid:
+            continue
+        for call in (n for n in ast.walk(mod.tree) if isinstance(n, ast.Call)):
+            ctor = mod.full(call.func)
+            last = ctor.split(".")[-1]
+            if last not in AGENT_CTORS:
+                continue
+            fw = next((t for p, t in FRAMEWORK_OF if ctor == p or ctor.startswith(p + ".")), mod.framework())
+            if fw != tid:
+                continue
+            label = next((k.value.value for k in call.keywords if k.arg in ("name", "role") and isinstance(k.value, ast.Constant)), last)
+            if tid == "claude-agent-sdk":
+                if last != "ClaudeAgentOptions":
+                    continue
+                agents.append((label, mod.where(call), _sdk_agent(idx, mod, call), [], ""))
+                continue
+            tl = _kw(call, "tools")
+            if tl is None and last in ("create_agent", "create_react_agent") and len(call.args) > 1:
+                tl = call.args[1]
+            tools, problem = [], ""
+            if tl is None:
+                problem = "" if tid == "crewai" or last == "ChatAgent" else ""
+            else:
+                lmod, lst = _tool_list(idx, mod, tl)
+                if isinstance(lst, (ast.List, ast.Tuple)):
+                    tools = [tool_reach(idx, lmod, el) for el in lst.elts]
+                else:
+                    problem = f"{mod.where(tl)} tool list {mod.src(tl)[:40]} is not a literal list the audit can read"
+            for k in call.keywords:
+                if k.arg == "allow_code_execution" and isinstance(k.value, ast.Constant) and k.value.value is True:
+                    r_ = Reach(); r_.caps.append(("shell", mod.where(k.value), []))
+                    tools.append(("allow_code_execution", r_, []))
+            agents.append((label, mod.where(call), tools, _agent_guards(idx, mod, call, tid), problem))
+    return agents
+
+
+RANK = {"MISSING": 3, "UNRESOLVED": 2, "DECLARED": 1, "VERIFIED": 0}
+
+
+def judge_agent(agent) -> dict:
+    """G1-G3 for one agent, by the same rule on every framework."""
+    label, where, tools, aguards, problem = agent
     out = {}
-    lst = s["lists"][0] if s["lists"] else ""
-    broad = s["cats"]
-    if not lst:
-        out["G1"] = ("MISSING", "", f"{name}: no explicit tool list found. {fix1}")
-    elif not broad:
-        out["G1"] = ("VERIFIED", f"{lst} explicit tool list; no shell, file-write, web or computer tool", fix1)
-    elif s["gate"]:
-        out["G1"] = ("VERIFIED", f"{lst} tool list; broad tools gated: {s['gate']}", fix1)
-    else:
-        out["G1"] = ("MISSING", "; ".join(broad.values()), f"{name}: {fix1}")
-    risky2 = {c: v for c, v in broad.items() if c in G2_CATS}
-    if not risky2 and lst:
-        out["G2"] = ("VERIFIED", f"{lst} no tool can read files, run commands, fetch URLs or use a computer", fix2)
-    elif risky2 and s["gate"] and s["secret"]:
-        out["G2"] = ("VERIFIED", f"{s['gate']}; secret paths refused at {s['secret']}", fix2)
-    else:
-        out["G2"] = ("MISSING", "; ".join(risky2.values()), f"{name}: {fix2}")
-    risky3 = {c: v for c, v in broad.items() if c in G3_CATS}
-    if not risky3 and lst:
-        out["G3"] = ("VERIFIED", f"{lst} no tool can run commands, write anywhere or use a computer", fix3)
-    elif risky3 and s["gate"] and (s["approval"] or s["destructive"]):
-        out["G3"] = ("VERIFIED", f"{s['gate']}" + (f"; destructive commands refused at {s['destructive']}" if s["destructive"] and not s["approval"] else ""), fix3)
-    else:
-        out["G3"] = ("MISSING", "; ".join(risky3.values()), f"{name}: {fix3}")
+    for cid, cats in (("G1", G1_CATS), ("G2", G2_CATS), ("G3", G3_CATS)):
+        bad, unclear, good = [], [], []
+        if problem:
+            unclear.append(problem)
+        for name, reach, tguards in tools:
+            gs = list(tguards) + [g for g in aguards if g.tools is None or name in g.tools]
+            approved = [g for g in gs if g.kind == "approval" and not g.unresolved]
+            if reach.unresolved and not approved:
+                unclear += reach.unresolved
+            for cat, w, inline in reach.caps:
+                if cat not in cats:
+                    continue
+                verdicts = [g.covers(cid, cat) for g in gs + inline]
+                words = CATEGORY_WORDS[cat]
+                if any(v is True for v in verdicts):
+                    g = next(g for g, v in zip(gs + inline, verdicts) if v is True)
+                    good.append(f"{name} ({words}) at {w} guarded by {g.label} {g.where}")
+                elif any(v is None for v in verdicts):
+                    g = next(g for g, v in zip(gs + inline, verdicts) if v is None)
+                    unclear.append(f"{name} ({words}) at {w}: {g.unresolved}")
+                else:
+                    bad.append(f"{name} ({words}) at {w} has no guard that " +
+                               {"G1": "refuses or approves it", "G2": "keeps secrets out", "G3": "stops destructive use"}[cid])
+        head = f"{where} {label}"
+        if bad:
+            out[cid] = ("MISSING", f"{head}: " + "; ".join(bad[:4]))
+        elif unclear:
+            out[cid] = ("UNRESOLVED", f"{head}: " + "; ".join(unclear[:3]))
+        elif good:
+            out[cid] = ("VERIFIED", f"{head}: " + "; ".join(good[:4]))
+        else:
+            names = ", ".join(n for n, _, _ in tools) or "no tools"
+            out[cid] = ("VERIFIED", f"{head}: tools [{names}]; no " +
+                        {"G1": "shell, file-write, web or computer capability",
+                         "G2": "tool can read files, run commands, fetch URLs or use a computer",
+                         "G3": "tool can run commands, write anywhere or use a computer"}[cid])
+    return out
+
+
+def guard_results(idx: Index, tid: str, files) -> dict:
+    """G1-G3 for a framework surface: every agent must pass; agents never share guards."""
+    name = TRACK_SIGNATURES[tid]["name"]
+    fixes = GUARD_FIX[tid]
+    agents = find_agents(idx, tid, files)
+    out = {}
+    for i, cid in enumerate(("G1", "G2", "G3")):
+        if not agents:
+            out[cid] = ("MISSING", "", f"{name}: no agent with an explicit tool list found. {fixes[i]}")
+            continue
+        res = [judge_agent(a)[cid] for a in agents]
+        st = max((s for s, _ in res), key=RANK.get)
+        ev = "; ".join(e for _, e in res)
+        out[cid] = (st, ev, f"{name}: {fixes[i]}" + (" Where the audit cannot follow a tool or guard, make it a plain function "
+                                                     "in this repo or state it in docs/IMPACT.md." if st == "UNRESOLVED" else ""))
+    return out
+
+
+# ------------------------------------------------------------------ Claude Code settings (1.4.2)
+def claude_results(r: "Repo", settings) -> dict:
+    """G1-G3 from .claude/settings*.json by the same rule: each built-in tool is removed, gated or ungated."""
+    perms, mode, sandbox_auto = {"allow": [], "deny": [], "ask": []}, "default", False
+    lines = {}
+    for p in settings:
+        try:
+            data = json.loads(r.text(p) or "{}")
+        except json.JSONDecodeError:
+            continue
+        pm = data.get("permissions", {}) or {}
+        for k in perms:
+            perms[k] += [x for x in pm.get(k, []) or [] if isinstance(x, str)]
+        mode = pm.get("defaultMode", mode)
+        sb = data.get("sandbox", {}) or {}
+        sandbox_auto = sandbox_auto or bool(sb.get("enabled") and sb.get("autoAllowBashIfSandboxed"))
+        for i, line in enumerate(r.text(p).splitlines(), 1):
+            lines.setdefault(line.strip().strip(",").strip('"'), f"{r.rel(p)}:{i}")
+
+    first = f"{r.rel(settings[0])}:1" if settings else ""
+
+    def at(rule):
+        return lines.get(rule, first)
+
+    def rules(kind, tool):
+        return [x for x in perms[kind] if x.split("(")[0] == tool or (tool.startswith("mcp__") and x.startswith(tool))]
+
+    whole = lambda x: "(" not in x or x.split("(", 1)[1].rstrip(")") in ("*", "**", "")
+    meaningful = [x for x in perms["deny"] if x.split("(")[0] in CLAUDE_TOOL_CATS and (whole(x) or re.search(SECRET_RX, x) or re.search(DESTRUCTIVE_RX, x))] \
+        + [x for x in perms["ask"] if x.split("(")[0] in CLAUDE_TOOL_CATS and CLAUDE_TOOL_CATS[x.split("(")[0]] in G1_CATS]
+    computer = sorted({x.split("(")[0] for x in perms["allow"] + perms["ask"] if "computer" in x.lower()})
+    tools = []
+    for tool in CLAUDE_BUILTINS + computer:
+        cat = CLAUDE_TOOL_CATS.get(tool, "computer")
+        if any(whole(x) for x in rules("deny", tool)):
+            continue
+        guards = []
+        if rules("ask", tool):
+            guards.append(Guard("approval", at(rules("ask", tool)[0]), f"ask {rules('ask', tool)[0]}"))
+        else:
+            auto = cat == "read" or bool(rules("allow", tool)) or mode in ("bypassPermissions", "dontAsk") \
+                or (mode == "acceptEdits" and cat == "write") or (tool == "Bash" and sandbox_auto)
+            if not auto:
+                guards.append(Guard("approval", first, f"{tool} needs approval (not in allow, default mode)"))
+        for x in rules("deny", tool):
+            guards.append(Guard("refusal", at(x), f"deny {x}", secret=bool(re.search(SECRET_RX, x)), destructive=bool(re.search(DESTRUCTIVE_RX, x))))
+        if cat == "read":   # Read deny rules also bind Grep and Glob
+            for x in rules("deny", "Read"):
+                if tool != "Read":
+                    guards.append(Guard("refusal", at(x), f"deny {x}", secret=bool(re.search(SECRET_RX, x))))
+        reach = Reach()
+        reach.caps.append((cat, at(rules("allow", tool)[0]) if rules("allow", tool) else first, []))
+        tools.append((tool, reach, guards))
+    res = judge_agent(("Claude Code", first, tools, [], ""))
+    fixes = ("Add permissions.deny for secrets and destructive commands, and deny or ask for broad tools you allow (Bash, Write, WebFetch).",
+             "Deny Read of .env*, *.pem, *.key, ~/.ssh/**, ~/.aws/** (it also binds Grep and Glob), and gate every allowed web or shell tool.",
+             "Deny or require approval for git push, reset --hard, rm -rf, and for Write/Edit if you allow them.")
+    out = {}
+    for i, cid in enumerate(("G1", "G2", "G3")):
+        st, ev = res[cid]
+        if cid == "G1" and not meaningful and st == "VERIFIED":
+            st, ev = "MISSING", f"{r.rel(settings[0])}: no deny or ask rule restricts a tool (an empty or missing deny list is no guard)"
+        elif cid == "G1" and not meaningful:
+            ev += f"; and no deny or ask rule restricts a tool"
+        out[cid] = (st, ev, fixes[i])
     return out
 
 
@@ -597,21 +1249,16 @@ def audit(root: Path) -> Report:
     # track. A check passes only when every surface passes it. Declared evidence (assess-only tracks) earns half.
     claude_g = {}
     deny = r.grep_any(settings, r"\"deny\"")
-    claude_g["G1"] = ("VERIFIED" if deny else "MISSING", deny, "Add .claude/settings.json permissions.deny for secrets and destructive commands.")
-    secrets_hit = r.grep_any(settings, r"Read\([^)]*(\.env|\.pem|\.key|\.ssh|\.aws)")
-    secrets = bool(re.search(r"Read\([^)]*(\.env|\.pem|\.key|\.ssh|\.aws)", settings_t))
-    claude_g["G2"] = ("VERIFIED" if secrets else "MISSING", secrets_hit, "Deny Read of .env*, *.pem, *.key, ~/.ssh/**, ~/.aws/**.")
-    destructive = bool(re.search(r"Bash\(\s*(git push|git reset --hard|rm -rf)", settings_t))
-    claude_g["G3"] = ("VERIFIED" if destructive else "MISSING", r.grep_any(settings, r"Bash\(\s*(git push|git reset --hard|rm -rf)"),
-                      "Deny or require approval for git push, reset --hard, rm -rf.")
+    claude_g["G1"] = ("MISSING", deny, "Add .claude/settings.json permissions.deny for secrets and destructive commands.")
+    claude_g["G2"] = ("MISSING", "", "Deny Read of .env*, *.pem, *.key, ~/.ssh/**, ~/.aws/**.")
+    claude_g["G3"] = ("MISSING", "", "Deny or require approval for git push, reset --hard, rm -rf.")
     surfaces = []
     if settings:
-        surfaces.append(("claude-code", claude_g))
-    surface_facts = {}
+        surfaces.append(("claude-code", claude_results(r, settings)))
+    idx = Index(r)
     for tid in sorted(tracks):
         if TRACK_SIGNATURES[tid]["support"] == "full":
-            surface_facts[tid] = analyse_surface(r, tracks[tid])
-            surfaces.append((tid, guard_results(tid, surface_facts[tid])))
+            surfaces.append((tid, guard_results(idx, tid, tracks[tid])))
         else:
             surfaces.append((tid, declared_results(r, tid)))
     titles = {"G1": ("Permission deny rules exist", 3), "G2": ("Secrets are denied to the agent (.env, keys, credential folders)", 3),
@@ -630,7 +1277,7 @@ def audit(root: Path) -> Report:
         ev = "; ".join((f"[{tid}] " if many else "") + e for tid, st_, e, _ in res if e)
         failing = [f for _, st_, _, f in res if st_ != "VERIFIED"]
         fx = " | ".join(failing) or (res[0][3] if not many else " | ".join(f for _, _, _, f in res))
-        status = "MISSING" if any(x[1] == "MISSING" for x in res) else "DECLARED" if any(x[1] == "DECLARED" for x in res) else "VERIFIED"
+        status = max((x[1] for x in res), key=RANK.get)
         c = Check(cid, A, title, weight, fix=fx)
         c.status, c.evidence = status, ev
         checks.append(c)

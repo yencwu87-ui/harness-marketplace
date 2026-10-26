@@ -1,8 +1,15 @@
-"""Fairness matrix for harness-audit's guard checks (G1-G3): the same guard quality earns the same points on
-every supported framework, and the same broad capability loses the same points.
+"""Fairness tests for harness-audit's guard checks (G1-G3), written around the invariant rather than around which
+mechanism names appear:
 
-Every fixture is a tiny repo written to a temp folder. The audit only reads it: one test patches
-subprocess, exec and import machinery while auditing a repo whose code would fail loudly if it ran.
+  * the same guard behaviour earns the same points on every track, and the same unguarded capability loses the
+    same points;
+  * a guard earns credit only where it is attached to the agent and tool being scored and covers that capability;
+  * what the audit cannot resolve statically is UNRESOLVED, never VERIFIED;
+  * the audit never imports or runs the repo it audits.
+
+Points: G1 3 (every broad tool gated), G2 3 (every tool that can reach or send secrets refuses them or needs a
+person), G3 2 (every tool that can destroy or change things irreversibly refuses that or needs a person).
+Fixtures under tests/fixtures/codex_r1 come from Codex's round-1 review of 1.4.1 (see its README).
 """
 import builtins
 import importlib.util
@@ -17,356 +24,322 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 AUDIT = ROOT / "plugins/harness-audit/skills/audit/scripts/audit.py"
-CLAUDE_SETTINGS = ROOT / "plugins/harness-init/skills/init/templates/.claude/settings.json"
+FIX = ROOT / "tests/fixtures/codex_r1"
+CLAUDE_TEMPLATE = ROOT / "plugins/harness-init/skills/init/templates/.claude/settings.json"
 GUARD = ("G1", "G2", "G3")
-FULL_GUARD = 8  # G1 3 + G2 3 + G3 2
-
-# ------------------------------------------------------------------ fixtures
-NEXT_ITEM = '''
-def next_item() -> str:
-    """Return the next work item whose passes is false, as JSON."""
-    data = json.loads((REPO / "progress/feature_list.json").read_text())
-    return json.dumps(next((i for i in data["items"] if not i.get("passes")), {"done": True}))
+TRACKS = ["claude-code", "claude-agent-sdk", "microsoft-agent-framework", "google-adk", "langgraph",
+          "openai-agents-sdk", "crewai", "strands-agents"]
+EXPECTED = {"a": 8, "b": 0, "c": 2}   # c: shell guarded, web fetch not -> lose G1 and G2, keep G3
 
 
-def run_init() -> str:
-    """Run the project's smoke test and return the last 40 lines."""
-    p = subprocess.run(["bash", "init.sh"], cwd=REPO, capture_output=True, text=True, timeout=300)
-    return "\\n".join((p.stdout + p.stderr).splitlines()[-40:])
-'''
-
-BROAD = {  # category -> tool function source (the same body on every framework)
-    "shell": '''
-def run_shell(command: str) -> str:
-    """Run any shell command."""
-    return subprocess.run(command, shell=True, capture_output=True, text=True).stdout
-''',
-    "write": '''
-def write_file(path: str, content: str) -> str:
-    """Write any file."""
-    with open(path, "w") as f:
-        f.write(content)
-    return "ok"
-''',
-    "fetch": '''
-def fetch(url: str) -> str:
-    """Fetch any URL."""
-    return urllib.request.urlopen(url).read().decode()
-''',
-    "computer": '''
-def click(x: int, y: int) -> str:
-    """Click anywhere on the screen."""
-    pyautogui.click(x, y)
-    return "clicked"
-''',
-}
-BROAD_NAME = {"shell": "run_shell", "write": "write_file", "fetch": "fetch", "computer": "click"}
-
-FRAMEWORKS = {
-    # name: (requirements line, imports, decorator, agent construction with {tools})
-    "langgraph": ("langgraph==1.2.17\nlangchain==1.4.7\n",
-                  "from langchain.agents import create_agent\nfrom langchain_core.tools import tool\n",
-                  "@tool\n", "agent = create_agent(model, [{tools}], system_prompt='work one item')\n"),
-    "openai-agents-sdk": ("openai-agents==0.24.0\n", "from agents import Agent, function_tool\n",
-                          "@function_tool\n", "agent = Agent(name='kit', instructions='work one item', tools=[{tools}])\n"),
-    "crewai": ("crewai==1.15.30\n", "from crewai import Agent\nfrom crewai.tools import tool\n",
-               "@tool('{name}')\n", "agent = Agent(role='worker', goal='one item', backstory='b', tools=[{tools}])\n"),
-    "strands-agents": ("strands-agents==1.62.0\n", "from strands import Agent, tool\n",
-                       "@tool\n", "agent = Agent(model=model, tools=[{tools}], system_prompt='work one item')\n"),
-    "google-adk": ("google-adk==2.13.0\n", "from google.adk.agents import Agent\n",
-                   "", "root_agent = Agent(name='kit', model='m', tools=[{tools}]{extra})\n"),
-    "microsoft-agent-framework": ("agent-framework==1.23.0\n", "from agent_framework import Agent, tool\n",
-                                  "@tool\n", "agent = Agent(client, 'work one item', tools=[{tools}])\n"),
-}
-
-GATES = {  # the framework's own approval / deny mechanism, covering secrets and destructive commands
-    "langgraph": '''
-from langchain.agents.middleware import HumanInTheLoopMiddleware
-SECRET = r"(\\.env|\\.pem|\\.key|\\.ssh|\\.aws)"
-DESTRUCTIVE = r"(git push|reset --hard|rm -rf)"
-gate = HumanInTheLoopMiddleware(interrupt_on={"run_shell": True, "write_file": True, "fetch": True, "click": True})
-''',
-    "openai-agents-sdk": '''
-SECRET = r"(\\.env|\\.pem|\\.key|\\.ssh|\\.aws)"
-DESTRUCTIVE = r"(git push|reset --hard|rm -rf)"
-# every broad tool below is declared with needs_approval=True
-''',
-    "crewai": '''
-from crewai.hooks import register_before_tool_call_hook
-SECRET = r"(\\.env|\\.pem|\\.key|\\.ssh|\\.aws)"
-DESTRUCTIVE = r"(git push|reset --hard|rm -rf)"
-def block(ctx):
-    if re.search(SECRET, str(ctx.tool_input)) or re.search(DESTRUCTIVE, str(ctx.tool_input)):
-        return False
-    return None
-register_before_tool_call_hook(block)
-''',
-    "google-adk": '''
-SECRET = r"(\\.env|\\.pem|\\.key|\\.ssh|\\.aws)"
-DESTRUCTIVE = r"(git push|reset --hard|rm -rf)"
-def block(tool, args, tool_context):
-    if re.search(SECRET, str(args)) or re.search(DESTRUCTIVE, str(args)):
-        return {"error": "blocked by the harness"}
-    return None
-''',
-    "microsoft-agent-framework": '''
-SECRET = r"(\\.env|\\.pem|\\.key|\\.ssh|\\.aws)"
-DESTRUCTIVE = r"(git push|reset --hard|rm -rf)"
-# every broad tool below is declared with approval_mode="always_require"
-''',
-    "strands-agents": '''
-from strands.hooks import BeforeToolCallEvent
-SECRET = r"(\\.env|\\.pem|\\.key|\\.ssh|\\.aws)"
-DESTRUCTIVE = r"(git push|reset --hard|rm -rf)"
-def block(event: BeforeToolCallEvent):
-    if re.search(SECRET, str(event.tool_use)) or re.search(DESTRUCTIVE, str(event.tool_use)):
-        event.cancel_tool = "blocked by the harness"
-''',
-}
-
-
-def _write_code_repo(d: Path, fw: str, broad: str | None = None, gated: bool = False):
-    req, imports, deco, build = FRAMEWORKS[fw]
-    names = ["next_item", "run_init"] + ([BROAD_NAME[broad]] if broad else [])
-    src = ["import json, re, subprocess, urllib.request\nfrom pathlib import Path\nimport pyautogui\n", imports,
-           "REPO = Path('.')\nmodel = None\n"]
-    if gated:
-        src.append(GATES[fw])
-    # tool functions with the framework's decorator
-    for fn_src in NEXT_ITEM.strip().split("\n\n\n") + ([BROAD[broad].strip()] if broad else []):
-        name = fn_src.split("def ", 1)[1].split("(", 1)[0]
-        d_ = deco.format(name=name)
-        if gated and fw == "openai-agents-sdk" and broad and name == BROAD_NAME[broad]:
-            d_ = "@function_tool(needs_approval=True)\n"
-        if gated and fw == "microsoft-agent-framework" and broad and name == BROAD_NAME[broad]:
-            d_ = '@tool(approval_mode="always_require")\n'
-        src.append("\n" + d_ + fn_src + "\n")
-    extra = ", before_tool_callback=block" if gated and fw == "google-adk" else ""
-    src.append("\n" + build.format(tools=", ".join(names), extra=extra))
-    (d / "agent.py").write_text("".join(src))
-    (d / "requirements.txt").write_text(req)
-
-
-def _write_claude_repo(d: Path, broad: str | None = None):
-    (d / ".claude").mkdir()
-    if broad is None:
-        shutil.copy(CLAUDE_SETTINGS, d / ".claude" / "settings.json")
-    else:  # Claude Code always has shell, file-write and web tools: "broad" means nothing denies them
-        allow = {"shell": ["Bash(*)"], "write": ["Write(*)", "Edit(*)"], "fetch": ["WebFetch"],
-                 "computer": ["mcp__computer-use__*"]}[broad]
-        (d / ".claude" / "settings.json").write_text(json.dumps(
-            {"permissions": {"allow": allow, "defaultMode": "bypassPermissions"}}))
-
-
-def _audit(d: Path) -> dict:
-    p = subprocess.run([sys.executable, str(AUDIT), str(d), "--json"], capture_output=True, text=True)
-    return json.loads(p.stdout)
-
-
-def load_audit(name: str):
+def load_audit(name="audit_under_test"):
     spec = importlib.util.spec_from_file_location(name, AUDIT)
     mod = importlib.util.module_from_spec(spec)
-    sys.modules[name] = mod          # dataclasses need the module registered
+    sys.modules[name] = mod
     spec.loader.exec_module(mod)
     return mod
 
 
-def guard_points(rep: dict) -> float:
+def audit(path: Path) -> dict:
+    p = subprocess.run([sys.executable, str(AUDIT), str(path), "--json"], capture_output=True, text=True)
+    assert p.returncode == 0, p.stderr
+    return json.loads(p.stdout)
+
+
+def points(rep: dict) -> float:
     credit = {"VERIFIED": 1.0, "DECLARED": 0.5}
     return sum(c["weight"] * credit.get(c["status"], 0) for c in rep["checks"] if c["id"] in GUARD)
 
 
-def build(kind: str, fw: str, broad: str | None = None, gated: bool = False) -> Path:
-    d = Path(tempfile.mkdtemp())
-    if fw == "claude-code":
-        _write_claude_repo(d, broad)
-    else:
-        _write_code_repo(d, fw, broad, gated)
-    return d
+def guards(rep: dict) -> dict:
+    return {c["id"]: c for c in rep["checks"] if c["id"] in GUARD}
 
 
-ALL = ["claude-code", *FRAMEWORKS]
+class Repo:
+    """A throwaway repo written from strings."""
 
-
-def matrix() -> dict:
-    """{framework: {"narrow": pts, "shell": pts, ...}} -- used by the tests and by the report."""
-    out = {}
-    for fw in ALL:
-        row = {}
-        for variant in ["narrow", "shell", "write", "fetch", "computer"]:
-            d = build("x", fw, None if variant == "narrow" else variant)
-            try:
-                row[variant] = guard_points(_audit(d))
-            finally:
-                shutil.rmtree(d)
-        if fw != "claude-code":
-            d = build("x", fw, "shell", gated=True)
-            try:
-                row["shell+gate"] = guard_points(_audit(d))
-            finally:
-                shutil.rmtree(d)
-        out[fw] = row
-    return out
-
-
-class FairnessMatrix(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.m = matrix()
-
-    def test_narrow_harnesses_get_the_same_full_guard_score(self):
-        for fw in ALL:
-            self.assertEqual(self.m[fw]["narrow"], FULL_GUARD, (fw, self.m[fw]))
-
-    def test_each_broad_capability_loses_the_same_points_on_every_code_framework(self):
-        for variant in ["shell", "write", "fetch", "computer"]:
-            pts = {fw: self.m[fw][variant] for fw in FRAMEWORKS}
-            self.assertEqual(len(set(pts.values())), 1, (variant, pts))
-            self.assertLess(next(iter(pts.values())), FULL_GUARD, variant)
-
-    def test_the_stated_losses_per_capability(self):
-        # G1 (3) is lost by any ungated broad tool; G2 (3) by shell, web fetch, computer use (they reach or send
-        # secrets); G3 (2) by shell, file-write, computer use (they can destroy or change things irreversibly).
-        expected = {"shell": 0, "write": 3, "fetch": 2, "computer": 0}
-        for fw in FRAMEWORKS:
-            for variant, pts in expected.items():
-                self.assertEqual(self.m[fw][variant], pts, (fw, variant))
-
-    def test_claude_code_without_deny_rules_loses_everything_as_before(self):
-        for variant in ["shell", "write", "fetch", "computer"]:
-            self.assertEqual(self.m["claude-code"][variant], 0, variant)
-
-    def test_a_broad_tool_behind_the_frameworks_own_gate_earns_full_points(self):
-        for fw in FRAMEWORKS:
-            self.assertEqual(self.m[fw]["shell+gate"], FULL_GUARD, fw)
-
-
-class GuardEvidence(unittest.TestCase):
-    def setUp(self):
+    def __init__(self, files: dict):
         self.d = Path(tempfile.mkdtemp())
+        for rel, text in files.items():
+            p = self.d / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(text)
 
-    def tearDown(self):
+    def __enter__(self):
+        return self.d
+
+    def __exit__(self, *a):
         shutil.rmtree(self.d)
 
-    def test_every_guard_pass_names_file_and_line_and_every_gap_names_the_framework_mechanism(self):
-        _write_code_repo(self.d, "crewai", "shell")
-        rep = _audit(self.d)
-        for c in rep["checks"]:
-            if c["id"] in GUARD:
-                self.assertEqual(c["status"], "MISSING", c)
-                self.assertIn("CrewAI", c["fix"])
-                self.assertIn("agent.py:", c["evidence"])         # what was found, with file:line
-        shutil.rmtree(self.d); self.d.mkdir()
-        _write_code_repo(self.d, "strands-agents")
-        rep = _audit(self.d)
-        for c in rep["checks"]:
-            if c["id"] in GUARD:
-                self.assertEqual(c["status"], "VERIFIED", c)
-                self.assertRegex(c["evidence"], r"agent\.py:\d+")
 
-    def test_framework_native_broad_tools_count_like_hand_written_ones(self):
-        cases = {
-            "langgraph": "from langchain.agents import create_agent\nfrom langchain_community.tools import ShellTool\n"
-                         "agent = create_agent(m, [ShellTool()])\n",
-            "openai-agents-sdk": "from agents import Agent, LocalShellTool\nagent = Agent(name='a', tools=[LocalShellTool(executor=x)])\n",
-            "crewai": "from crewai import Agent\nagent = Agent(role='r', goal='g', backstory='b', tools=[], allow_code_execution=True)\n",
-            "strands-agents": "from strands import Agent\nfrom strands_tools import shell\nagent = Agent(tools=[shell])\n",
+SECRET = 'SECRET = re.compile(r"(\\.env|\\.pem|\\.key|\\.ssh|\\.aws)")\n'
+REFUSE = ('    if SECRET.search(command) or any(x in command for x in ("git push", "reset --hard", "rm -rf")):\n'
+          '        return "denied"\n')
+SHELL = ('def run_shell(command: str) -> str:\n    """Execute a shell command."""\n{guard}'
+         '    return subprocess.run(command, shell=True, capture_output=True, text=True).stdout\n')
+
+
+class Matrix(unittest.TestCase):
+    """The full 8-track x a/b/c matrix from Codex's probe fixtures."""
+
+    def test_every_track_scores_the_same_for_the_same_guard_behaviour(self):
+        got = {}
+        for track in TRACKS:
+            for v in "abc":
+                got[(track, v)] = points(audit(FIX / track / v))
+        wrong = {k: p for k, p in got.items() if p != EXPECTED[k[1]]}
+        self.assertEqual(wrong, {}, f"expected a=8, b=0, c=2 on every track; got {got}")
+
+    def test_partly_guarded_loses_exactly_g1_and_g2(self):
+        for track in TRACKS:
+            g = guards(audit(FIX / track / "c"))
+            with self.subTest(track=track):
+                self.assertEqual((g["G1"]["status"], g["G2"]["status"], g["G3"]["status"]), ("MISSING", "MISSING", "VERIFIED"))
+                self.assertRegex(g["G1"]["evidence"], r"fetch|WebFetch")      # names the ungated capability
+
+    def test_every_result_has_file_and_line_or_a_fix(self):
+        for track in TRACKS:
+            for v in "abc":
+                for c in guards(audit(FIX / track / v)).values():
+                    if c["status"] == "VERIFIED":
+                        self.assertRegex(c["evidence"], r":\d+", (track, v, c))
+                    else:
+                        self.assertTrue(c["fix"], (track, v, c))
+
+
+class Attachment(unittest.TestCase):
+    """R1-01: a guard counts only where it is attached and covers the capability."""
+
+    def test_two_agents_do_not_share_one_guard(self):
+        rep = audit(FIX / "two_agents_one_guard")
+        self.assertEqual(points(rep), 0, guards(rep))
+        self.assertIn("unguarded", guards(rep)["G1"]["evidence"])
+
+    def test_a_guard_that_is_never_attached_earns_nothing(self):
+        rep = audit(FIX / "unattached_guard")
+        self.assertEqual(points(rep), 0, guards(rep))
+
+    def test_tool_specific_approval_does_not_cover_a_sibling_tool(self):
+        src = ("import re, subprocess\nfrom agents import Agent, function_tool\n" + SECRET +
+               "@function_tool(needs_approval=True)\n" + SHELL.format(guard=REFUSE) +
+               "@function_tool\ndef other(command: str) -> str:\n    return subprocess.run(command, shell=True).stdout\n"
+               "agent = Agent(name='w', tools=[run_shell, other])\n")
+        with Repo({"agent.py": src}) as d:
+            self.assertEqual(points(audit(d)), 0)
+
+    def test_guard_like_comments_and_unused_constants_earn_nothing(self):
+        src = ("import subprocess\nfrom agents import Agent, function_tool\n"
+               "# needs_approval=True  interrupt(  cancel_tool =  rm -rf  git push  .env .pem\n"
+               "DENY = ['git push', 'rm -rf', '.env', '.pem']\n"
+               "@function_tool\ndef run_shell(command: str) -> str:\n    return subprocess.run(command, shell=True).stdout\n"
+               "agent = Agent(name='w', tools=[run_shell])\n")
+        with Repo({"agent.py": src}) as d:
+            self.assertEqual(points(audit(d)), 0)
+
+    def test_langgraph_middleware_counts_only_when_passed_to_the_agent(self):
+        base = ("import re, subprocess\nfrom langchain.agents import create_agent\n"
+                "from langchain.agents.middleware import HumanInTheLoopMiddleware\n" + SECRET +
+                "gate = HumanInTheLoopMiddleware(interrupt_on={'run_shell': True})\n"
+                "def run_shell(command: str) -> str:\n    return subprocess.run(command, shell=True).stdout\n")
+        with Repo({"agent.py": base + "agent = create_agent(model, [run_shell])\n"}) as d:
+            self.assertEqual(points(audit(d)), 0)
+        with Repo({"agent.py": base + "agent = create_agent(model, [run_shell], middleware=[gate])\n"}) as d:
+            self.assertEqual(points(audit(d)), 8)   # a person approves every shell call: G1, G2 and G3 covered
+
+    def test_strands_hook_counts_only_when_registered(self):
+        base = ("import re, subprocess\nfrom strands import Agent, tool\nfrom strands.hooks import HookProvider, BeforeToolCallEvent\n"
+                + SECRET + "class Gate(HookProvider):\n    def register_hooks(self, registry, **kw):\n"
+                "        registry.add_callback(BeforeToolCallEvent, self.before)\n    def before(self, event):\n"
+                "        if SECRET.search(str(event.tool_use)) or 'rm -rf' in str(event.tool_use) or 'git push' in str(event.tool_use):\n"
+                "            event.cancel_tool = 'denied'\n"
+                "@tool\ndef run_shell(command: str) -> str:\n    return subprocess.run(command, shell=True).stdout\n")
+        with Repo({"agent.py": base + "agent = Agent(tools=[run_shell])\n"}) as d:
+            self.assertEqual(points(audit(d)), 0)
+        with Repo({"agent.py": base + "agent = Agent(tools=[run_shell], hooks=[Gate()])\n"}) as d:
+            self.assertEqual(points(audit(d)), 8)
+
+    def test_sdk_deny_function_counts_only_when_attached(self):
+        base = ("import re\nfrom claude_agent_sdk import ClaudeAgentOptions, HookMatcher\n" + SECRET +
+                "async def deny(data, tool_use_id, context):\n    command = data.get('tool_input', {}).get('command', '')\n"
+                "    if SECRET.search(command) or any(x in command for x in ('git push', 'reset --hard', 'rm -rf')):\n"
+                "        return {'hookSpecificOutput': {'permissionDecision': 'deny'}}\n    return {}\n")
+        with Repo({"agent.py": base + "opts = ClaudeAgentOptions(tools=['Bash'], allowed_tools=['Bash'])\n"}) as d:
+            self.assertEqual(points(audit(d)), 0)
+        with Repo({"agent.py": base + "opts = ClaudeAgentOptions(tools=['Bash'], allowed_tools=['Bash'], "
+                                      "hooks={'PreToolUse': [HookMatcher(matcher='Bash', hooks=[deny])]})\n"}) as d:
+            self.assertEqual(points(audit(d)), 8)
+
+    def test_unresolved_attachment_is_unresolved_never_verified(self):
+        src = ("import subprocess\nfrom agents import Agent, function_tool\nfrom guards import make_guardrail\n"
+               "@function_tool(tool_input_guardrails=[make_guardrail()])\n"
+               "def run_shell(command: str) -> str:\n    return subprocess.run(command, shell=True).stdout\n"
+               "agent = Agent(name='w', tools=[run_shell])\n")
+        with Repo({"agent.py": src}) as d:
+            g = guards(audit(d))
+            self.assertNotIn("VERIFIED", {c["status"] for c in g.values()})
+            self.assertIn("UNRESOLVED", {c["status"] for c in g.values()})
+
+
+class Resolution(unittest.TestCase):
+    """R1-02: tools are followed through imports, aliases and helpers; what can't be followed is UNRESOLVED."""
+
+    def test_imported_broad_tool_loses_credit(self):
+        rep = audit(FIX / "imported_broad_tool")
+        self.assertEqual(points(rep), 0, guards(rep))
+        self.assertIn("tool_impl.py", guards(rep)["G1"]["evidence"])
+
+    def test_aliased_subprocess_loses_credit(self):
+        self.assertEqual(points(audit(FIX / "aliased_subprocess")), 0)
+
+    def test_local_imported_aliased_and_helper_wrapped_tools_score_alike(self):
+        variants = {
+            "local": {"agent.py": "import subprocess\nfrom agents import Agent\n"
+                                  "def run(command):\n    return subprocess.run(command, shell=True).stdout\n"
+                                  "agent = Agent(name='w', tools=[run])\n"},
+            "imported": {"agent.py": "from agents import Agent\nfrom pkg.impl import run\nagent = Agent(name='w', tools=[run])\n",
+                         "pkg/__init__.py": "", "pkg/impl.py": "import subprocess\ndef run(command):\n    return subprocess.run(command, shell=True).stdout\n"},
+            "alias": {"agent.py": "from agents import Agent\nfrom subprocess import run as go\n"
+                                  "def run(command):\n    return go(command, shell=True).stdout\nagent = Agent(name='w', tools=[run])\n"},
+            "module_alias": {"agent.py": "from agents import Agent\nimport impl as tools_mod\nagent = Agent(name='w', tools=[tools_mod.run])\n",
+                             "impl.py": "import os\ndef run(command):\n    return os.system(command)\n"},
+            "helper": {"agent.py": "import subprocess\nfrom agents import Agent\n"
+                                   "def _exec(cmd):\n    return subprocess.run(cmd, shell=True).stdout\n"
+                                   "def run(command):\n    return _exec(command)\nagent = Agent(name='w', tools=[run])\n"},
         }
-        for fw, src in cases.items():
-            with self.subTest(fw=fw):
-                d = Path(tempfile.mkdtemp())
-                try:
-                    (d / "agent.py").write_text(src)
-                    rep = _audit(d)
-                    self.assertEqual(rep["tracks"], [fw])
-                    self.assertEqual(guard_points(rep), 0, [c for c in rep["checks"] if c["id"] in GUARD])
-                finally:
-                    shutil.rmtree(d)
+        for name, files in variants.items():
+            with self.subTest(variant=name), Repo(files) as d:
+                rep = audit(d)
+                self.assertEqual(points(rep), 0, (name, guards(rep)))
+                self.assertIn("shell", guards(rep)["G1"]["evidence"])
 
-    def test_claude_agent_sdk_allowed_tools_with_its_deny_hook(self):
-        (self.d / "agent.py").write_text(
-            "import re\nfrom claude_agent_sdk import ClaudeAgentOptions\n"
-            "SECRET = re.compile(r'(\\.env|\\.pem|\\.ssh)')\n"
-            "def deny(input_data, tool_use_id, context):\n"
-            "    return {'hookSpecificOutput': {'permissionDecision': 'deny'}}\n"
-            "opts = ClaudeAgentOptions(allowed_tools=['Read', 'Bash'], disallowed_tools=['Bash(rm -rf *)'])\n")
-        self.assertEqual(guard_points(_audit(self.d)), FULL_GUARD)
-        (self.d / "agent.py").write_text("from claude_agent_sdk import ClaudeAgentOptions\n"
-                                          "opts = ClaudeAgentOptions(allowed_tools=['Read', 'Bash'])\n")
-        self.assertEqual(guard_points(_audit(self.d)), 0)
+    def test_a_tool_the_audit_cannot_follow_is_unresolved(self):
+        src = "from agents import Agent\nfrom some_vendor_pkg import mystery_tool\nagent = Agent(name='w', tools=[mystery_tool])\n"
+        with Repo({"agent.py": src}) as d:
+            g = guards(audit(d))
+            self.assertEqual({c["status"] for c in g.values()}, {"UNRESOLVED"})
+            self.assertIn("mystery_tool", g["G1"]["evidence"])
 
-    def test_the_track_detected_is_reported(self):
-        _write_code_repo(self.d, "openai-agents-sdk")
-        rep = _audit(self.d)
-        self.assertEqual(rep.get("tracks"), ["openai-agents-sdk"])
+    def test_a_narrow_imported_tool_still_earns_full_credit(self):
+        files = {"agent.py": "from agents import Agent\nfrom impl import next_item\nagent = Agent(name='w', tools=[next_item])\n",
+                 "impl.py": "import json\ndef next_item():\n    return json.dumps({'id': 'F-001'})\n"}
+        with Repo(files) as d:
+            self.assertEqual(points(audit(d)), 8)
+
+
+class Refusals(unittest.TestCase):
+    """R1-03: equal refusal behaviour, equal credit; unclear analysis is UNRESOLVED, not MISSING."""
+
+    def test_inline_wrapper_refusal_earns_g2_and_g3_like_a_native_hook(self):
+        inline = audit(FIX / "inline_real_guard")
+        native = ("import re, subprocess\nfrom crewai import Agent\nfrom crewai.tools import tool\n"
+                  "from crewai.hooks import register_before_tool_call_hook\n" + SECRET +
+                  "def gate(ctx):\n    command = str(ctx.tool_input)\n"
+                  "    if SECRET.search(command) or any(x in command for x in ('git push', 'reset --hard', 'rm -rf')):\n"
+                  "        return False\n    return None\nregister_before_tool_call_hook(gate)\n"
+                  "@tool('run_shell')\n" + SHELL.format(guard="") + "agent = Agent(role='r', goal='g', backstory='b', tools=[run_shell])\n")
+        with Repo({"agent.py": native}) as d:
+            self.assertEqual(points(inline), points(audit(d)))
+        self.assertEqual(points(inline), 8, guards(inline))
+
+    def test_removing_the_early_return_loses_the_credit(self):
+        src = (FIX / "inline_real_guard" / "agent.py").read_text().replace('        return "denied"\n', '        pass\n')
+        with Repo({"agent.py": src}) as d:
+            self.assertEqual(points(audit(d)), 0)
+
+    def test_a_refusal_the_audit_cannot_read_is_unresolved_not_missing(self):
+        src = ("import subprocess\nfrom agents import Agent, function_tool\nfrom policy import is_allowed\n"
+               "@function_tool\ndef run_shell(command: str) -> str:\n    if not is_allowed(command):\n        return 'denied'\n"
+               "    return subprocess.run(command, shell=True).stdout\nagent = Agent(name='w', tools=[run_shell])\n")
+        with Repo({"agent.py": src}) as d:
+            g = guards(audit(d))
+            self.assertEqual(g["G2"]["status"], "UNRESOLVED", g)
+            self.assertEqual(g["G3"]["status"], "UNRESOLVED", g)
+
+
+class ClaudeCode(unittest.TestCase):
+    """R1-04: Claude Code deny rules must actually apply."""
+
+    def settings(self, perms):
+        return Repo({".claude/settings.json": json.dumps({"permissions": perms})})
+
+    def test_missing_empty_or_irrelevant_deny_lists_earn_no_g1(self):
+        for perms in ({"allow": ["Bash(*)"]}, {"deny": [], "allow": ["Bash(*)"]},
+                      {"deny": ["Read(./docs/old.txt)"], "allow": ["Bash(*)", "WebFetch"]}):
+            with self.subTest(perms=perms), self.settings(perms) as d:
+                self.assertEqual(guards(audit(d))["G1"]["status"], "MISSING")
+
+    def test_meaningful_applicable_restrictions_still_earn_credit(self):
+        with Repo({".claude/settings.json": CLAUDE_TEMPLATE.read_text()}) as d:
+            self.assertEqual(points(audit(d)), 8)
+
+    def test_base_comparison_shows_the_correction_is_intentional(self):
+        """1.4.1 and earlier gave 3 points for the word "deny" (Codex's fixture b); 1.4.2 gives 0. Template unchanged."""
+        base = Path(tempfile.mkdtemp()) / "audit_1_4_1.py"
+        base.write_text(subprocess.run(["git", "show", "24bc1da:plugins/harness-audit/skills/audit/scripts/audit.py"],
+                                       cwd=ROOT, capture_output=True, text=True, check=True).stdout)
+        old = lambda p: json.loads(subprocess.run([sys.executable, str(base), str(p), "--json"], capture_output=True, text=True).stdout)
+        self.assertEqual(points(old(FIX / "claude-code" / "b")), 3)
+        self.assertEqual(points(audit(FIX / "claude-code" / "b")), 0)
+        with Repo({".claude/settings.json": CLAUDE_TEMPLATE.read_text()}) as d:
+            self.assertEqual(points(old(d)), points(audit(d)))
+        shutil.rmtree(base.parent)
+
+
+class Aggregation(unittest.TestCase):
+    def test_a_guarded_surface_does_not_hide_an_unguarded_one(self):
+        self.assertEqual(points(audit(FIX / "mixed")), 0)
+
+    def test_declarations_never_override_derived_failure(self):
+        self.assertEqual(points(audit(FIX / "full_plus_declared")), 0)
+
+    def test_assess_only_declared_harness_scores_half(self):
+        for d in sorted((FIX / "assess").iterdir()):
+            rep = audit(d)
+            with self.subTest(track=d.name):
+                self.assertEqual(rep["tracks"], [d.name])
+                self.assertEqual({c["status"] for c in guards(rep).values()}, {"DECLARED"})
+                self.assertEqual(points(rep), 4)
+
+    def test_kit_starters_score_full_guard_points(self):
+        for t in ["claude-agent-sdk", "google-adk", "microsoft-agent-framework", "langgraph", "openai-agents-sdk", "crewai", "strands-agents"]:
+            with self.subTest(track=t):
+                rep = audit(ROOT / "kit" / "tracks" / t)
+                self.assertEqual(points(rep), 8, guards(rep))
 
     def test_test_files_are_not_mistaken_for_the_agent(self):
-        (self.d / "tests").mkdir()
-        (self.d / "tests" / "test_x.py").write_text("from langgraph import x\nagent = create_agent(m, [shell])\n")
-        rep = _audit(self.d)
-        self.assertEqual(rep.get("tracks"), [])
+        with Repo({"tests/test_x.py": "from langgraph import x\nagent = create_agent(m, [shell])\n"}) as d:
+            self.assertEqual(audit(d)["tracks"], [])
 
-    def test_assess_only_track_scores_declared_at_half_weight(self):
-        (self.d / "requirements.txt").write_text("pydantic-ai==2.61.0\n")
-        (self.d / "agent.py").write_text("from pydantic_ai import Agent\nagent = Agent('m', tools=[])\n")
-        rep = _audit(self.d)
-        self.assertEqual(rep.get("tracks"), ["pydantic-ai"])
-        self.assertEqual(guard_points(rep), 0)  # nothing declared yet
-        (self.d / "docs").mkdir()
-        (self.d / "docs" / "IMPACT.md").write_text(
-            "# Impact\n\n## Tools\n- next_item, run_init only\n\n## Secrets\n- no file or shell tool\n\n"
-            "## Destructive actions\n- none; writes go through a person\n")
-        rep = _audit(self.d)
-        statuses = {c["id"]: c["status"] for c in rep["checks"] if c["id"] in GUARD}
-        self.assertEqual(statuses, {"G1": "DECLARED", "G2": "DECLARED", "G3": "DECLARED"})
-        self.assertEqual(guard_points(rep), FULL_GUARD / 2)
-        self.assertIn("declared", next(c for c in rep["checks"] if c["id"] == "G1")["evidence"].lower())
 
-    def test_declared_never_overrides_derived_evidence(self):
-        _write_code_repo(self.d, "langgraph", "shell")
-        (self.d / "docs").mkdir()
-        (self.d / "docs" / "IMPACT.md").write_text("## Tools\n- all fine\n## Secrets\n- fine\n## Destructive\n- fine\n")
-        self.assertEqual(guard_points(_audit(self.d)), 0)
-
+class StaticOnly(unittest.TestCase):
     def test_the_audit_never_executes_or_imports_the_audited_repo(self):
-        _write_code_repo(self.d, "langgraph", "shell")
-        (self.d / "agent.py").write_text((self.d / "agent.py").read_text() + "\nraise SystemExit('EXECUTED')\n")
-        (self.d / "sitecustomize.py").write_text("raise SystemExit('IMPORTED')\n")
-        mod = load_audit("audit_under_test")
+        files = {"agent.py": (FIX / "imported_broad_tool" / "agent.py").read_text() + "\nraise SystemExit('EXECUTED')\n",
+                 "tool_impl.py": (FIX / "imported_broad_tool" / "tool_impl.py").read_text() + "\nraise SystemExit('IMPORTED')\n",
+                 "sitecustomize.py": "raise SystemExit('IMPORTED')\n"}
+        mod = load_audit()
         real_import = builtins.__import__
 
         def no_repo_import(name, *a, **k):
-            if name in {"agent", "sitecustomize"}:
+            if name.split(".")[0] in {"agent", "tool_impl", "sitecustomize"}:
                 raise AssertionError(f"audit imported {name}")
             return real_import(name, *a, **k)
 
         def boom(*a, **k):
             raise AssertionError("audit tried to run something")
 
-        with mock.patch.object(subprocess, "run", boom), mock.patch.object(subprocess, "Popen", boom), \
+        with Repo(files) as d, mock.patch.object(subprocess, "run", boom), mock.patch.object(subprocess, "Popen", boom), \
                 mock.patch.object(builtins, "exec", boom), mock.patch.object(builtins, "__import__", no_repo_import), \
                 mock.patch("os.system", boom):
-            rep = mod.audit(self.d)
-        self.assertIn("langgraph", rep.tracks)
+            rep = mod.audit(d)
+        self.assertIn("openai-agents-sdk", rep.tracks)
 
-    def test_existing_claude_scoring_is_unchanged(self):
-        _write_claude_repo(self.d)
-        rep = _audit(self.d)
-        self.assertEqual(guard_points(rep), FULL_GUARD)
-        self.assertEqual(rep.get("tracks"), [])
-        g1 = next(c for c in rep["checks"] if c["id"] == "G1")
-        self.assertIn(".claude/settings.json:", g1["evidence"])
-
-
-class EmbeddedSignatures(unittest.TestCase):
-    def test_audit_detect_table_matches_the_track_spec_files(self):
+    def test_embedded_signatures_match_the_track_spec_files(self):
         mod = load_audit("audit_sig")
         want = {}
         for p in sorted((ROOT / "kit/tracks").glob("*/harness_track.json")):
             d = json.loads(p.read_text())
-            if d["id"] == "claude-code":
-                continue
-            want[d["id"]] = (d["support"], [(s["file"], s["contains"]) for s in d["detect"]])
+            if d["id"] != "claude-code":
+                want[d["id"]] = (d["support"], [(s["file"], s["contains"]) for s in d["detect"]])
         have = {k: (v["support"], [tuple(x) for x in v["detect"]]) for k, v in mod.TRACK_SIGNATURES.items()}
         self.assertEqual(have, want)
 

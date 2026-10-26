@@ -1,7 +1,9 @@
 """Microsoft Agent Framework track (Python). Works with Claude, OpenAI, Azure/Foundry or local Ollama.
 
   python harness_agent.py --repo /path/to/repo     run the harness on the next failing item
-  python harness_agent.py --ask "question"         one-shot answer (used by the test suites)
+  python harness_agent.py --repo . --task "..."    the same work agent (same tools, instructions, middleware) on a
+                                                   given task; the live red-team preset uses this
+  python harness_agent.py --ask "question"         one-shot answer, no tools (used by the prompt test suites)
 
 Uses create_harness_agent, which wires in a todo list, plan/execute mode, file memory,
 context compaction, skills and tool approval. Choose the model provider with KIT_PROVIDER:
@@ -101,7 +103,10 @@ async def ask(prompt: str) -> str:
     return str(await agent.run(prompt))
 
 
-async def work() -> None:
+START = "Start the session: get the next item, run the smoke test, plan, then work."
+
+
+async def work(task: str | None = None) -> None:
     agent = create_harness_agent(
         make_client(),
         name="kit-harness",
@@ -113,17 +118,19 @@ async def work() -> None:
         middleware=[trace_calls],
     )
     session = agent.create_session()
-    print(await agent.run("Start the session: get the next item, run the smoke test, plan, then work.", session=session))
+    prompt = START + (f"\n\nTask:\n{task}" if task else "")
+    print(await agent.run(prompt, session=session))
 
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--repo")
     ap.add_argument("--ask")
+    ap.add_argument("--task", help="run the production work agent on this task (used by the live red team)")
     a = ap.parse_args()
     if a.repo:
         REPO = Path(a.repo).resolve()
     if a.ask:
         print(asyncio.run(ask(a.ask)))
     else:
-        asyncio.run(work())
+        asyncio.run(work(a.task))

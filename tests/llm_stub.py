@@ -155,8 +155,8 @@ class Stub:
     """with Stub() as url: ...   url is http://127.0.0.1:<port>"""
 
     def __enter__(self):
-        _Handler.calls = []
-        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+        self.handler = type("_StubHandler", (_Handler,), {"calls": []})   # each stub counts its own requests
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), self.handler)
         self.t = threading.Thread(target=self.httpd.serve_forever, daemon=True)
         self.t.start()
         self.url = f"http://127.0.0.1:{self.httpd.server_address[1]}"
@@ -164,7 +164,7 @@ class Stub:
 
     @property
     def calls(self):
-        return list(_Handler.calls)
+        return list(self.handler.calls)
 
     def __exit__(self, *a):
         self.httpd.shutdown()

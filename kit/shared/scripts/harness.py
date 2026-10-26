@@ -49,7 +49,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-VERSION = "1.3.0"
+VERSION = "1.4.2"
 GENESIS = "0" * 64
 EXCLUDE = ("progress/", ".harness/", "feature_list.json")
 ROOT = Path.cwd()
@@ -85,6 +85,23 @@ def code_fingerprint() -> str:
     """Hash of the committed tree at HEAD, leaving out the progress and evidence files themselves."""
     lines = [l for l in git("ls-tree", "-r", "HEAD").splitlines() if not excluded(l.split("\t", 1)[1])]
     return sha("\n".join(lines))
+
+
+def tree_snapshot() -> dict:
+    """Content hashes of every file `git status` reports (changed, new or deleted), outside progress/ and .harness/.
+    Ignored files (build output, caches) are not included."""
+    snap = {}
+    for rel in dirty_paths():
+        fp = ROOT / rel
+        try:
+            snap[rel] = sha(fp.read_bytes()) if fp.is_file() else ("dir" if fp.is_dir() else "deleted")
+        except OSError:
+            snap[rel] = "unreadable"
+    return snap
+
+
+def changed_between(before: dict, after: dict) -> list[str]:
+    return sorted({p for p in after if before.get(p) != after[p]} | {p for p in before if p not in after})
 
 
 def dirty_paths() -> list[str]:
@@ -299,6 +316,7 @@ def verify_one(item_id: str, allow_dirty: bool, timeout: int) -> bool:
     dirty = dirty_paths()
     if dirty and not allow_dirty:
         raise SystemExit(f"Refusing to verify on a dirty tree (commit or stash first): {', '.join(dirty[:5])}")
+    before = tree_snapshot()
     started = time.time()
     run_dir = ROOT / ".harness" / "evidence" / item_id / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -319,10 +337,14 @@ def verify_one(item_id: str, allow_dirty: bool, timeout: int) -> bool:
             so = latest(led, item_id, "signoff", criteria_sha=cs, check=c["id"])
             results.append({"id": c["id"], "human": c["human"], "signed_by": so["by"] if so else None,
                             "signoff_seq": so["seq"] if so else None})
-    wrote = dirty_paths()
-    if wrote and not dirty:
-        print(f"Note: the checks wrote files outside progress/ and .harness/ ({', '.join(wrote[:5])}). "
-              "Add them to .gitignore, or the next commit will change the code fingerprint and make this evidence stale.")
+    # Files the checks changed, created or deleted (tracked source, pinned tests, new untracked files) mean the
+    # evidence does not describe the committed tree: it is never clean evidence. Ignored files are allowed.
+    changed = changed_between(before, tree_snapshot())
+    changed += [d for d in pin_drift(appr.get("pins", {}), it) if d.split(" (")[0] not in changed]
+    if changed:
+        print(f"UNRESOLVED: the checks changed files during the run: {', '.join(changed[:8])}. This run is not clean "
+              "evidence. Add generated output to .gitignore, or fix the check so it leaves tracked and pinned files alone, "
+              "commit, and run `harness verify` again.")
     ok = all(r.get("exit") == 0 for r in results if "run" in r) and all(r.get("signed_by") for r in results if "human" in r)
     ignored = {}
     for rel in git("ls-files", "--others", "--ignored", "--exclude-standard", check=False).splitlines()[:500]:
@@ -330,23 +352,24 @@ def verify_one(item_id: str, allow_dirty: bool, timeout: int) -> bool:
         if not excluded(rel) and fp.is_file() and fp.stat().st_size < 2_000_000 and not set(Path(rel).parts) & PIN_SKIP:
             ignored[rel] = sha(fp.read_bytes())
     record = {"item": item_id, "ignored_files": ignored, "criteria_sha": cs, "pins_sha": appr.get("pins_sha"), "code_sha": code_fingerprint(), "head": git("rev-parse", "HEAD").strip(),
-              "dirty": bool(dirty), "checks": results, "all_passed": ok, "started": started, "seconds": round(time.time() - started, 2),
+              "dirty": bool(dirty or changed), "changed_during_run": changed, "checks": results, "all_passed": ok, "started": started, "seconds": round(time.time() - started, 2),
               "env": {"harness": VERSION, "python": platform.python_version(), "platform": platform.platform(),
                       "git": git("--version").strip()}}
     rec = run_dir / "evidence.json"
     rec.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
     e = append({"type": "evidence", "item": item_id, "criteria_sha": cs, "pins_sha": appr.get("pins_sha"),
-                "code_sha": record["code_sha"], "dirty": bool(dirty),
+                "code_sha": record["code_sha"], "dirty": bool(dirty or changed), "changed_during_run": len(changed),
                 "record": rec.relative_to(ROOT).as_posix(), "record_sha": sha(rec.read_bytes()), "all_passed": ok})
     failed = [r["id"] for r in results if ("run" in r and r["exit"] != 0) or ("human" in r and not r["signed_by"])]
-    it["passes"] = ok and not dirty
+    it["passes"] = ok and not dirty and not changed
     it["evidence"] = rec.relative_to(ROOT).as_posix()
     if failed:
         it["next_action"] = f"Fix or sign off: {', '.join(failed)}"
     save_work(p, data)
-    verdict = "VERIFIED" if it["passes"] else "INCORRECT"
+    verdict = "VERIFIED" if it["passes"] else ("UNRESOLVED" if ok and changed else "INCORRECT")
     print(f"{verdict} {item_id}: {sum(1 for r in results if r.get('exit') == 0 or r.get('signed_by'))}/{len(results)} checks satisfied"
-          f"{' (dirty tree: not counted)' if dirty else ''}; evidence {it['evidence']} (ledger #{e['seq']})")
+          f"{' (dirty tree: not counted)' if dirty else ''}{' (files changed during the run: not counted)' if changed else ''}; "
+          f"evidence {it['evidence']} (ledger #{e['seq']})")
     return it["passes"]
 
 
@@ -386,12 +409,19 @@ def cmd_reverify(a):
     sys.exit(1 if failures else 0)
 
 
-def check_all(allow_stale=False) -> tuple[list, list]:
-    """Return (rows, errors). rows: (item, verdict, message)."""
+def check_all(allow_stale=False, allow_dirty=False) -> tuple[list, list]:
+    """Return (rows, errors). rows: (item, verdict, message).
+    Evidence describes the committed tree, so uncommitted changes outside progress/ and .harness/ (ignored files
+    aside) stop a passing item from checking as VERIFIED: INCORRECT, or UNRESOLVED with --allow-dirty."""
     _, _, items = load_work()
     led = read_ledger()
     rows, errs = [], chain_errors(led)
     current_code = code_fingerprint()
+    dirty = dirty_paths()
+    if dirty and not allow_dirty:
+        errs.append(f"uncommitted changes outside progress/ and .harness/: {', '.join(dirty[:6])}"
+                    f"{' …' if len(dirty) > 6 else ''}. `harness check` describes the committed tree: commit or remove "
+                    f"them (or use --allow-dirty to report them without failing)")
     present = {i.get("id") for i in items}
     for e in led:
         if e.get("type") == "approve" and e["item"] not in present and not latest(led, e["item"], "retire"):
@@ -416,7 +446,9 @@ def check_all(allow_stale=False) -> tuple[list, list]:
                                    f"{', '.join(drift[:4])}; needs re-approval")); continue
         ev = latest(led, iid, "evidence", criteria_sha=cs)
         if not it.get("passes"):
-            rows.append((iid, "UNRESOLVED", "not passing yet" + (f"; last evidence #{ev['seq']} failed" if ev else ""))); continue
+            last = "" if not ev else (f"; last evidence #{ev['seq']} was not clean (tree dirty or changed during the run)"
+                                      if ev.get("dirty") and ev.get("all_passed") else f"; last evidence #{ev['seq']} failed")
+            rows.append((iid, "UNRESOLVED", "not passing yet" + last)); continue
         if not ev:
             rows.append((iid, "INCORRECT", "passes is true but no evidence was recorded for the current criteria")); continue
         if not ev.get("all_passed") or ev.get("dirty"):
@@ -438,14 +470,18 @@ def check_all(allow_stale=False) -> tuple[list, list]:
             if allow_stale:
                 rows.append((iid, "UNRESOLVED", f"evidence #{ev['seq']} predates code changes; re-run `harness verify {iid}`")); continue
             rows.append((iid, "INCORRECT", f"stale: code changed since evidence #{ev['seq']}; re-run `harness verify {iid}`")); continue
+        if dirty:
+            rows.append((iid, "UNRESOLVED" if allow_dirty else "INCORRECT",
+                         f"uncommitted changes the evidence does not cover: {', '.join(dirty[:4])}"
+                         f"{' …' if len(dirty) > 4 else ''}; commit them and re-run `harness verify {iid}`")); continue
         rows.append((iid, "VERIFIED", f"evidence #{ev['seq']} ({ev['record']}), {len(checks)} checks, code {current_code[:12]}"))
     return rows, errs
 
 
 def cmd_check(a):
-    rows, errs = check_all(a.allow_stale)
+    rows, errs = check_all(a.allow_stale, a.allow_dirty)
     for e in errs:
-        print(f"INCORRECT ledger: {e}")
+        print(f"INCORRECT {'tree' if e.startswith('uncommitted') else 'ledger'}: {e}")
     for iid, v, msg in rows:
         print(f"{v:<10} {iid}: {msg}")
     bad = errs or any(v == "INCORRECT" for _, v, _ in rows)
@@ -455,7 +491,7 @@ def cmd_check(a):
 
 
 def cmd_status(a):
-    rows, errs = check_all(allow_stale=True)
+    rows, errs = check_all(allow_stale=True, allow_dirty=True)
     if errs:
         print("Ledger problems:", *errs, sep="\n  ")
     for iid, v, msg in rows:
@@ -475,7 +511,9 @@ def main(argv=None):
     p = sp.add_parser("verify"); g = p.add_mutually_exclusive_group(required=True); g.add_argument("item", nargs="?")
     g.add_argument("--all", action="store_true"); p.add_argument("--allow-dirty", action="store_true")
     p.add_argument("--timeout", type=int, default=900); p.set_defaults(f=cmd_verify)
-    p = sp.add_parser("check"); p.add_argument("--allow-stale", action="store_true"); p.set_defaults(f=cmd_check)
+    p = sp.add_parser("check"); p.add_argument("--allow-stale", action="store_true")
+    p.add_argument("--allow-dirty", action="store_true", help="report uncommitted changes as UNRESOLVED instead of INCORRECT")
+    p.set_defaults(f=cmd_check)
     sp.add_parser("status").set_defaults(f=cmd_status)
     p = sp.add_parser("reverify"); p.add_argument("--all", action="store_true", help="every item, not only passing ones")
     p.add_argument("--timeout", type=int, default=900); p.set_defaults(f=cmd_reverify)

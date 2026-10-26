@@ -1,0 +1,1 @@
+{"permissions": {"deny": ["Read(**/.env*)", "Read(**/*.pem)", "Read(**/*.key)", "Read(**/.ssh/**)", "Read(**/.aws/**)", "Bash(git push *)", "Bash(git reset --hard *)", "Bash(rm -rf *)", "Bash(*)", "Write(*)", "Edit(*)", "WebFetch", "WebSearch"], "allow": [], "ask": []}}

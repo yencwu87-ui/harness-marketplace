@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.4.2 (27 Oct 2026)
+Fix round for an independent review (Codex, round 1) of 1.4.1: 6 P1 and 5 P2 findings. Each finding first got a failing test, using the reviewer's fixtures (`tests/fixtures/codex_r1/`).
+- **Guard credit follows attachment (harness-audit 1.4.2).** A guard counts only when it is attached to the agent and the tool being scored and covers that capability. Two agents in one framework no longer share credit; comments, unused constants and unregistered hooks earn nothing; a guard the audit cannot read is UNRESOLVED, never VERIFIED. On the reviewer's matrix every track now scores a=8, b=0, c=2 (1.4.1: c=8 everywhere, and Claude Code b=3).
+- **Tools are followed statically:** local definitions, import aliases (`import subprocess as sp`) and imported tool modules are resolved with `ast`, without importing them. Anything the audit cannot follow is UNRESOLVED.
+- **Equal refusals earn equal credit:** an inline early-return refusal in a tool earns the same as a framework hook. A refusal whose condition the audit cannot read is UNRESOLVED, not MISSING. A hook that refuses secrets in one condition and destructive commands in another covers both.
+- **Claude Code G1 needs deny rules that apply:** an empty, missing or irrelevant deny list earns no G1.
+- **Live presets run the production agent:** the `claude-agent-sdk` and `microsoft-agent-framework` presets now call `--task`, which runs the work agent with its real tools, instructions and trace hook (`--ask` stays tool-free for the prompt suites). Offline integration tests drive both through stand-in frameworks: a planted file is read through the production tool path, the trace records it, and a detector trips.
+- **A failed run is never VERIFIED (harness-redteam 1.4.2):** a failed start, nonzero exit, timeout or failed isolation start is UNRESOLVED with diagnostics, and `run` / `selftest` exit nonzero. Violations seen before a failure still make the run INCORRECT.
+- **Agent SDK starter: content search cannot reach secrets.** The built-in `Grep` and `Glob` are no longer offered (their globs and roots could reach secret files); `mcp__kit__search_code` searches the repo and never opens secret files. The hook also refuses recursive shell searches, destructive commands and writes outside the repo. The `explore` subagent gets the same restricted tools.
+- **`harness verify` refuses runs that change files (harness-init 1.4.2):** tracked source, pinned files or new untracked files changed during the checks make the run UNRESOLVED and exit nonzero; ignored build output and caches are still allowed. `harness check` fails on uncommitted changes outside `progress/` and `.harness/` (`--allow-dirty` reports them as UNRESOLVED instead).
+- **Smoke tests:** a smoke skips when the framework or its provider connector is missing and fails when an installed one breaks; conflicting `KIT_PROVIDER` / `KIT_MODEL` / base-URL variables are cleared and sentinels prove requests reach only the local stub. The file-writing harness test passes with `PYTHONDONTWRITEBYTECODE` set and unset. CrewAI's trace hook is registered once per process.
+
 ## 1.4.1 (26 Oct 2026)
 - **Fair guard scoring (harness-audit 1.4.1).** Before this release, G1–G3 (8 of the guard points) were awarded only from `.claude/settings.json`, so a well-guarded harness on any other framework scored 0 of 8. The audit now detects the framework statically and checks that framework's own equivalent:
   - an explicit tool list;

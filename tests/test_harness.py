@@ -79,14 +79,70 @@ class HarnessTests(unittest.TestCase):
         out = self.h("check", ok=False)
         self.assertIn("no evidence", out)
 
-    def test_checks_writing_files_are_reported(self):
-        (self.r / ".gitignore").write_text("")
-        self.commit("no ignore")
+    def set_check(self, script: str):
+        """Replace c1 with a check script, committed, approved and signed off."""
+        (self.r / "check.py").write_text(script)
+        items = self.work()
+        items[0]["done_when"][0]["run"] = f"{sys.executable} check.py"
+        self.write_work(items)
+        self.commit("check")
         self.h("approve", "F-001", "--by", "Owner")
         self.h("signoff", "F-001", "h1", "--by", "Owner")
         self.commit("approve")
-        out = self.h("verify", "F-001")
-        self.assertIn("wrote files", out)
+
+    def test_checks_writing_files_are_reported(self):
+        # R1-10: the check writes a deliberate file, so the result does not depend on bytecode caching.
+        for dont_write in ("1", None):
+            with self.subTest(PYTHONDONTWRITEBYTECODE=dont_write):
+                self.tearDown(); self.setUp()
+                self.set_check("from pathlib import Path\nimport app\nassert app.add(2, 2) == 4\n"
+                               "Path('generated.txt').write_text('constructed output')\n")
+                env = dict(os.environ)
+                env.pop("PYTHONDONTWRITEBYTECODE", None)
+                if dont_write:
+                    env["PYTHONDONTWRITEBYTECODE"] = dont_write
+                p = subprocess.run([sys.executable, str(HARNESS), "verify", "F-001"], cwd=self.r, capture_output=True, text=True, env=env)
+                out = p.stdout + p.stderr
+                self.assertIn("generated.txt", out)
+                self.assertIn("changed files during the run", out)
+                self.assertNotEqual(p.returncode, 0, out)        # R1-08: not clean evidence
+                self.assertFalse(self.work()[0]["passes"])
+
+    def test_a_check_that_rewrites_tracked_source_cannot_pass_or_check(self):
+        # R1-08 (Codex probe): test the old source, then overwrite it with broken generated code.
+        self.set_check("from pathlib import Path\nfrom app import add\nassert add(2, 2) == 4\n"
+                       "Path('app.py').write_text('def add(a, b):\\n    return 0\\n')\n")
+        out = self.h("verify", "F-001", ok=False)
+        self.assertIn("app.py", out)
+        self.assertFalse(self.work()[0]["passes"])
+        out = self.h("check", ok=False)
+        self.assertNotIn("VERIFIED   F-001", out)
+
+    def test_a_pinned_test_mutated_during_the_run_is_refused(self):
+        self.set_check("from pathlib import Path\nimport app\nassert app.add(2, 2) == 4\n"
+                       "Path('check.py').write_text('print(1)\\n')\n")
+        out = self.h("verify", "F-001", ok=False)
+        self.assertIn("check.py", out)
+        self.assertFalse(self.work()[0]["passes"])
+
+    def test_ignored_build_artifacts_are_allowed(self):
+        (self.r / ".gitignore").write_text("__pycache__/\nbuild/\n")
+        self.commit("ignore build")
+        self.set_check("from pathlib import Path\nimport app\nassert app.add(2, 2) == 4\n"
+                       "Path('build').mkdir(exist_ok=True); Path('build/out.txt').write_text('artifact')\n")
+        self.h("verify", "F-001")
+        self.assertTrue(self.work()[0]["passes"])
+        self.commit("evidence")
+        self.h("check")
+
+    def test_check_rejects_uncommitted_source_changes(self):
+        self.full_pass()
+        (self.r / "app.py").write_text("def add(a, b):\n    return 0\n")    # edited, not committed
+        out = self.h("check", ok=False)
+        self.assertIn("uncommitted", out)
+        out = self.h("check", "--allow-dirty", ok=True)           # e.g. a pre-commit hook: reported, not VERIFIED
+        self.assertIn("UNRESOLVED", out)
+        self.assertNotIn("VERIFIED   F-001", out)
 
     def test_criteria_change_after_approval_fails(self):
         self.full_pass()
