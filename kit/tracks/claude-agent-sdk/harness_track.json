@@ -1,0 +1,49 @@
+{
+  "schema": "harness-track/1",
+  "id": "claude-agent-sdk",
+  "name": "Claude Agent SDK",
+  "language": "python",
+  "support": "full",
+  "framework": {
+    "package": "claude-agent-sdk",
+    "version": "0.2.174"
+  },
+  "entry": "agent.py",
+  "tool_hook": {
+    "kind": "callback",
+    "where": "agent.py:deny_secrets"
+  },
+  "reach_sources": [
+    {
+      "file": ".claude/settings.json",
+      "kind": "claude_settings"
+    },
+    {
+      "file": ".mcp.json",
+      "kind": "mcp_json"
+    },
+    {
+      "file": "**/*.py",
+      "kind": "python_tool_list"
+    },
+    {
+      "file": ".env.example",
+      "kind": "env_example"
+    }
+  ],
+  "detect": [
+    {
+      "file": "**/*.py",
+      "contains": "claude_agent_sdk"
+    },
+    {
+      "file": "requirements*.txt",
+      "contains": "claude-agent-sdk"
+    },
+    {
+      "file": "pyproject.toml",
+      "contains": "claude-agent-sdk"
+    }
+  ],
+  "notes": "Claude Code's harness driven from Python."
+}

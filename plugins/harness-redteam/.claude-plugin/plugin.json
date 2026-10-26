@@ -1,6 +1,6 @@
 {
   "name": "harness-redteam",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "Red-team your agent two ways: promptfoo and DeepTeam evals mapped to OWASP, and a live harness that runs attacks through the real tool path with canaries, a tool trace, an egress log and action-based verdicts.",
   "author": {
     "name": "Yen-Ching Wu"

@@ -1,0 +1,41 @@
+{
+  "schema": "harness-track/1",
+  "id": "google-adk",
+  "name": "Google ADK",
+  "language": "python",
+  "support": "full",
+  "framework": {
+    "package": "google-adk",
+    "version": "2.13.0"
+  },
+  "entry": "kit_agent/agent.py",
+  "tool_hook": {
+    "kind": "callback",
+    "where": "kit_agent/agent.py:trace_tool"
+  },
+  "reach_sources": [
+    {
+      "file": "**/*.py",
+      "kind": "python_tool_list"
+    },
+    {
+      "file": ".env.example",
+      "kind": "env_example"
+    }
+  ],
+  "detect": [
+    {
+      "file": "**/*.py",
+      "contains": "google.adk"
+    },
+    {
+      "file": "requirements*.txt",
+      "contains": "google-adk"
+    },
+    {
+      "file": "pyproject.toml",
+      "contains": "google-adk"
+    }
+  ],
+  "notes": "Uses before_tool_callback for the trace."
+}

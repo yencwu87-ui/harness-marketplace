@@ -1,0 +1,45 @@
+{
+  "schema": "harness-track/1",
+  "id": "langgraph",
+  "name": "LangGraph",
+  "language": "python",
+  "support": "full",
+  "framework": {
+    "package": "langgraph",
+    "version": "1.2.17"
+  },
+  "entry": "agent.py",
+  "tool_hook": {
+    "kind": "callback",
+    "where": "agent.py:TraceTools"
+  },
+  "reach_sources": [
+    {
+      "file": "**/*.py",
+      "kind": "langgraph_tools"
+    },
+    {
+      "file": ".env.example",
+      "kind": "env_example"
+    }
+  ],
+  "detect": [
+    {
+      "file": "**/*.py",
+      "contains": "from langgraph"
+    },
+    {
+      "file": "**/*.py",
+      "contains": "from langchain.agents import create_agent"
+    },
+    {
+      "file": "requirements*.txt",
+      "contains": "langgraph"
+    },
+    {
+      "file": "pyproject.toml",
+      "contains": "langgraph"
+    }
+  ],
+  "notes": "langchain.agents.create_agent on LangGraph with a checkpointer; LangChain callback on_tool_start for the trace."
+}

@@ -7,6 +7,11 @@ whichever environment a developer picked. Choose with the KIT_TRACK environment 
   claude-agent-sdk           tracks/claude-agent-sdk/agent.py
   microsoft-agent-framework  tracks/microsoft-agent-framework/harness_agent.py
   google-adk                 tracks/google-adk/kit_agent/agent.py
+  langgraph                  tracks/langgraph/agent.py
+  openai-agents-sdk          tracks/openai-agents-sdk/agent.py
+  crewai                     tracks/crewai/agent.py
+  strands-agents             tracks/strands-agents/agent.py
+Assess-only tracks (see tracks/TRACK_SPEC.md) have no starter, so they are not listed here.
 """
 from __future__ import annotations
 
@@ -20,6 +25,10 @@ TRACK_FILES = {
     "claude-agent-sdk": ROOT / "tracks/claude-agent-sdk/agent.py",
     "microsoft-agent-framework": ROOT / "tracks/microsoft-agent-framework/harness_agent.py",
     "google-adk": ROOT / "tracks/google-adk/kit_agent/agent.py",
+    "langgraph": ROOT / "tracks/langgraph/agent.py",
+    "openai-agents-sdk": ROOT / "tracks/openai-agents-sdk/agent.py",
+    "crewai": ROOT / "tracks/crewai/agent.py",
+    "strands-agents": ROOT / "tracks/strands-agents/agent.py",
 }
 
 

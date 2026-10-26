@@ -34,7 +34,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from egress_proxy import EgressProxy  # noqa: E402
 
-VERSION = "1.3.0"
+VERSION = "1.4.0"
 SKIP = {".git", "node_modules", ".venv", "venv", "__pycache__", ".harness-live"}
 AGENT_FIELDS = {"passes", "evidence", "next_action"}
 DEFAULTS = {
@@ -57,11 +57,38 @@ def sha(b: bytes) -> str:
     return hashlib.sha256(b).hexdigest()
 
 
+# Per-track defaults, used when live.json sets "track". Each code track records its own tool calls to
+# $HARNESS_TRACE (see kit/tracks/TRACK_SPEC.md); the Claude Code track gets the PreToolUse hook installed.
+# The command runs inside the disposable copy, where the kit sits at ./harness; set KIT_PYTHON to the
+# track's venv python. Anything set explicitly in live.json wins over the preset.
+_PY = os.environ.get("KIT_PYTHON", "python3")
+TRACK_PRESETS = {
+    "claude-code": {},
+    "claude-agent-sdk": {"agent_cmd": [_PY, "harness/tracks/claude-agent-sdk/agent.py", "--ask", "{task}"]},
+    "microsoft-agent-framework": {"agent_cmd": [_PY, "harness/tracks/microsoft-agent-framework/harness_agent.py", "--ask", "{task}"]},
+    "google-adk": {"agent_cmd": [_PY, "-c", "import asyncio,sys; sys.path.insert(0,'harness/tracks/google-adk'); "
+                                             "from kit_agent.agent import ask; print(asyncio.run(ask(sys.argv[1])))", "{task}"]},
+    "langgraph": {"agent_cmd": [_PY, "harness/tracks/langgraph/agent.py", "--ask", "{task}"]},
+    "openai-agents-sdk": {"agent_cmd": [_PY, "harness/tracks/openai-agents-sdk/agent.py", "--ask", "{task}"],
+                          "allow_hosts": ["api.openai.com"]},
+    "crewai": {"agent_cmd": [_PY, "harness/tracks/crewai/agent.py", "--ask", "{task}"]},
+    "strands-agents": {"agent_cmd": [_PY, "harness/tracks/strands-agents/agent.py", "--ask", "{task}"]},
+}
+
+
 def load_config(repo: Path, path: str | None) -> dict:
     cfg = dict(DEFAULTS)
     p = Path(path) if path else repo / "live.json"
-    if p.exists():
-        cfg.update(json.loads(p.read_text()))
+    user = json.loads(p.read_text()) if p.exists() else {}
+    track = user.get("track")
+    if track is not None:
+        if track not in TRACK_PRESETS:
+            raise SystemExit(f"unknown track {track!r}; use one of: {', '.join(TRACK_PRESETS)} "
+                             "(assess-only tracks have no preset: set agent_cmd yourself)")
+        cfg.update(TRACK_PRESETS[track])
+        if track != "claude-code":
+            cfg["install_trace_hook"] = False   # code tracks write $HARNESS_TRACE themselves
+    cfg.update(user)
     return cfg
 
 

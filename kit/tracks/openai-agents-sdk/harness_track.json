@@ -1,0 +1,41 @@
+{
+  "schema": "harness-track/1",
+  "id": "openai-agents-sdk",
+  "name": "OpenAI Agents SDK",
+  "language": "python",
+  "support": "full",
+  "framework": {
+    "package": "openai-agents",
+    "version": "0.24.0"
+  },
+  "entry": "agent.py",
+  "tool_hook": {
+    "kind": "event",
+    "where": "agent.py:TraceTools"
+  },
+  "reach_sources": [
+    {
+      "file": "**/*.py",
+      "kind": "openai_agents_tools"
+    },
+    {
+      "file": ".env.example",
+      "kind": "env_example"
+    }
+  ],
+  "detect": [
+    {
+      "file": "**/*.py",
+      "contains": "from agents import"
+    },
+    {
+      "file": "requirements*.txt",
+      "contains": "openai-agents"
+    },
+    {
+      "file": "pyproject.toml",
+      "contains": "openai-agents"
+    }
+  ],
+  "notes": "Chat Completions model on any OpenAI-compatible endpoint; SDK trace export off by default."
+}

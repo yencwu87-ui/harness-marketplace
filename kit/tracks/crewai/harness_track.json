@@ -1,0 +1,41 @@
+{
+  "schema": "harness-track/1",
+  "id": "crewai",
+  "name": "CrewAI",
+  "language": "python",
+  "support": "full",
+  "framework": {
+    "package": "crewai",
+    "version": "1.15.30"
+  },
+  "entry": "agent.py",
+  "tool_hook": {
+    "kind": "callback",
+    "where": "agent.py:trace_tool"
+  },
+  "reach_sources": [
+    {
+      "file": "**/*.py",
+      "kind": "crewai_tools"
+    },
+    {
+      "file": ".env.example",
+      "kind": "env_example"
+    }
+  ],
+  "detect": [
+    {
+      "file": "**/*.py",
+      "contains": "from crewai"
+    },
+    {
+      "file": "requirements*.txt",
+      "contains": "crewai"
+    },
+    {
+      "file": "pyproject.toml",
+      "contains": "crewai"
+    }
+  ],
+  "notes": "before-tool-call hook for the trace; CrewAI telemetry off by default."
+}

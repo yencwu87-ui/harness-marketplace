@@ -1,0 +1,45 @@
+{
+  "schema": "harness-track/1",
+  "id": "claude-code",
+  "name": "Claude Code",
+  "language": "python",
+  "support": "full",
+  "framework": {
+    "package": "@anthropic-ai/claude-code",
+    "version": "2.1.310"
+  },
+  "entry": "CLAUDE.md",
+  "tool_hook": {
+    "kind": "event",
+    "where": "../../testing/live/trace_hook.py:PreToolUse"
+  },
+  "reach_sources": [
+    {
+      "file": ".claude/settings.json",
+      "kind": "claude_settings"
+    },
+    {
+      "file": ".claude/settings.local.json",
+      "kind": "claude_settings"
+    },
+    {
+      "file": ".mcp.json",
+      "kind": "mcp_json"
+    },
+    {
+      "file": ".env.example",
+      "kind": "env_example"
+    }
+  ],
+  "detect": [
+    {
+      "file": ".claude/settings.json",
+      "contains": "\"permissions\""
+    },
+    {
+      "file": "CLAUDE.md",
+      "contains": ""
+    }
+  ],
+  "notes": "Config-only track; the language field is nominal (no code to write)."
+}

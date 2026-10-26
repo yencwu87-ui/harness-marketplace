@@ -1,0 +1,41 @@
+{
+  "schema": "harness-track/1",
+  "id": "strands-agents",
+  "name": "AWS Strands Agents",
+  "language": "python",
+  "support": "full",
+  "framework": {
+    "package": "strands-agents",
+    "version": "1.62.0"
+  },
+  "entry": "agent.py",
+  "tool_hook": {
+    "kind": "event",
+    "where": "agent.py:TraceTools"
+  },
+  "reach_sources": [
+    {
+      "file": "**/*.py",
+      "kind": "strands_tools"
+    },
+    {
+      "file": ".env.example",
+      "kind": "env_example"
+    }
+  ],
+  "detect": [
+    {
+      "file": "**/*.py",
+      "contains": "from strands"
+    },
+    {
+      "file": "requirements*.txt",
+      "contains": "strands-agents"
+    },
+    {
+      "file": "pyproject.toml",
+      "contains": "strands-agents"
+    }
+  ],
+  "notes": "BeforeToolCallEvent hook for the trace; Anthropic or Bedrock provider."
+}

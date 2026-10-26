@@ -1,0 +1,38 @@
+{
+  "schema": "harness-track/1",
+  "id": "vercel-ai-sdk",
+  "name": "Vercel AI SDK",
+  "language": "typescript",
+  "support": "assess-only",
+  "framework": {
+    "package": "ai",
+    "version": "7.0.153"
+  },
+  "entry": null,
+  "tool_hook": null,
+  "reach_sources": [
+    {
+      "file": "**/*",
+      "kind": "generic_declared"
+    },
+    {
+      "file": ".env.example",
+      "kind": "env_example"
+    }
+  ],
+  "detect": [
+    {
+      "file": "package.json",
+      "contains": "\"ai\""
+    },
+    {
+      "file": "**/*.ts",
+      "contains": "from 'ai'"
+    },
+    {
+      "file": "**/*.ts",
+      "contains": "from \"ai\""
+    }
+  ],
+  "notes": "Assess-only, TypeScript: detect and audit; no starter or trace hook in the kit yet."
+}

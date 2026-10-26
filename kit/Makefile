@@ -5,12 +5,15 @@ REPO  ?= $(abspath ..)
 VENV  := .venv/$(TRACK)
 PY    := $(VENV)/bin/python
 PF    := npx --yes promptfoo@0.125.1
-TRACKS := claude-code claude-agent-sdk microsoft-agent-framework google-adk
+PRE   := $(if $(filter microsoft-agent-framework,$(TRACK)),--pre,)   # only MAF needs pre-release connectors
+TRACKS := claude-code claude-agent-sdk microsoft-agent-framework google-adk langgraph openai-agents-sdk crewai strands-agents
+ASSESS_ONLY := $(shell cd tracks && grep -l '"assess-only"' */harness_track.json 2>/dev/null | cut -d/ -f1)
 
 .PHONY: help install devcontainer setup setup-redteam check proof audit redteam-live redteam-selftest run smoke eval redteam-promptfoo redteam-deepteam
 
 help:
 	@echo "TRACK = one of: $(TRACKS)   (now: $(TRACK))"
+	@echo "Assess-only (no starter yet, see tracks/TRACK_SPEC.md): $(ASSESS_ONLY)"
 	@echo "REPO  = your project root     (now: $(REPO))"
 	@echo ""
 	@echo "make install TRACK=..        copy work list, init.sh, check script (+ Claude Code files) into REPO; never overwrites"
@@ -53,13 +56,15 @@ setup:
 	  command -v claude >/dev/null || npm install -g @anthropic-ai/claude-code; \
 	  command -v jq >/dev/null || echo "Install jq for the test-output hook (brew install jq / apt install jq)"; \
 	  claude --version; \
+	elif [ ! -f tracks/$(TRACK)/requirements.txt ]; then \
+	  echo "No starter for TRACK=$(TRACK) (assess-only or unknown). See tracks/TRACK_SPEC.md"; exit 1; \
 	else \
 	  python3 -m venv "$(VENV)" && $(PY) -m pip install -q --upgrade pip && \
-	  $(PY) -m pip install -q --pre -r tracks/$(TRACK)/requirements.txt && echo "Ready: $(VENV)"; \
+	  $(PY) -m pip install -q $(PRE) -r tracks/$(TRACK)/requirements.txt && echo "Ready: $(VENV)"; \
 	fi
 
 setup-redteam:
-	@test "$(TRACK)" != "claude-code" || (echo "Pick a code track (claude-agent-sdk, microsoft-agent-framework, google-adk)"; exit 1)
+	@test "$(TRACK)" != "claude-code" || (echo "Pick a code track (any of $(TRACKS) except claude-code)"; exit 1)
 	$(PY) -m pip install -q -r testing/deepteam/requirements.txt
 
 audit:
@@ -74,6 +79,8 @@ run:
 	  claude-agent-sdk) $(PY) tracks/claude-agent-sdk/agent.py --repo "$(REPO)";; \
 	  microsoft-agent-framework) KIT_REPO="$(REPO)" $(PY) tracks/microsoft-agent-framework/harness_agent.py --repo "$(REPO)";; \
 	  google-adk) KIT_REPO="$(REPO)" $(VENV)/bin/adk web tracks/google-adk;; \
+	  langgraph|openai-agents-sdk|crewai|strands-agents) KIT_REPO="$(REPO)" $(PY) tracks/$(TRACK)/agent.py --repo "$(REPO)";; \
+	  *) echo "No starter for TRACK=$(TRACK) (assess-only or unknown). See tracks/TRACK_SPEC.md"; exit 1;; \
 	esac
 
 smoke:

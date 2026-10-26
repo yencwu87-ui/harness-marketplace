@@ -35,5 +35,6 @@
   "install_trace_hook": true,
   "isolation": "netns",
   "docker_image": "harness-kit:latest",
-  "_isolation": "netns: Linux, the agent has no network except the logging proxy (tested). docker: same idea in a container with --network none (experimental; needs the kit image). none: relies on the agent honouring proxy settings; on macOS prefer Claude Code's own sandbox setting."
+  "_isolation": "netns: Linux, the agent has no network except the logging proxy (tested). docker: same idea in a container with --network none (experimental; needs the kit image). none: relies on the agent honouring proxy settings; on macOS prefer Claude Code's own sandbox setting.",
+  "_track": "Optional. Set \"track\" to a full kit track id (claude-code, claude-agent-sdk, microsoft-agent-framework, google-adk, langgraph, openai-agents-sdk, crewai, strands-agents) to start from that track's agent_cmd; set KIT_PYTHON to the track's venv python. Keys you set here still win."
 }

@@ -1,0 +1,38 @@
+{
+  "schema": "harness-track/1",
+  "id": "pydantic-ai",
+  "name": "Pydantic AI",
+  "language": "python",
+  "support": "assess-only",
+  "framework": {
+    "package": "pydantic-ai",
+    "version": "2.61.0"
+  },
+  "entry": null,
+  "tool_hook": null,
+  "reach_sources": [
+    {
+      "file": "**/*",
+      "kind": "generic_declared"
+    },
+    {
+      "file": ".env.example",
+      "kind": "env_example"
+    }
+  ],
+  "detect": [
+    {
+      "file": "**/*.py",
+      "contains": "from pydantic_ai"
+    },
+    {
+      "file": "requirements*.txt",
+      "contains": "pydantic-ai"
+    },
+    {
+      "file": "pyproject.toml",
+      "contains": "pydantic-ai"
+    }
+  ],
+  "notes": "Assess-only: detect and audit; no starter or trace hook in the kit yet."
+}

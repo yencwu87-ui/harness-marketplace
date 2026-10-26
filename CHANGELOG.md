@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.4.0 (26 Oct 2026)
+- **Four more tracks, supported (full):** LangGraph (langgraph 1.2.17), OpenAI Agents SDK (openai-agents 0.24.0), CrewAI (crewai 1.15.30) and AWS Strands Agents (strands-agents 1.62.0). Each has a starter wired to `shared/target.py`, a pinned `requirements.txt`, model calls that can point at a gateway (base URL from the environment), and a tool-call trace for the live red team that uses the framework's own hook (LangChain callback, `RunHooks`, before-tool-call hook, `BeforeToolCallEvent`).
+- **Eight assess-only tracks:** LlamaIndex, Pydantic AI, smolagents, Haystack, DSPy, Agno, Mastra and Vercel AI SDK. Each has a spec file and a short README so an assessor can detect and audit a harness built on it. The kit ships no starter or trace hook for them yet.
+- **Track spec:** every track has a `harness_track.json` (`harness-track/1`, see `kit/tracks/TRACK_SPEC.md`), the four existing tracks included.
+- **Live red team:** `"track": "<id>"` in `live.json` fills in that track's agent command. Code tracks write their own trace, so the Claude Code hook is not installed for them.
+- **Offline smoke tests:** `tests/test_tracks.py` drives one tool call through each new track against `tests/llm_stub.py` (a local Anthropic/OpenAI-shaped stub on 127.0.0.1) and checks that the trace recorded it. The tests skip when a framework isn't installed.
+- harness-redteam 1.4.0 (its skill names the track presets). `make setup` uses `--pre` only for Microsoft Agent Framework. AutoGen and Semantic Kernel are noted under Microsoft Agent Framework rather than given tracks of their own.
+
 ## 1.3.0 (25 Oct 2026)
 - **Independent re-execution:** `harness reverify` re-runs every passing item's checks on the current machine, writes nothing, and fails if any fail. The CI template now runs `check` then `reverify` and fails properly (1.1's template did not).
 - **Environment pinning:** dependency lockfiles (requirements, poetry, uv, npm, pnpm, yarn, Cargo, go.sum, …) are pinned automatically; evidence records fingerprint git-ignored local files that could affect tests.

@@ -19,6 +19,14 @@ any of them.
 | The Claude Code harness inside your own app or CI job | **[Claude Agent SDK](tracks/claude-agent-sdk/)** | Python (also TypeScript) | Claude |
 | Enterprise agents on Azure, workflows, .NET or Python | **[Microsoft Agent Framework](tracks/microsoft-agent-framework/)** | Python (also .NET) | Claude, OpenAI, Azure/Foundry, Ollama |
 | Agents on Google Cloud, with a web debugger and built-in evals | **[Google ADK](tracks/google-adk/)** | Python (also Java, Go, TS) | Claude, Gemini, any LiteLLM model |
+| Stateful graphs that resume by thread | **[LangGraph](tracks/langgraph/)** | Python | Claude, OpenAI, many via LangChain |
+| Small agents with handoffs, on any OpenAI-compatible endpoint | **[OpenAI Agents SDK](tracks/openai-agents-sdk/)** | Python (also TS) | Any OpenAI-compatible model |
+| Role-based crews of agents | **[CrewAI](tracks/crewai/)** | Python | Claude, OpenAI, Bedrock, Gemini, local… |
+| Agents on AWS / Bedrock | **[AWS Strands Agents](tracks/strands-agents/)** | Python (also TS) | Bedrock, Claude, OpenAI… |
+
+All eight are **supported (full)**: a starter, a pinned install, a tool-call trace for the live red team and
+an offline smoke test. Eight more frameworks are **assess-only** (LlamaIndex, Pydantic AI, smolagents,
+Haystack, DSPy, Agno, Mastra, Vercel AI SDK): see [CHOOSING.md](CHOOSING.md) and [tracks/TRACK_SPEC.md](tracks/TRACK_SPEC.md).
 
 Not sure? Read [CHOOSING.md](CHOOSING.md) (two minutes).
 

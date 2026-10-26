@@ -26,6 +26,13 @@ jobs:
         run: python3 scripts/check_feature_list.py
       - name: Unit tests (audit, evidence binding, live red team)
         run: python3 -m unittest discover -s tests -v
+      - name: Track smoke tests (one tool call per full track, offline against tests/llm_stub.py; each framework in its own venv)
+        run: |
+          for t in langgraph openai-agents-sdk crewai strands-agents; do
+            python3 -m venv "/tmp/venv-$t"
+            "/tmp/venv-$t/bin/pip" install -q -r "kit/tracks/$t/requirements.txt"
+            "/tmp/venv-$t/bin/python" -m unittest tests.test_tracks -v
+          done
       - name: Copies of the single-source tools are in sync
         run: python3 tools/sync_copies.py --check
       - name: Live red team detector self-test (positive and negative control, no model)

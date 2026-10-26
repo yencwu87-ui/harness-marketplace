@@ -1,0 +1,41 @@
+{
+  "schema": "harness-track/1",
+  "id": "microsoft-agent-framework",
+  "name": "Microsoft Agent Framework",
+  "language": "python",
+  "support": "full",
+  "framework": {
+    "package": "agent-framework",
+    "version": "1.23.0"
+  },
+  "entry": "harness_agent.py",
+  "tool_hook": {
+    "kind": "middleware",
+    "where": "harness_agent.py:trace_calls"
+  },
+  "reach_sources": [
+    {
+      "file": "**/*.py",
+      "kind": "python_tool_list"
+    },
+    {
+      "file": ".env.example",
+      "kind": "env_example"
+    }
+  ],
+  "detect": [
+    {
+      "file": "**/*.py",
+      "contains": "from agent_framework"
+    },
+    {
+      "file": "requirements*.txt",
+      "contains": "agent-framework"
+    },
+    {
+      "file": "pyproject.toml",
+      "contains": "agent-framework"
+    }
+  ],
+  "notes": "Successor to Semantic Kernel and AutoGen for building agents."
+}

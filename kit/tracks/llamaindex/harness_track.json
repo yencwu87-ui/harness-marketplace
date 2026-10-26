@@ -1,0 +1,34 @@
+{
+  "schema": "harness-track/1",
+  "id": "llamaindex",
+  "name": "LlamaIndex agents",
+  "language": "python",
+  "support": "assess-only",
+  "framework": {
+    "package": "llama-index-core",
+    "version": "0.14.25"
+  },
+  "entry": null,
+  "tool_hook": null,
+  "reach_sources": [
+    {
+      "file": "**/*",
+      "kind": "generic_declared"
+    },
+    {
+      "file": ".env.example",
+      "kind": "env_example"
+    }
+  ],
+  "detect": [
+    {
+      "file": "**/*.py",
+      "contains": "from llama_index"
+    },
+    {
+      "file": "requirements*.txt",
+      "contains": "llama-index"
+    }
+  ],
+  "notes": "Assess-only: detect and audit; no starter or trace hook in the kit yet."
+}
