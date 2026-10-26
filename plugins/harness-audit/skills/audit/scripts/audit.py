@@ -20,6 +20,7 @@ Checks are heuristics over files: a pass means the harness piece exists, not tha
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import os
 import re
@@ -27,7 +28,7 @@ import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-VERSION = "1.1.0"
+VERSION = "1.4.1"
 SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", "dist", "build", ".next", "target", "site-packages", "third_party", "vendor"}
 MAX_FILES = 60000
 MAX_FILE_BYTES = 400_000
@@ -39,7 +40,7 @@ class Check:
     area: str
     title: str
     weight: int              # 3 = critical, 2 = important, 1 = nice to have
-    status: str = "MISSING"  # VERIFIED | MISSING | UNRESOLVED
+    status: str = "MISSING"  # VERIFIED | DECLARED | MISSING | UNRESOLVED
     evidence: str = ""
     fix: str = ""
 
@@ -52,6 +53,7 @@ class Report:
     grade: str = ""
     checks: list = field(default_factory=list)
     areas: dict = field(default_factory=dict)
+    tracks: list = field(default_factory=list)   # frameworks detected besides Claude Code settings
 
 
 class Repo:
@@ -131,6 +133,323 @@ class Repo:
         return ""
 
 
+# ------------------------------------------------------------------ framework tracks (1.4.1)
+# Mirrors the "detect" signatures in kit/tracks/*/harness_track.json (tests keep the two in sync). Claude Code is
+# read from .claude/settings*.json as before. A repo matches a track when a non-test file matching the glob
+# contains the string. Detection and analysis are static: files are read and parsed with ast, never imported or run.
+TRACK_SIGNATURES = {
+    "agno": {"name": "Agno", "support": "assess-only", "detect": [["**/*.py", "from agno"], ["requirements*.txt", "agno"]]},
+    "claude-agent-sdk": {"name": "Claude Agent SDK", "support": "full", "detect": [["**/*.py", "claude_agent_sdk"], ["requirements*.txt", "claude-agent-sdk"], ["pyproject.toml", "claude-agent-sdk"]]},
+    "crewai": {"name": "CrewAI", "support": "full", "detect": [["**/*.py", "from crewai"], ["requirements*.txt", "crewai"], ["pyproject.toml", "crewai"]]},
+    "dspy": {"name": "DSPy", "support": "assess-only", "detect": [["**/*.py", "import dspy"], ["requirements*.txt", "dspy"]]},
+    "google-adk": {"name": "Google ADK", "support": "full", "detect": [["**/*.py", "google.adk"], ["requirements*.txt", "google-adk"], ["pyproject.toml", "google-adk"]]},
+    "haystack": {"name": "Haystack", "support": "assess-only", "detect": [["**/*.py", "from haystack"], ["requirements*.txt", "haystack-ai"]]},
+    "langgraph": {"name": "LangGraph", "support": "full", "detect": [["**/*.py", "from langgraph"], ["**/*.py", "from langchain.agents import create_agent"], ["requirements*.txt", "langgraph"], ["pyproject.toml", "langgraph"]]},
+    "llamaindex": {"name": "LlamaIndex agents", "support": "assess-only", "detect": [["**/*.py", "from llama_index"], ["requirements*.txt", "llama-index"]]},
+    "mastra": {"name": "Mastra", "support": "assess-only", "detect": [["package.json", "@mastra/core"], ["**/*.ts", "@mastra/core"]]},
+    "microsoft-agent-framework": {"name": "Microsoft Agent Framework", "support": "full", "detect": [["**/*.py", "from agent_framework"], ["requirements*.txt", "agent-framework"], ["pyproject.toml", "agent-framework"]]},
+    "openai-agents-sdk": {"name": "OpenAI Agents SDK", "support": "full", "detect": [["**/*.py", "from agents import"], ["requirements*.txt", "openai-agents"], ["pyproject.toml", "openai-agents"]]},
+    "pydantic-ai": {"name": "Pydantic AI", "support": "assess-only", "detect": [["**/*.py", "from pydantic_ai"], ["requirements*.txt", "pydantic-ai"], ["pyproject.toml", "pydantic-ai"]]},
+    "smolagents": {"name": "smolagents (Hugging Face)", "support": "assess-only", "detect": [["**/*.py", "from smolagents"], ["requirements*.txt", "smolagents"]]},
+    "strands-agents": {"name": "AWS Strands Agents", "support": "full", "detect": [["**/*.py", "from strands"], ["requirements*.txt", "strands-agents"], ["pyproject.toml", "strands-agents"]]},
+    "vercel-ai-sdk": {"name": "Vercel AI SDK", "support": "assess-only", "detect": [["package.json", "\"ai\""], ["**/*.ts", "from 'ai'"], ["**/*.ts", "from \"ai\""]]},
+}
+
+# The framework's own mechanism, named in every fix.
+GUARD_FIX = {
+    "langgraph": ("Pass an explicit tool list to create_agent / create_react_agent (or a ToolNode) and keep shell, file-write, web and computer tools out of it; gate any you need with interrupt() or HumanInTheLoopMiddleware.",
+                  "Keep file-read, shell, web and computer tools out of the list, or refuse .env/.pem/.key/.ssh/.aws inputs in middleware or a tool wrapper before the call runs.",
+                  "Gate shell, file-write and computer tools with interrupt() / HumanInTheLoopMiddleware, or refuse git push / reset --hard / rm -rf before the call runs."),
+    "openai-agents-sdk": ("Pass an explicit tools=[...] to Agent and leave LocalShellTool, ShellTool, ComputerTool and hosted web tools out; if you need one, set needs_approval=True or add a tool input guardrail.",
+                          "Keep file-read, shell, web and computer tools out of tools=[...], or refuse .env/.pem/.key/.ssh/.aws in a tool input guardrail.",
+                          "Set needs_approval=True on shell, file-write and computer tools, or refuse git push / reset --hard / rm -rf in a tool input guardrail."),
+    "crewai": ("Pass an explicit tools=[...] to Agent; leave allow_code_execution off and CodeInterpreterTool, file-writer and scraping tools out, or block them in a before-tool-call hook (return False).",
+               "Keep file-read, code, web and computer tools out, or return False from a before-tool-call hook for .env/.pem/.key/.ssh/.aws inputs.",
+               "Return False from a before-tool-call hook for git push / reset --hard / rm -rf, or set human_input=True on the task."),
+    "strands-agents": ("Pass an explicit tools=[...] of your own @tool functions to Agent; leave strands_tools shell, python_repl, file_write, http_request and use_computer out, or cancel them in a BeforeToolCallEvent hook.",
+                       "Keep file-read, shell, web and computer tools out, or set event.cancel_tool in a BeforeToolCallEvent hook for .env/.pem/.key/.ssh/.aws inputs.",
+                       "Set event.cancel_tool in a BeforeToolCallEvent hook for git push / reset --hard / rm -rf and file writes outside the repo."),
+    "google-adk": ("Pass an explicit tools=[...] to Agent and keep shell, file-write, web and computer tools out, or block them in before_tool_callback (return a dict).",
+                   "Keep file-read, shell, web and computer tools out, or return a dict from before_tool_callback for .env/.pem/.key/.ssh/.aws inputs.",
+                   "Return a dict from before_tool_callback for git push / reset --hard / rm -rf, or keep such tools out."),
+    "microsoft-agent-framework": ("Pass an explicit tools=[...] to Agent / create_harness_agent and keep shell, file-write, web and computer tools out, or mark them @tool(approval_mode=\"always_require\").",
+                                  "Keep file-read, shell, web and computer tools out, or refuse .env/.pem/.key/.ssh/.aws in function middleware.",
+                                  "Mark destructive tools @tool(approval_mode=\"always_require\") or refuse git push / reset --hard / rm -rf in function middleware."),
+    "claude-agent-sdk": ("Set allowed_tools=[...] explicitly; if it includes Bash, Write, Edit or WebFetch, add disallowed_tools or a PreToolUse hook that returns permissionDecision deny.",
+                         "Add a PreToolUse hook that denies .env/.pem/.key/.ssh/.aws paths for Read, Grep, Glob and Bash.",
+                         "Add disallowed_tools for Bash(git push *), Bash(git reset --hard *), Bash(rm -rf *), or deny them in a PreToolUse hook."),
+}
+CATEGORY_WORDS = {"shell": "shell or code execution", "write": "file-write anywhere", "fetch": "web fetch",
+                  "computer": "computer use", "read": "file-read anywhere"}
+G2_CATS = {"shell", "fetch", "computer", "read"}   # can reach or send secrets
+G3_CATS = {"shell", "write", "computer"}           # can destroy or change things irreversibly
+NATIVE_BROAD = [  # framework tools that are broad by design
+    (r"^(ShellTool|LocalShellTool|BashTool|PythonREPLTool|PythonAstREPLTool|CodeInterpreterTool|python_repl|shell|CodeAgent)$", "shell"),
+    (r"^(WriteFileTool|FileWriterTool|FileManagementToolkit|file_write|editor|ApplyPatchTool)$", "write"),
+    (r"^(WebSearchTool|RequestsGetTool|RequestsPostTool|ScrapeWebsiteTool|http_request|WebFetch|WebSearch|FileSearchTool)$", "fetch"),
+    (r"^(ComputerTool|use_computer|computer)$", "computer"),
+    (r"^(ReadFileTool|FileReadTool|file_read)$", "read"),
+]
+SDK_TOOL_CATS = {"Bash": "shell", "Write": "write", "Edit": "write", "MultiEdit": "write", "NotebookEdit": "write",
+                 "WebFetch": "fetch", "WebSearch": "fetch", "Read": "read", "Grep": "read", "Glob": "read"}
+APPROVAL_RX = [  # a person decides before the call runs
+    (r"needs_approval\s*=\s*True", "needs_approval=True"),
+    (r"\binterrupt\s*\(|interrupt_before\s*=|interrupt_on\s*=|HumanInTheLoopMiddleware", "interrupt / HumanInTheLoopMiddleware"),
+    (r"human_input\s*=\s*True", "human_input=True"),
+    (r"approval_mode\s*=\s*[\"']always_require", "approval_mode=always_require"),
+]
+DENY_RX = [  # code refuses the call
+    (r"tool_input_guardrail|input_guardrails\s*=", "tool input guardrail"),
+    (r"[\"']permissionDecision[\"']\s*:\s*[\"']deny|disallowed_tools\s*=", "PreToolUse deny / disallowed_tools"),
+    (r"cancel_tool\s*=", "BeforeToolCallEvent cancel_tool"),
+]
+SECRET_RX = r"(\.env\b|\.pem\b|\.ssh\b|\.aws\b|\.key\b)"
+DESTRUCTIVE_RX = r"(git push|reset --hard|rm -rf)"
+DECLARE_RX = {
+    "G1": r"^\s*(#{1,6}\s+|[-*]\s+)?(tools|tool allow ?list|allowed tools|tool list)\b",
+    "G2": r"^\s*(#{1,6}\s+|[-*]\s+)?secrets?\b",
+    "G3": r"^\s*(#{1,6}\s+|[-*]\s+)?(destructive|irreversible)\b",
+}
+DECLARED_CREDIT = 0.5   # declared evidence earns half a check's weight; derived evidence earns all of it
+
+
+def _is_test_path(rel: str) -> bool:
+    parts = rel.split("/")
+    return any(p in ("tests", "test", "testing") for p in parts[:-1]) or parts[-1].startswith("test_") or parts[-1].endswith("_test.py")
+
+
+def _imports(text: str) -> set:
+    """Module names a Python file imports, read with ast (never imported or run)."""
+    try:
+        tree = ast.parse(text or "")
+    except SyntaxError:
+        return set()
+    mods = set()
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Import):
+            mods |= {a.name for a in n.names}
+        elif isinstance(n, ast.ImportFrom) and n.module and not n.level:
+            mods.add(n.module)
+    return mods
+
+
+def _signature_hit(path: Path, text: str, needle: str) -> bool:
+    if path.suffix == ".py":   # Python: a real import of the module, not the word in a string or comment
+        m = re.match(r"^(?:from|import)\s+([\w.]+)", needle)
+        mod = m.group(1) if m else needle
+        return any(x == mod or x.startswith(mod + ".") for x in _imports(text))
+    if path.name.startswith("requirements") and path.suffix == ".txt":
+        return bool(re.search(rf"^\s*{re.escape(needle)}(\[[^\]]*\])?\s*([=<>~!;#\s]|$)", text, re.M))
+    return needle in text
+
+
+def detect_tracks(r: "Repo") -> dict:
+    """{track_id: [files that matched]} for non-Claude tracks, from the signatures above. Test files are ignored."""
+    r.files()
+    out = {}
+    for tid, sig in TRACK_SIGNATURES.items():
+        hits = []
+        for pat, needle in sig["detect"]:
+            for f in r.glob(pat):
+                if _is_test_path(r.rel(f).replace(os.sep, "/")):
+                    continue
+                if _signature_hit(f, r.text(f), needle):
+                    hits.append(f)
+        if hits:
+            out[tid] = list(dict.fromkeys(hits))
+    return out
+
+
+def _dotted(node) -> str:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        base = _dotted(node.value)
+        return f"{base}.{node.attr}" if base else node.attr
+    if isinstance(node, ast.Call):
+        return _dotted(node.func)
+    return ""
+
+
+def _uses(node, params) -> bool:
+    return any(isinstance(n, ast.Name) and n.id in params for n in ast.walk(node))
+
+
+def _fn_categories(fn) -> dict:
+    """Broad capabilities a tool function's body gives the model, judged from where its parameters flow."""
+    params = {a.arg for a in fn.args.args + fn.args.kwonlyargs} - {"self", "ctx", "context", "tool_context"}
+    cats = {}
+    for call in (n for n in ast.walk(fn) if isinstance(n, ast.Call)):
+        name = _dotted(call.func)
+        args = list(call.args) + [k.value for k in call.keywords]
+        hit_param = any(_uses(a, params) for a in args)
+        base = name.split(".")[0]
+        if base in ("pyautogui", "pynput"):
+            cats.setdefault("computer", call.lineno)
+        elif not hit_param and not (isinstance(call.func, ast.Attribute) and _uses(call.func.value, params)):
+            continue
+        elif name in ("subprocess.run", "subprocess.call", "subprocess.Popen", "subprocess.check_output",
+                      "subprocess.check_call", "os.system", "os.popen", "exec", "eval", "compile",
+                      "asyncio.create_subprocess_shell", "asyncio.create_subprocess_exec"):
+            cats.setdefault("shell", call.lineno)
+        elif name == "open":
+            mode = call.args[1] if len(call.args) > 1 else next((k.value for k in call.keywords if k.arg == "mode"), None)
+            m = mode.value if isinstance(mode, ast.Constant) and isinstance(mode.value, str) else "r"
+            if call.args and _uses(call.args[0], params):
+                cats.setdefault("write" if any(c in m for c in "wax+") else "read", call.lineno)
+        elif isinstance(call.func, ast.Attribute) and call.func.attr in ("write_text", "write_bytes", "unlink", "rmdir") \
+                and _uses(call.func.value, params):
+            cats.setdefault("write", call.lineno)
+        elif isinstance(call.func, ast.Attribute) and call.func.attr in ("read_text", "read_bytes") and _uses(call.func.value, params):
+            cats.setdefault("read", call.lineno)
+        elif name in ("shutil.copy", "shutil.copyfile", "shutil.move", "shutil.rmtree", "os.remove", "os.unlink", "os.rename"):
+            cats.setdefault("write", call.lineno)
+        elif base in ("requests", "httpx", "aiohttp") or name.endswith("urlopen") or name.endswith("urlretrieve"):
+            cats.setdefault("fetch", call.lineno)
+    return cats
+
+
+def _returns(fn, kind) -> bool:
+    for n in ast.walk(fn):
+        if isinstance(n, ast.Return) and n.value is not None:
+            if kind == "false" and isinstance(n.value, ast.Constant) and n.value.value is False:
+                return True
+            if kind == "dict" and isinstance(n.value, ast.Dict):
+                return True
+    return False
+
+
+def analyse_surface(r: "Repo", files) -> dict:
+    """Static facts about one framework surface: explicit tool lists, broad tools and gates, each with file:line."""
+    pyfiles = [f for f in files if f.suffix == ".py"]
+    trees, funcs, named_lists = {}, {}, {}
+    for f in pyfiles:
+        try:
+            trees[f] = ast.parse(r.text(f) or "")
+        except SyntaxError:
+            continue
+        for n in ast.walk(trees[f]):
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                funcs.setdefault(n.name, (f, n))
+            elif isinstance(n, ast.Assign) and isinstance(n.value, (ast.List, ast.Tuple)):
+                for t in n.targets:   # TOOLS = [a, b] passed later as tools=TOOLS
+                    if isinstance(t, ast.Name):
+                        named_lists.setdefault(t.id, n.value)
+    lists, cats, gate, secret, destructive = [], {}, None, None, None
+    approval = False
+
+    def where(f, line):
+        return f"{r.rel(f)}:{line}"
+
+    def note(cat, f, line, what):
+        cats.setdefault(cat, f"{where(f, line)} {what} ({CATEGORY_WORDS[cat]})")
+
+    for f, tree in trees.items():
+        text = r.text(f)
+        for n in ast.walk(tree):
+            if isinstance(n, ast.Call):
+                fname = _dotted(n.func).split(".")[-1]
+                seqs = [k.value for k in n.keywords if k.arg in ("tools", "allowed_tools")]
+                if fname in ("create_agent", "create_react_agent") and len(n.args) > 1:
+                    seqs.append(n.args[1])
+                for seq in seqs:
+                    if isinstance(seq, ast.Name) and seq.id in named_lists:
+                        seq = named_lists[seq.id]
+                    if not isinstance(seq, (ast.List, ast.Tuple)):
+                        continue
+                    lists.append(where(f, seq.lineno))
+                    for el in seq.elts:
+                        if isinstance(el, ast.Constant) and isinstance(el.value, str):
+                            tool = el.value.split("(")[0]
+                            if tool in SDK_TOOL_CATS:
+                                note(SDK_TOOL_CATS[tool], f, el.lineno, el.value)
+                            elif "computer" in tool.lower():
+                                note("computer", f, el.lineno, el.value)
+                            continue
+                        name = _dotted(el).split(".")[-1]
+                        for rx, cat in NATIVE_BROAD:
+                            if re.match(rx, name):
+                                note(cat, f, el.lineno, name)
+                        if name in funcs:
+                            ff, fn = funcs[name]
+                            for cat, line in _fn_categories(fn).items():
+                                note(cat, ff, line, name)
+                for k in n.keywords:
+                    if k.arg == "allow_code_execution" and isinstance(k.value, ast.Constant) and k.value.value is True:
+                        note("shell", f, n.lineno, "allow_code_execution=True")
+                if fname == "register_before_tool_call_hook" and n.args and isinstance(n.args[0], ast.Name) \
+                        and n.args[0].id in funcs and _returns(funcs[n.args[0].id][1], "false"):
+                    gate = gate or f"{where(f, n.lineno)} before-tool-call hook that blocks (return False)"
+                for k in n.keywords:
+                    if k.arg == "before_tool_callback" and isinstance(k.value, ast.Name) and k.value.id in funcs \
+                            and _returns(funcs[k.value.id][1], "dict"):
+                        gate = gate or f"{where(f, k.value.lineno)} before_tool_callback that blocks (returns a dict)"
+        for i, line in enumerate(text.splitlines(), 1):
+            for rx, label in APPROVAL_RX:
+                if re.search(rx, line):
+                    gate, approval = gate or f"{where(f, i)} {label}", True
+            for rx, label in DENY_RX:
+                if re.search(rx, line):
+                    gate = gate or f"{where(f, i)} {label}"
+            if secret is None and re.search(SECRET_RX, line) and re.search(r"(re\.|compile|search|match|deny|SECRET|\[|\()", line):
+                secret = f"{where(f, i)}  {line.strip()[:70]}"
+            if destructive is None and re.search(DESTRUCTIVE_RX, line):
+                destructive = f"{where(f, i)}  {line.strip()[:70]}"
+    # functions decorated as tools but never listed still count when no explicit list exists
+    if not lists:
+        for name, (ff, fn) in funcs.items():
+            if any(_dotted(d).split(".")[-1].endswith("tool") for d in fn.decorator_list):
+                for cat, line in _fn_categories(fn).items():
+                    note(cat, ff, line, name)
+    return {"lists": lists, "cats": cats, "gate": gate, "approval": approval, "secret": secret, "destructive": destructive}
+
+
+def guard_results(tid: str, s: dict) -> dict:
+    """G1-G3 for a code framework surface. Same rule on every framework (see TRACK_SPEC / CHANGELOG 1.4.1)."""
+    name = TRACK_SIGNATURES[tid]["name"]
+    fix1, fix2, fix3 = GUARD_FIX[tid]
+    out = {}
+    lst = s["lists"][0] if s["lists"] else ""
+    broad = s["cats"]
+    if not lst:
+        out["G1"] = ("MISSING", "", f"{name}: no explicit tool list found. {fix1}")
+    elif not broad:
+        out["G1"] = ("VERIFIED", f"{lst} explicit tool list; no shell, file-write, web or computer tool", fix1)
+    elif s["gate"]:
+        out["G1"] = ("VERIFIED", f"{lst} tool list; broad tools gated: {s['gate']}", fix1)
+    else:
+        out["G1"] = ("MISSING", "; ".join(broad.values()), f"{name}: {fix1}")
+    risky2 = {c: v for c, v in broad.items() if c in G2_CATS}
+    if not risky2 and lst:
+        out["G2"] = ("VERIFIED", f"{lst} no tool can read files, run commands, fetch URLs or use a computer", fix2)
+    elif risky2 and s["gate"] and s["secret"]:
+        out["G2"] = ("VERIFIED", f"{s['gate']}; secret paths refused at {s['secret']}", fix2)
+    else:
+        out["G2"] = ("MISSING", "; ".join(risky2.values()), f"{name}: {fix2}")
+    risky3 = {c: v for c, v in broad.items() if c in G3_CATS}
+    if not risky3 and lst:
+        out["G3"] = ("VERIFIED", f"{lst} no tool can run commands, write anywhere or use a computer", fix3)
+    elif risky3 and s["gate"] and (s["approval"] or s["destructive"]):
+        out["G3"] = ("VERIFIED", f"{s['gate']}" + (f"; destructive commands refused at {s['destructive']}" if s["destructive"] and not s["approval"] else ""), fix3)
+    else:
+        out["G3"] = ("MISSING", "; ".join(risky3.values()), f"{name}: {fix3}")
+    return out
+
+
+def declared_results(r: "Repo", tid: str) -> dict:
+    name = TRACK_SIGNATURES[tid]["name"]
+    impact = r.first("docs/IMPACT.md", "IMPACT.md")
+    out = {}
+    what = {"G1": "the agent's tool list", "G2": "how secrets are kept out of the agent's reach",
+            "G3": "how destructive actions are refused or approved"}
+    for cid, rx in DECLARE_RX.items():
+        hit = r.grep(impact, rx, re.I | re.M) if impact else ""
+        fix = (f"{name} is assess-only: the audit can't parse its tool lists yet. State {what[cid]} in docs/IMPACT.md "
+               f"(declared evidence earns half the points), or build on a supported (full) track.")
+        out[cid] = ("DECLARED", f"declared, not derived: {hit}", fix) if hit else ("MISSING", "", fix)
+    return out
+
+
 def audit(root: Path) -> Report:
     r = Repo(root)
     checks: list[Check] = []
@@ -157,6 +476,14 @@ def audit(root: Path) -> Report:
     instr_all = [p for p in (r.first("CLAUDE.md"), r.first("AGENTS.md"), r.first(".claude/CLAUDE.md")) if p]
     docs_for_rules = list(dict.fromkeys(instr_all + [p for p in [instr] if p] + r.glob(".claude/skills/*/SKILL.md") + r.glob("docs/*.md")
                        + [p for p in (r.first("session-handoff.md"), r.first("clean-state-checklist.md"), progress) if p]))
+
+    tracks = detect_tracks(r)
+    code_files = list(dict.fromkeys(f for tid, fs in sorted(tracks.items()) if TRACK_SIGNATURES[tid]["support"] == "full"
+                                    for f in fs if f.suffix == ".py"))
+
+    def code_grep(pattern):
+        """First match in the detected framework code ('' when no framework track is detected)."""
+        return r.grep_any(code_files, pattern) if code_files else ""
 
     # 1. Instructions -----------------------------------------------------------------------------
     A = "1 Instructions"
@@ -237,8 +564,10 @@ def audit(root: Path) -> Report:
         m = re.search(r"^description:\s*(.+)$", r.text(p), re.M)
         return m.group(1) if m else ""
     verifier = next((p for p in agent_files if re.search(r"verif|review|qa|evaluat", p.stem + " " + _desc(p), re.I)), None) or r.first("evaluator-rubric.md", "docs/evaluator-rubric.md")
-    add("V5", A, "An independent verifier (subagent or evaluator rubric) checks the work", 1, bool(verifier),
-        r.rel(verifier) if verifier else "", "Add a read-only verifier agent that checks an item against done_when before it passes.")
+    verifier_code = "" if verifier else code_grep(r"(name|role|description)\s*=\s*[\"'][^\"']*(verif|review|evaluat)")
+    add("V5", A, "An independent verifier (subagent or evaluator rubric) checks the work", 1, bool(verifier) or bool(verifier_code),
+        r.rel(verifier) if verifier else verifier_code, "Add a read-only verifier agent that checks an item against done_when before it passes"
+        + (" (in framework code: a second agent named verifier with read-only tools)." if code_files else "."))
 
     # 4. Scope and stopping -------------------------------------------------------------------------
     A = "4 Scope and stopping"
@@ -264,14 +593,47 @@ def audit(root: Path) -> Report:
 
     # 5. Safety guardrails (beyond the course) -------------------------------------------------------
     A = "5 Safety guardrails"
+    # G1-G3 are judged per agent surface: Claude Code settings (unchanged since 1.1) and every detected framework
+    # track. A check passes only when every surface passes it. Declared evidence (assess-only tracks) earns half.
+    claude_g = {}
     deny = r.grep_any(settings, r"\"deny\"")
-    add("G1", A, "Permission deny rules exist", 3, bool(deny), deny, "Add .claude/settings.json permissions.deny for secrets and destructive commands.")
+    claude_g["G1"] = ("VERIFIED" if deny else "MISSING", deny, "Add .claude/settings.json permissions.deny for secrets and destructive commands.")
+    secrets_hit = r.grep_any(settings, r"Read\([^)]*(\.env|\.pem|\.key|\.ssh|\.aws)")
     secrets = bool(re.search(r"Read\([^)]*(\.env|\.pem|\.key|\.ssh|\.aws)", settings_t))
-    add("G2", A, "Secrets are denied to the agent (.env, keys, credential folders)", 3, secrets,
-        r.grep_any(settings, r"Read\([^)]*(\.env|\.pem|\.key|\.ssh|\.aws)"), "Deny Read of .env*, *.pem, *.key, ~/.ssh/**, ~/.aws/**.")
+    claude_g["G2"] = ("VERIFIED" if secrets else "MISSING", secrets_hit, "Deny Read of .env*, *.pem, *.key, ~/.ssh/**, ~/.aws/**.")
     destructive = bool(re.search(r"Bash\(\s*(git push|git reset --hard|rm -rf)", settings_t))
-    add("G3", A, "Destructive commands are denied or gated (push, reset --hard, rm -rf)", 2, destructive,
-        r.grep_any(settings, r"Bash\(\s*(git push|git reset --hard|rm -rf)"), "Deny or require approval for git push, reset --hard, rm -rf.")
+    claude_g["G3"] = ("VERIFIED" if destructive else "MISSING", r.grep_any(settings, r"Bash\(\s*(git push|git reset --hard|rm -rf)"),
+                      "Deny or require approval for git push, reset --hard, rm -rf.")
+    surfaces = []
+    if settings:
+        surfaces.append(("claude-code", claude_g))
+    surface_facts = {}
+    for tid in sorted(tracks):
+        if TRACK_SIGNATURES[tid]["support"] == "full":
+            surface_facts[tid] = analyse_surface(r, tracks[tid])
+            surfaces.append((tid, guard_results(tid, surface_facts[tid])))
+        else:
+            surfaces.append((tid, declared_results(r, tid)))
+    titles = {"G1": ("Permission deny rules exist", 3), "G2": ("Secrets are denied to the agent (.env, keys, credential folders)", 3),
+              "G3": ("Destructive commands are denied or gated (push, reset --hard, rm -rf)", 2)}
+    if tracks:
+        titles = {"G1": ("The agent's actions are bounded (deny rules or an explicit tool list, broad tools gated)", 3),
+                  "G2": ("Secrets are out of the agent's reach (.env, keys, credential folders)", 3),
+                  "G3": ("Destructive actions are denied or gated (push, reset --hard, rm -rf, writes anywhere)", 2)}
+    for cid, (title, weight) in titles.items():
+        if not surfaces:          # nothing detected: exactly the 1.1 behaviour
+            st, ev, fx = claude_g[cid]
+            add(cid, A, title, weight, st == "VERIFIED", ev, fx)
+            continue
+        res = [(tid, *g[cid]) for tid, g in surfaces]
+        many = len(res) > 1
+        ev = "; ".join((f"[{tid}] " if many else "") + e for tid, st_, e, _ in res if e)
+        failing = [f for _, st_, _, f in res if st_ != "VERIFIED"]
+        fx = " | ".join(failing) or (res[0][3] if not many else " | ".join(f for _, _, _, f in res))
+        status = "MISSING" if any(x[1] == "MISSING" for x in res) else "DECLARED" if any(x[1] == "DECLARED" for x in res) else "VERIFIED"
+        c = Check(cid, A, title, weight, fix=fx)
+        c.status, c.evidence = status, ev
+        checks.append(c)
     iso = r.glob(".devcontainer/devcontainer.json", "**/run-sandboxed.sh", "Dockerfile", "docker-compose.yml")
     sandbox = bool(re.search(r"\"sandbox\"\s*:\s*\{[^}]*\"enabled\"\s*:\s*true", settings_t, re.S))
     add("G4", A, "OS-level isolation for unattended runs (sandbox or container)", 2, sandbox or bool(iso),
@@ -283,9 +645,11 @@ def audit(root: Path) -> Report:
     # 6. Evals and red teaming (beyond the course) ---------------------------------------------------
     A = "6 Evals and red teaming"
     pf = r.glob("**/promptfooconfig.yaml", "**/promptfooconfig.yml", "**/promptfoo*.yaml")
+    evalset = r.glob("**/*.evalset.json", "**/*.test.json")
+    eval_code = "" if (pf or evalset) else code_grep(r"\bevaluate_agent\(|AgentEvaluator|langsmith.*evaluate|\bevaluate\(")
     add("E1", A, "Behaviour evals for the agent (promptfoo, ADK eval sets, MAF evaluate_agent, …)", 2,
-        bool(pf) or bool(r.glob("**/*.evalset.json", "**/*.test.json")),
-        r.rel((pf or r.glob("**/*.evalset.json", "**/*.test.json"))[0]) if (pf or r.glob("**/*.evalset.json", "**/*.test.json")) else "",
+        bool(pf) or bool(evalset) or bool(eval_code),
+        r.rel((pf or evalset)[0]) if (pf or evalset) else eval_code,
         "Add a small eval suite: refuses secrets, keeps its instructions, answers with evidence, refuses destructive actions.")
     rt = r.glob("**/redteam*.yaml", "**/red_team*.py", "**/redteam*.yml")
     rt_hit = r.grep_any(rt + pf, r"(redteam|red_team|owasp|jailbreak|prompt-injection)")
@@ -299,24 +663,31 @@ def audit(root: Path) -> Report:
 
     # 7. Cost and context (beyond the course) --------------------------------------------------------
     A = "7 Cost and context"
-    model_set = r.grep_any(settings, r"\"(model|effortLevel)\"")
+    model_set = r.grep_any(settings, r"\"(model|effortLevel)\"") or code_grep(
+        r"\b(MODEL|MODEL_ID|model|model_id)\s*=\s*(os\.environ\.get\([^,]+,\s*)?[\"'][\w.:/-]{3,}[\"']")
     add("C1", A, "Model and effort chosen once, at session start (pinned in settings)", 1, bool(model_set), model_set,
-        "Set model (and effortLevel if needed) in settings; avoid mid-session switches, which rebuild the prompt cache.")
+        "Set model (and effortLevel if needed) in settings; avoid mid-session switches, which rebuild the prompt cache."
+        + (" In framework code, set the model id once where the agent is built." if code_files else ""))
     cheap = next((p for p in agent_files if re.search(r"^model:\s*haiku", r.text(p), re.M)), None) or next((p for p in agent_files if re.search(r"^model:\s*sonnet", r.text(p), re.M)), None)
-    add("C2", A, "Cheap lookups routed to a smaller model (e.g. Explore on Haiku)", 1, bool(cheap),
-        r.grep(cheap, r"^model:", re.M) if cheap else "", "Add a read-only Explore agent with model: haiku that returns file:line evidence.")
+    cheap_code = "" if cheap else code_grep(r"model(_id)?\s*=\s*[\"'][^\"']*(haiku|mini|flash|small|lite)")
+    add("C2", A, "Cheap lookups routed to a smaller model (e.g. Explore on Haiku)", 1, bool(cheap) or bool(cheap_code),
+        r.grep(cheap, r"^model:", re.M) if cheap else cheap_code, "Add a read-only Explore agent with model: haiku that returns file:line evidence"
+        + (" (in framework code: a lookup agent built on a smaller model)." if code_files else "."))
     usage = r.grep_any([p for p in (progress, instr) if p] + r.glob(".claude/skills/*/SKILL.md"), r"(tokens? (per|used)|token usage|usage per|wall[- ]clock|/usage|cost per (item|task|run))")
     add("C3", A, "Usage (tokens / time) recorded per accepted item", 1, bool(usage), usage,
         "Record wall-clock time and tokens per accepted item, so you can measure the harness instead of guessing.")
     filt = r.grep_any(settings + r.glob(".claude/hooks/*", "hooks/hooks.json", "**/hooks/hooks.json"), r"(PreToolUse|filter|grep -A)")
+    filt = filt or code_grep(r"splitlines\(\)\[-\d+:\]|\[-\d{2,6}:\]")
     add("C4", A, "Long tool output is filtered before the model sees it (hooks)", 1, bool(filt), filt,
-        "Add a PreToolUse hook that shows only failing test output, with the full log on disk.")
+        "Add a PreToolUse hook that shows only failing test output, with the full log on disk."
+        + (" In framework code, have tools return only the tail or the failures, with the full log on disk." if code_files else ""))
 
     # score -----------------------------------------------------------------------------------------
     rep = Report(repo=str(root))
     rep.checks = [asdict(c) for c in checks]
+    rep.tracks = sorted(tracks)
     total = sum(c.weight for c in checks)
-    got = sum(c.weight for c in checks if c.status == "VERIFIED")
+    got = sum(c.weight * (1.0 if c.status == "VERIFIED" else DECLARED_CREDIT if c.status == "DECLARED" else 0) for c in checks)
     rep.score = round(100 * got / total) if total else 0
     rep.grade = "A" if rep.score >= 85 else "B" if rep.score >= 70 else "C" if rep.score >= 50 else "D"
     for c in checks:
@@ -328,8 +699,12 @@ def audit(root: Path) -> Report:
 
 def render_text(rep: Report, color: bool) -> str:
     C = (lambda code, s: f"\033[{code}m{s}\033[0m") if color else (lambda code, s: s)
-    mark = {"VERIFIED": C("32", "✓ VERIFIED  "), "MISSING": C("31", "✗ MISSING   "), "UNRESOLVED": C("33", "? UNRESOLVED")}
-    out = [C("1", f"Harness audit · {rep.repo}"), ""]
+    mark = {"VERIFIED": C("32", "✓ VERIFIED  "), "DECLARED": C("34", "~ DECLARED  "), "MISSING": C("31", "✗ MISSING   "),
+            "UNRESOLVED": C("33", "? UNRESOLVED")}
+    out = [C("1", f"Harness audit · {rep.repo}")]
+    if rep.tracks:
+        out.append(f"Frameworks detected: {', '.join(rep.tracks)}")
+    out.append("")
     area = None
     for c in rep.checks:
         if c["area"] != area:
@@ -338,12 +713,14 @@ def render_text(rep: Report, color: bool) -> str:
             out.append(C("36;1", f"{area}  ({a['verified']}/{a['total']})"))
         crit = C("31", " [critical]") if c["weight"] == 3 and c["status"] != "VERIFIED" else ""
         out.append(f"  {mark[c['status']]} {c['id']} {c['title']}{crit}")
-        if c["status"] == "VERIFIED" and c["evidence"]:
+        if c["status"] in ("VERIFIED", "DECLARED") and c["evidence"]:
             out.append(C("90", f"               {c['evidence']}"))
-        elif c["status"] != "VERIFIED":
-            if c["evidence"]:
+        if c["status"] not in ("VERIFIED",):
+            if c["evidence"] and c["status"] != "DECLARED":
                 out.append(C("90", f"               found: {c['evidence']}"))
             out.append(f"               fix: {c['fix']}")
+    if any(c["status"] == "DECLARED" for c in rep.checks):
+        out += ["", "DECLARED: taken from what the repo states (docs/IMPACT.md), not from its code; it earns half a check's weight."]
     out += ["", C("1", f"Score {rep.score}/100 · grade {rep.grade}"),
             "A pass means the harness piece exists in files, not that it works. Run your checks to prove that."]
     return "\n".join(out)
@@ -352,7 +729,7 @@ def render_text(rep: Report, color: bool) -> str:
 def render_md(rep: Report) -> str:
     out = [f"## Harness audit · score {rep.score}/100 (grade {rep.grade})", "", "| | Check | Evidence or fix |", "|---|---|---|"]
     for c in rep.checks:
-        icon = {"VERIFIED": "✅", "MISSING": "❌", "UNRESOLVED": "❓"}[c["status"]]
+        icon = {"VERIFIED": "✅", "DECLARED": "🟦", "MISSING": "❌", "UNRESOLVED": "❓"}[c["status"]]
         detail = c["evidence"] if c["status"] == "VERIFIED" else c["fix"]
         out.append(f"| {icon} | {c['id']} {c['title']} | {detail.replace('|', '/')} |")
     out += ["", f"_harness-audit {rep.version}. A pass means the piece exists in files, not that it works._"]

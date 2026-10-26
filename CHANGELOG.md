@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.4.1 (26 Oct 2026)
+- **Fair guard scoring (harness-audit 1.4.1).** Before this release, G1–G3 (8 of the guard points) were awarded only from `.claude/settings.json`, so a well-guarded harness on any other framework scored 0 of 8. The audit now detects the framework statically and checks that framework's own equivalent:
+  - an explicit tool list;
+  - broad tools (shell or code execution, write anywhere, web fetch, computer use) gated by its approval or deny step: `needs_approval` / tool input guardrails, `interrupt` / `HumanInTheLoopMiddleware`, a CrewAI before-tool-call hook returning False or `human_input`, Strands `cancel_tool`, ADK `before_tool_callback`, Agent Framework `approval_mode`, Agent SDK `disallowed_tools` / PreToolUse deny;
+  - secret-path and destructive-command refusals.
+
+  Narrow harnesses now get 8 of 8 on every supported track. The same broad tool loses the same points on every track: shell or computer use 8, web fetch 6, write anywhere 5. Every result keeps file:line evidence, and every fix names the framework's mechanism.
+- **Declared evidence:** for assess-only frameworks, what `docs/IMPACT.md` states is marked DECLARED and earns half a check's weight. Derived evidence always takes precedence over declared evidence.
+- **Several agent surfaces:** a guard check passes only when every agent surface in the repo passes it (Claude Code settings and each detected framework).
+- **Other checks:** V5, E1, C1, C2 and C4 also accept framework equivalents (a verifier agent, `evaluate_agent`, a pinned model id, a smaller lookup model, truncated tool output), but only when a framework is detected.
+- **Unchanged and safe:** Claude Code-only repos score exactly as before. Detection reads imports with `ast`, never imports or runs the audited repo, and ignores test files.
+- `tests/test_audit_fairness.py` adds the fairness matrix across 7 tracks, native broad tools, declared scoring, a no-execution check, and a check that the embedded track signatures match `kit/tracks/*/harness_track.json`.
+
 ## 1.4.0 (26 Oct 2026)
 - **Four more tracks, supported (full):** LangGraph (langgraph 1.2.17), OpenAI Agents SDK (openai-agents 0.24.0), CrewAI (crewai 1.15.30) and AWS Strands Agents (strands-agents 1.62.0). Each has a starter wired to `shared/target.py`, a pinned `requirements.txt`, model calls that can point at a gateway (base URL from the environment), and a tool-call trace for the live red team that uses the framework's own hook (LangChain callback, `RunHooks`, before-tool-call hook, `BeforeToolCallEvent`).
 - **Eight assess-only tracks:** LlamaIndex, Pydantic AI, smolagents, Haystack, DSPy, Agno, Mastra and Vercel AI SDK. Each has a spec file and a short README so an assessor can detect and audit a harness built on it. The kit ships no starter or trace hook for them yet.

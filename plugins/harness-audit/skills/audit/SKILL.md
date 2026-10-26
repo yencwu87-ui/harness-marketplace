@@ -17,3 +17,4 @@ Notes for the user:
 - A pass means the harness piece exists in files, not that it works. The proof is running the checks.
 - `--json` gives machine-readable output for CI; `--strict` exits 1 when any critical check fails; `--min 70` fails below a score.
 - Areas 1–4 (instructions, state, verification, scope) follow WalkingLabs' Learn Harness Engineering course. Areas 5–7 (safety guardrails, evals and red team, cost and context) are what production teams add on top.
+- Other frameworks: the audit detects LangGraph, OpenAI Agents SDK, CrewAI, Strands, Google ADK, Microsoft Agent Framework and the Claude Agent SDK from the repo's imports (read, never run) and checks their own guard mechanisms for G1–G3. For assess-only frameworks, what `docs/IMPACT.md` states counts as DECLARED, at half weight.
