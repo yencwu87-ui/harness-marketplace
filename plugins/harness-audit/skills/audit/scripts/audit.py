@@ -531,16 +531,18 @@ CANONICAL_FORMS = (
     ("F1 Position",
      "The refusal is `if <predicate>: <refusal>`, a statement of the guard function's own body (its top level), "
      "before the capability call. Not inside a loop, `with`, `try`, `match`, another `if`, a nested function or a "
-     "comprehension. In a hook, no earlier top-level `if` may return without refusing."),
+     "comprehension. In a hook, no earlier top-level statement may return, raise or call the continuation "
+     "(`call_next`) without refusing."),
     ("F2 Tool scope (hooks only)",
      "A hook may limit a refusal to named tools: `if <tool name> == '<literal>' and (<predicate>):`, the same with "
      "`in (<literals>)`, or a top-level `if <tool name> == '<literal>':` whose own body holds the refusing `if`. "
      "The tool name is read from the hook's own input (`tool.name`, `ctx.tool_name`, `input_data.get('tool_name')`)."),
     ("F3 Refusal",
      "Inline tool and Microsoft Agent Framework middleware: `return ...` or `raise ...`. CrewAI hook: `return False`. "
-     "Google ADK before_tool_callback: `return {...}`. Strands: `event.cancel_tool = ...`. Claude Agent SDK "
-     "PreToolUse hook: a return whose value contains `deny`. A body that calls the hook's continuation (`call_next`) "
-     "lets the call through."),
+     "Google ADK before_tool_callback: `return {...}`. Strands: `event.cancel_tool = '<message>'`, and nothing else in "
+     "the hook sets cancel_tool to anything but a message. Claude Agent SDK PreToolUse hook: a return of a dict with "
+     "`permissionDecision: 'deny'` (nested in hookSpecificOutput), or of a call to a repo function whose every return "
+     "is one. A body that calls the hook's continuation (`call_next`) lets the call through."),
     ("F4 Predicate",
      "One or more tests joined only by `or`, each one of: `'<literal>' in V`; `'<literal>' not in V`; "
      "`V == '<literal>'`; `V.startswith(<literal or tuple of literals>)`; `re.search|re.match|re.fullmatch(r'<literal>', "
@@ -568,8 +570,10 @@ CANONICAL_FORMS = (
      "keyword K: `K`, `K x`, `cat K`, `x;K`, `echo ok; K --flag`, `echo ok` then K on the next line, K in single "
      "quotes, double quotes, backticks and parentheses, `a/K/b` and `a/K.local`. Secrets: .env, .pem, .key, .ssh, "
      ".aws, id_rsa, credentials. Destructive: git push, reset --hard, rm -rf. A regex anchored with ^ or $, run "
-     "with re.match or re.fullmatch, or otherwise missing one probe does not cover the keyword. `not in` and `==` "
-     "tests are allowed in a predicate but never count toward coverage. kit_guard.refuses covers both classes."),
+     "with re.match or re.fullmatch, or otherwise missing one probe does not cover the keyword. When V is the whole "
+     "input as text, each probe is first put through the same str(), repr() or json.dumps() (as the value of a dict), "
+     "which escapes a newline. `not in` and `==` tests are allowed in a predicate but never count toward coverage. "
+     "kit_guard.refuses covers both classes."),
 )
 KIT_GUARD_SHA256 = "5cfe52b3cec24baf8e6c80d7000f1f0c2bd69144e61e79de514a17ca384f6c41"   # kit/shared/kit_guard.py
 CLASS_KEYWORDS = {"secret": (".env", ".pem", ".key", ".ssh", ".aws", "id_rsa", "credentials"),
@@ -727,11 +731,18 @@ def _holds(atom, s) -> bool:
     return False
 
 
-def _covered(atoms) -> set:
+SERIALISE = {"str": lambda p: str({"command": p}), "repr": lambda p: repr({"command": p}),
+             "json.dumps": lambda p: json.dumps({"command": p}), "": lambda p: p}
+
+
+def _covered(atoms, how="") -> set:
+    """The classes the tests cover (F7). For a whole tool input, each probe is first put through the same str(),
+    repr() or json.dumps() the guard applies to the input (which escapes a newline, for example)."""
     if any(a[0] == "kit" for a in atoms):
         return {"secret", "destructive"}
+    wrap = SERIALISE.get(how, SERIALISE["str"])
     return {c for c, kws in CLASS_KEYWORDS.items()
-            if any(all(any(_holds(a, s) for a in atoms) for s in probes(k)) for k in kws)}
+            if any(all(any(_holds(a, wrap(s)) for a in atoms) for s in probes(k)) for k in kws)}
 
 
 def _chain(node):
@@ -808,7 +819,29 @@ class _Canon:
         if any(isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in params
                for st in body for n in ast.walk(st)):
             return False          # calls the continuation (call_next): lets the call through
+        if "deny" in self.kinds:
+            return any(isinstance(st, ast.Return) and self.denies(st.value) for st in body) or \
+                (loose and any(isinstance(s, (ast.Continue, ast.Break, ast.Return)) for s in body))
         return _is_refusal_body(body, self.kinds) or (loose and any(isinstance(s, (ast.Continue, ast.Break)) for s in body))
+
+    def denies(self, v, depth=0) -> bool:
+        """F3 (Agent SDK): the value is a dict with permissionDecision 'deny', or a call of a repo function whose
+        every return is one."""
+        if v is None or depth > 3:
+            return False
+        if isinstance(v, ast.Dict):
+            for k, x in zip(v.keys, v.values):
+                if isinstance(k, ast.Constant) and k.value == "permissionDecision":
+                    return isinstance(x, ast.Constant) and x.value == "deny"
+                if isinstance(x, ast.Dict) and self.denies(x, depth + 1):
+                    return True
+            return False
+        if isinstance(v, ast.Call):
+            kind = self.idx.resolve(self.mod, v.func)
+            if kind[0] == "def":
+                rets = [n.value for n in ast.walk(kind[2]) if isinstance(n, ast.Return)]
+                return bool(rets) and all(self.denies(r, depth + 1) for r in rets)
+        return False
 
     def contains(self, node) -> bool:
         return any(isinstance(n, ast.If) and _uses(n.test, self.inputs) and self.refusal_body(n.body, loose=True)
@@ -858,7 +891,7 @@ class _Canon:
         if r is not None:
             return None, f"`{ch[0]}` is rebound or changed at line {r.lineno}"
         if (wrapped or kit) and ((not keys and ch[0] == self.input_param) or (keys and keys[-1] in WHOLE_INPUT_KEYS)):
-            return ("whole", ""), ""
+            return ("whole", self.mod.full(v.func) if wrapped else ""), ""
         if self.role == "sdk-hook" and len(keys) == 2 and keys[0] == "tool_input" and keys[1] in SDK_FIELD_TOOLS:
             return ("field", keys[1]), ""
         return None, f"tests `{src}`, which is a field or an unconverted object, not the whole tool input as text"
@@ -895,7 +928,7 @@ class _Canon:
         if vals[0][0] == "field":
             sel = SDK_FIELD_TOOLS[vals[0][1]]
             tools = set(sel) if tools is None else tools & sel
-        cov = _covered(parsed)
+        cov = _covered(parsed, vals[0][1] if vals[0][0] == "whole" else "")
         g = Guard("refusal", self.mod.where(node), self.label, secret="secret" in cov, destructive="destructive" in cov,
                   tools=tools)
         g.subject = vals[0][1] if vals[0][0] == "param" else None
@@ -919,10 +952,32 @@ class _Canon:
             elif self.contains(st):
                 what = NESTED.get(type(st), "a nested block")
                 out.append(self.noncanonical(st, f"line {st.lineno}: the refusal is inside {what}"))
-            if self.role != "tool" and isinstance(st, ast.If) and not self.refusing(st) and scoped is None and \
-                    any(isinstance(x, (ast.Return, ast.Raise)) for b in (st.body, st.orelse) for x in b):
-                blocked = blocked or f"line {st.lineno}: an earlier if returns without refusing, so the refusal does not run on every call"
+            if self.role != "tool" and not self.refusing(st) and scoped is None and self.exits(st):
+                blocked = blocked or (f"line {st.lineno}: an earlier statement returns or lets the call through without "
+                                      "refusing, so the refusal does not run on every call")
+        if "cancel" in self.kinds:   # Strands: a later or unconditional cancel_tool assignment can undo the refusal
+            sets = [n for n in ast.walk(self.fn) if isinstance(n, ast.Assign) and any(
+                isinstance(t, ast.Attribute) and t.attr == "cancel_tool" for t in n.targets)]
+            undo = [n for n in sets if not (isinstance(n.value, ast.Constant) and isinstance(n.value.value, str) and n.value.value)]
+            if undo:
+                out = [self.noncanonical(self.fn, f"line {undo[0].lineno}: cancel_tool is set to something other than a "
+                                                  "message, which can undo a refusal")]
         return out
+
+    def exits(self, st) -> bool:
+        """A statement that may end the hook or pass the call on (return, raise, calling the continuation)."""
+        params = set(self.params)
+        todo = [st]
+        while todo:
+            n = todo.pop()
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)) and n is not st:
+                continue
+            if isinstance(n, (ast.Return, ast.Raise)):
+                return True
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in params:
+                return True
+            todo += list(ast.iter_child_nodes(n))
+        return False
 
 
 def _canonical_refusals(idx, mod, fn, kinds, label, role):
