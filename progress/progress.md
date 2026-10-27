@@ -1,5 +1,33 @@
 # Progress
 
+**Updated:** 28 Oct 2026  **Item:** 1.4.6, Codex round-5 fix round (coordinator brief, not a work-list item)  **Status:** passed locally except the 12 port tests, awaiting the coordinator's run and Codex round 6
+
+## What changed
+- kit/shared/kit_guard.py (version 3, copy synced): imports nothing; globs over-approximated; . and .. resolved between .config and gcloud; %-escapes decoded up to three times
+- plugins/harness-audit/skills/audit/scripts/audit.py (1.4.6): F2 signature binding and per-capability option lists; F1 standard-library shadows, wider tampering forms, skipped-folder imports, startup hooks in any form, unchecked kit_guard pyc; F5 strict SDK hook outputs, hooks-dict keys, options used after build; CANONICAL_FORMS and SKILL.md
+- kit/tracks/claude-agent-sdk/agent.py: deny_secrets returns the deny literal directly
+- tests: test_audit_r5.py, test_audit_review_1_4_6.py, glob table in test_kit_guard.py; fixtures codex_r5, review_1_4_6
+
+## Verdicts
+- R5-01 to R5-04 red on 81877ed, green at HEAD: VERIFIED (deliver/1.4.6/logs/red_r5_vs_81877ed.log, unittest_full_sandboxed.log)
+- Independent review cases red at c9ad575, green at HEAD: VERIFIED (deliver/1.4.6/logs/red_review_1_4_6_vs_c9ad575.log)
+- Fairness a=8 b=0 c=2 on 8 tracks, starters 8/8: VERIFIED (deliver/1.4.6/logs/test_audit_fairness.log)
+- 12 TCP-bind tests: UNRESOLVED (sandbox refuses the bind; the coordinator runs them)
+- `*.py` and `src/*.json` refused, against the brief's examples: INCORRECT against the brief as written; recorded in DECISIONS for the owner
+- Real SDK engine smoke for R5-04: UNRESOLVED (no engine or key here)
+
+## Usage
+- Wall-clock: 28 Oct 2026, about 00:50 to 02:20 +08 (one session)
+- Tokens: not available to this headless session
+
+## Blocker
+none
+
+## Next action
+Coordinator runs the port tests and sends the package to Codex for round 6.
+
+---
+
 **Updated:** 28 Oct 2026  **Item:** 1.4.5b, one regression found after delivery (coordinator brief, not a work-list item)  **Status:** passed locally except the 12 port tests, awaiting the coordinator's run outside the sandbox
 
 ## What changed
