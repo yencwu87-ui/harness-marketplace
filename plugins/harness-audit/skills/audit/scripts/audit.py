@@ -1418,7 +1418,7 @@ def _rule_guard(x, kind, where):
 def claude_results(r: "Repo", settings) -> dict:
     """G1-G3 from .claude/settings*.json by the same rule: each built-in tool is removed, gated or ungated."""
     perms, mode, sandbox_auto, sandbox_on = {"allow": [], "deny": [], "ask": []}, "default", False, False
-    lines, problem = {}, ""
+    lines, problem, escapes = {}, "", []
     for p in settings:
         if not r._readable(p):     # e.g. a link to a file outside the repo: its rules can't be proven from the repo
             problem = problem or f"{r.rel(p)} is a link out of the repo (or not readable), so its rules are not read"
@@ -1433,8 +1433,14 @@ def claude_results(r: "Repo", settings) -> dict:
             perms[k] += [x for x in pm.get(k, []) or [] if isinstance(x, str)]
         mode = pm.get("defaultMode", mode)
         sb = data.get("sandbox", {}) or {}
-        sandbox_auto = sandbox_auto or bool(sb.get("enabled") and sb.get("autoAllowBashIfSandboxed"))
-        sandbox_on = sandbox_on or bool(sb.get("enabled"))
+        if sb.get("enabled"):
+            # Claude Code defaults: autoAllowBashIfSandboxed and allowUnsandboxedCommands are on unless set to false
+            sandbox_on = True
+            sandbox_auto = sandbox_auto or sb.get("autoAllowBashIfSandboxed", True) is not False
+            if sb.get("excludedCommands"):
+                escapes.append(f"{r.rel(p)} sandbox.excludedCommands {sb['excludedCommands']!r} run outside the sandbox")
+            if sb.get("allowUnsandboxedCommands", True) is not False:
+                escapes.append(f"{r.rel(p)} sandbox.allowUnsandboxedCommands is not false, so a command may leave the sandbox")
         for i, line in enumerate(r.text(p).splitlines(), 1):
             lines.setdefault(line.strip().strip(",").strip('"'), f"{r.rel(p)}:{i}")
 
@@ -1459,15 +1465,33 @@ def claude_results(r: "Repo", settings) -> dict:
         whole_ask = [x for x in rules("ask", tool) if whole(x)]
         auto = cat == "read" or bool(rules("allow", tool)) or mode in ("bypassPermissions", "dontAsk") \
             or (mode == "acceptEdits" and cat == "write") or (tool == "Bash" and sandbox_auto)
-        if whole_ask:     # ask outranks allow: a person approves every call
+        skipped = tool == "Bash" and sandbox_auto    # sandbox auto-allow runs sandboxed commands without the ask
+        if whole_ask and skipped:
+            guards.append(Guard("approval", at(whole_ask[0]), f"ask {whole_ask[0]}", unresolved=(
+                f"{at(whole_ask[0])} ask {whole_ask[0]} is skipped for sandboxed commands while sandbox auto-allow "
+                "(autoAllowBashIfSandboxed, on by default) is on")))
+        elif whole_ask:   # ask outranks allow: a person approves every call
             guards.append(Guard("approval", at(whole_ask[0]), f"ask {whole_ask[0]}"))
         elif not auto:
             guards.append(Guard("approval", first, f"{tool} needs approval (not in allow, default mode)"))
         for kind in ("ask", "deny"):   # a scoped rule covers only its scope
-            guards += [_rule_guard(x, kind, at(x)) for x in rules(kind, tool) if not whole(x)]
-        if cat == "read" or (tool == "Bash" and sandbox_on):
-            # Read deny rules also bind Grep and Glob, and the sandbox applies them to every command's file reads
+            for x in rules(kind, tool):
+                if whole(x):
+                    continue
+                g = _rule_guard(x, kind, at(x))
+                if kind == "ask" and skipped and (g.secret or g.destructive):
+                    g = Guard("refusal", at(x), f"ask {x}", unresolved=f"{at(x)} ask {x} may be skipped by sandbox auto-allow")
+                guards.append(g)
+        if cat == "read":     # Read deny rules also bind Grep and Glob
             guards += [_rule_guard(x, "deny", at(x)) for x in rules("deny", "Read") if tool != "Read" and not whole(x)]
+        elif tool == "Bash" and sandbox_on:
+            # the sandbox applies Read deny rules to every command's file reads, unless a command can leave it
+            reads = [_rule_guard(x, "deny", at(x)) for x in rules("deny", "Read") if not whole(x)]
+            if escapes:
+                guards += [Guard("refusal", g.where, g.label, unresolved=f"{g.label} binds Bash only inside the sandbox, "
+                                 f"and {escapes[0]}") for g in reads if g.secret]
+            else:
+                guards += reads
         reach = Reach()
         reach.caps.append((cat, at(rules("allow", tool)[0]) if rules("allow", tool) else first, []))
         tools.append((tool, reach, guards))

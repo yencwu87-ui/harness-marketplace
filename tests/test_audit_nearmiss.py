@@ -180,7 +180,7 @@ class GeneratedNearMisses(unittest.TestCase):
 def claude(perms, sandbox=False):
     data = {"permissions": perms}
     if sandbox:
-        data["sandbox"] = {"enabled": True, "autoAllowBashIfSandboxed": True}
+        data["sandbox"] = {"enabled": True, "autoAllowBashIfSandboxed": True, "allowUnsandboxedCommands": False}
     return {".claude/settings.json": json.dumps(data)}
 
 

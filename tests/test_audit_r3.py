@@ -292,12 +292,14 @@ class R3_06_SandboxEscapes(unittest.TestCase):
 
     def test_auto_allow_skips_a_whole_bash_ask(self):
         closed = {"enabled": True, "allowUnsandboxedCommands": False}
-        self.assertEqual(score(self.settings(closed, ask=["Bash(*)"]))[0], 8)
+        self.assertEqual(score(self.settings(dict(closed, autoAllowBashIfSandboxed=False), ask=["Bash(*)"]))[0], 8)
         self.assertEqual(score(self.settings(None, ask=["Bash(*)"]))[0], 8)
-        for ask in (["Bash(*)"], ["Bash"]):
-            with self.subTest(ask=ask):
-                pts, st, g = score(self.settings(dict(closed, autoAllowBashIfSandboxed=True), ask=ask))
-                self.assertEqual(pts, 0, g)
+        for name, sb in {"auto-allow on": dict(closed, autoAllowBashIfSandboxed=True),
+                         "auto-allow on by default": closed}.items():
+            for ask in (["Bash(*)"], ["Bash"]):
+                with self.subTest(sandbox=name, ask=ask):
+                    pts, st, g = score(self.settings(sb, ask=ask))
+                    self.assertEqual(pts, 0, g)
 
 
 class R3_07_ReadsStayInTheRoot(unittest.TestCase):
