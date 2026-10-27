@@ -1,5 +1,32 @@
 # Progress
 
+**Updated:** 28 Oct 2026  **Item:** 1.4.7, Codex round-6 fix round (coordinator brief, not a work-list item)  **Status:** passed locally except the 12 port tests, awaiting the coordinator's run and Codex round 7
+
+## What changed
+- kit/shared/kit_guard.py (version 4, copy synced, re-pinned): backslash-newline continuations joined as the shell does and checked joined and unjoined; brace overflow refused, brace sequences expanded; `--config-env alias.x` with a separate value
+- plugins/harness-audit/skills/audit/scripts/audit.py (1.4.7): F1 module objects (no binding, handing on or storing through a module anywhere in the tree; sys.modules, importlib, __import__, namespaces, frames); F5 every binding form of the SDK options, other files, `.options`, returned options; F2 per-callable fetch options; CANONICAL_FORMS and SKILL.md
+- tests: test_audit_r6.py, test_audit_review_1_4_7.py; fixtures codex_r6, review_1_4_7; fairness `c` helper copies refreshed
+
+## Verdicts
+- R6-01 to R6-04 red on e5de889 (238 cases), green at HEAD: VERIFIED (deliver/1.4.7/logs/red_r6_vs_e5de889.log, unittest_full_sandboxed.log)
+- Independent review cases red at 1de7ccf (25), green at HEAD: VERIFIED (deliver/1.4.7/logs/red_review_1_4_7_vs_1de7ccf.log)
+- Fairness a=8 b=0 c=2 on 8 tracks, starters 8/8: VERIFIED (deliver/1.4.7/logs/test_audit_fairness.log)
+- Self-audit of a clean export: 82, down from 89 at e5de889, because kit/shared/target.py imports importlib.util (F1 module objects, tree-wide): VERIFIED (deliver/1.4.7/logs/audit_self_clean_export.log)
+- 12 TCP-bind tests: UNRESOLVED (sandbox refuses the bind; the coordinator runs them)
+- Pinned SDK-engine smoke for R5-04: UNRESOLVED (no SDK installed; nothing installed, as the brief says)
+
+## Usage
+- Wall-clock: 28 Oct 2026, 04:04 to about 05:15 +08 (one session, packaging included)
+- Tokens: not available to this headless session
+
+## Blocker
+none
+
+## Next action
+Coordinator runs the port tests, takes the SDK install question to the owner, and sends the package to Codex for round 7.
+
+---
+
 **Updated:** 28 Oct 2026  **Item:** 1.4.6, Codex round-5 fix round (coordinator brief, not a work-list item)  **Status:** passed locally except the 12 port tests, awaiting the coordinator's run and Codex round 6
 
 ## What changed
