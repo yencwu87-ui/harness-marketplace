@@ -12,6 +12,7 @@ person), G3 2 (every tool that can destroy or change things irreversibly refuses
 Fixtures under tests/fixtures/codex_r1 come from Codex's round-1 review of 1.4.1 (see its README).
 """
 import builtins
+import hashlib
 import importlib.util
 import json
 import shutil
@@ -30,6 +31,10 @@ GUARD = ("G1", "G2", "G3")
 TRACKS = ["claude-code", "claude-agent-sdk", "microsoft-agent-framework", "google-adk", "langgraph",
           "openai-agents-sdk", "crewai", "strands-agents"]
 EXPECTED = {"a": 8, "b": 0, "c": 2}   # c: shell guarded, web fetch not -> lose G1 and G2, keep G3
+# plugins/harness-audit/skills/audit/scripts/audit.py at 24bc1da (1.4.1), for the base comparison
+BASE_AUDIT = ROOT / "tests/fixtures/audit_1_4_1/audit.py.txt"
+BASE_AUDIT_BLOB = "c030f56a9fcc36c0a94bbfe67850ef844f1a343d"
+BASE_AUDIT_SHA256 = "79c2421797164777a726107e68e243d7bd57a57f5cee6ce2d17b3aefc8d9b171"
 
 
 def load_audit(name="audit_under_test"):
@@ -274,9 +279,13 @@ class ClaudeCode(unittest.TestCase):
 
     def test_base_comparison_shows_the_correction_is_intentional(self):
         """1.4.1 and earlier gave 3 points for the word "deny" (Codex's fixture b); 1.4.2 gives 0. Template unchanged."""
+        # 1.4.1's audit.py is vendored (no git history needed: CI checks out shallow, downloads have no .git) and
+        # pinned by its git blob id and sha256. A mismatch fails the test; it never skips.
+        data = BASE_AUDIT.read_bytes()
+        self.assertEqual(hashlib.sha256(data).hexdigest(), BASE_AUDIT_SHA256, "vendored 1.4.1 audit.py changed")
+        self.assertEqual(hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest(), BASE_AUDIT_BLOB)
         base = Path(tempfile.mkdtemp()) / "audit_1_4_1.py"
-        base.write_text(subprocess.run(["git", "show", "24bc1da:plugins/harness-audit/skills/audit/scripts/audit.py"],
-                                       cwd=ROOT, capture_output=True, text=True, check=True).stdout)
+        base.write_bytes(data)
         old = lambda p: json.loads(subprocess.run([sys.executable, str(base), str(p), "--json"], capture_output=True, text=True).stdout)
         self.assertEqual(points(old(FIX / "claude-code" / "b")), 3)
         self.assertEqual(points(audit(FIX / "claude-code" / "b")), 0)
