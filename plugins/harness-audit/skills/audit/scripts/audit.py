@@ -33,6 +33,9 @@ VERSION = "1.4.2"
 SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", "dist", "build", ".next", "target", "site-packages", "third_party", "vendor"}
 MAX_FILES = 60000
 MAX_FILE_BYTES = 400_000
+# Files the audit never opens: environment files (templates such as .env.example are fine), keys and credentials.
+SECRET_FILE = re.compile(r"^(\.env(\.(?!example$|sample$|template$|dist$)[^/]*)?|.*\.(key|pem|p12|pfx)|"
+                         r"id_(rsa|dsa|ecdsa|ed25519)|\.netrc|credentials(\.json)?)$")
 
 
 @dataclass
@@ -68,12 +71,25 @@ class Repo:
             out = []
             for dp, dns, fns in os.walk(self.root):
                 dns[:] = [d for d in dns if d not in SKIP_DIRS and not d.startswith(".") or d in (".claude", ".github", ".devcontainer")]
-                out += [Path(dp) / f for f in fns]
+                out += [Path(dp) / f for f in fns if self._readable(Path(dp) / f)]
                 if len(out) > MAX_FILES:
                     break
             self._files = out
             self._rel = [p.relative_to(self.root).as_posix() for p in out]
         return self._files
+
+    def _readable(self, p: Path) -> bool:
+        """Never a secret-looking file, and never a symlink out of the audited tree: the audit proves from the repo's
+        own files, so a guard or setting that lives elsewhere is not read (and earns nothing)."""
+        if SECRET_FILE.match(p.name):
+            return False
+        if p.is_symlink():
+            try:
+                real = p.resolve()
+                return real.is_file() and real.is_relative_to(self.root.resolve()) and not SECRET_FILE.match(real.name)
+            except (OSError, RuntimeError):
+                return False
+        return True
 
     @staticmethod
     def _rx(pattern: str):
@@ -110,7 +126,7 @@ class Repo:
         return list(dict.fromkeys(hits))
 
     def text(self, p: Path | None) -> str:
-        if not p or not p.is_file() or p.stat().st_size > MAX_FILE_BYTES:
+        if not p or not p.is_file() or not self._readable(p) or p.stat().st_size > MAX_FILE_BYTES:
             return ""
         try:
             return p.read_text(encoding="utf-8", errors="replace")
@@ -166,7 +182,7 @@ GUARD_FIX = {
                           "Set needs_approval=True on shell, file-write and computer tools, or refuse git push / reset --hard / rm -rf in a tool input guardrail."),
     "crewai": ("Pass an explicit tools=[...] to Agent; leave allow_code_execution off and CodeInterpreterTool, file-writer and scraping tools out, or block them in a before-tool-call hook (return False).",
                "Keep file-read, code, web and computer tools out, or return False from a before-tool-call hook for .env/.pem/.key/.ssh/.aws inputs.",
-               "Return False from a before-tool-call hook for git push / reset --hard / rm -rf, or set human_input=True on the task."),
+               "Return False from a before-tool-call hook for git push / reset --hard / rm -rf (Task human_input=True reviews the answer after tools run, so it is no gate)."),
     "strands-agents": ("Pass an explicit tools=[...] of your own @tool functions to Agent; leave strands_tools shell, python_repl, file_write, http_request and use_computer out, or cancel them in a BeforeToolCallEvent hook.",
                        "Keep file-read, shell, web and computer tools out, or set event.cancel_tool in a BeforeToolCallEvent hook for .env/.pem/.key/.ssh/.aws inputs.",
                        "Set event.cancel_tool in a BeforeToolCallEvent hook for git push / reset --hard / rm -rf and file writes outside the repo."),
@@ -181,7 +197,8 @@ GUARD_FIX = {
                          "Add disallowed_tools for Bash(git push *), Bash(git reset --hard *), Bash(rm -rf *), or deny them in a PreToolUse hook."),
 }
 CATEGORY_WORDS = {"shell": "shell or code execution", "write": "file-write anywhere", "fetch": "web fetch",
-                  "computer": "computer use", "read": "file-read anywhere"}
+                  "computer": "computer use", "read": "file-read anywhere",
+                  "irreversible": "a fixed irreversible action"}
 def _is_test_path(rel: str) -> bool:
     parts = rel.split("/")
     return any(p in ("tests", "test", "testing") for p in parts[:-1]) or parts[-1].startswith("test_") or parts[-1].endswith("_test.py")
@@ -229,9 +246,9 @@ def detect_tracks(r: "Repo") -> dict:
     return out
 
 
-G1_CATS = {"shell", "write", "fetch", "computer"}   # broad: every one needs a guard
-G2_CATS = {"shell", "fetch", "computer", "read"}    # can reach or send secrets
-G3_CATS = {"shell", "write", "computer"}           # can destroy or change things irreversibly
+G1_CATS = {"shell", "write", "fetch", "computer", "irreversible"}   # broad or irreversible: every one needs a guard
+G2_CATS = {"shell", "fetch", "computer", "read"}                    # can reach or send secrets
+G3_CATS = {"shell", "write", "computer", "irreversible"}           # can destroy or change things irreversibly
 SECRET_RX = r"(\.env\b|\.pem\b|\.ssh\b|\.aws\b|\.key\b|id_rsa|credentials)"
 DESTRUCTIVE_RX = r"(git push|reset --hard|rm -rf)"
 PATH_RX = r"(is_relative_to|relative_to\(|commonpath|startswith\(\s*(str\()?\s*(ROOT|REPO|repo|root|BASE|base|cwd))"
@@ -296,25 +313,42 @@ def _uses(node, names) -> bool:
     return any(isinstance(n, ast.Name) and n.id in names for n in ast.walk(node))
 
 
-class Guard:
-    """A guard on a capability: a person approves it, or code refuses it under a condition."""
+CLASSES = ("secret", "destructive", "path")
 
-    def __init__(self, kind, where, label, secret=False, destructive=False, path=False, unresolved="", tools=None):
+
+class Guard:
+    """A guard on a capability: a person approves it, or code refuses it under a condition.
+
+    A refusal covers a class (secret paths, destructive commands, writes outside the repo) only when it refuses every
+    input of that class, on every path, for the scored tool. A refusal that covers a class only in part (narrower,
+    conditional, behind a flag, inverted) records why in `partial`: it earns nothing and makes the check UNRESOLVED."""
+
+    def __init__(self, kind, where, label, secret=False, destructive=False, path=False, unresolved="", tools=None,
+                 partial=None):
         self.kind, self.where, self.label = kind, where, label          # kind: approval | refusal
         self.secret, self.destructive, self.path = secret, destructive, path
         self.unresolved = unresolved                                   # why its coverage can't be read
         self.tools = tools                                             # None = every tool of the agent
+        self.partial = dict(partial or {})                             # class -> why it is covered only in part
+
+    def _cls(self, c):
+        return True if getattr(self, c) else (None if c in self.partial else False)
+
+    def _wanted(self, cid, cat):
+        return CLASSES if cid == "G1" else ("secret",) if cid == "G2" else \
+            ("destructive", "path") if cat == "write" else ("destructive",)
 
     def covers(self, cid, cat):
+        """True (covered), False (not covered) or None (the audit cannot prove it: see why())."""
         if self.unresolved:
             return None
         if self.kind == "approval":
             return True
-        if cid == "G1":
-            return True
-        if cid == "G2":
-            return self.secret
-        return self.destructive or (cat == "write" and self.path)
+        vals = [self._cls(c) for c in self._wanted(cid, cat)]
+        return True if True in vals else (None if None in vals else False)
+
+    def why(self, cid, cat):
+        return self.unresolved or "; ".join(dict.fromkeys(self.partial[c] for c in self._wanted(cid, cat) if c in self.partial))
 
     def __repr__(self):
         return f"{self.label} at {self.where}"
@@ -453,10 +487,12 @@ class Reach:
     def __init__(self):
         self.caps = []          # [(cat, where, [Guard])]
         self.unresolved = []    # reasons the audit could not follow the tool
+        self.fixed = []         # actions with a fixed target the model cannot change (listed, never hidden)
 
     def merge(self, other, extra_guards=()):
         self.caps += [(c, w, list(g) + list(extra_guards)) for c, w, g in other.caps]
         self.unresolved += other.unresolved
+        self.fixed += other.fixed
 
 
 def _taint(fn, tainted) -> set:
@@ -509,21 +545,156 @@ def _cover_text(idx: Index, mod: Module, test, fn=None):
     return text, unresolved
 
 
-def _refusal_from_if(idx, mod, node: ast.If, label, fn=None):
-    text, unresolved = _cover_text(idx, mod, node.test, fn)
-    names = set()
-    is_name = lambda e: bool(re.search(r"(tool_name|\.name|\[[\"']name[\"']\])\s*$", mod.src(e)))
-    consts = lambda e: {x.value for x in (e.elts if isinstance(e, (ast.Tuple, ast.List, ast.Set)) else [e])
-                        if isinstance(x, ast.Constant) and isinstance(x.value, str)}
-    for cmp in (n for n in ast.walk(node.test) if isinstance(n, ast.Compare) and len(n.ops) == 1):
-        left, right, op = cmp.left, cmp.comparators[0], cmp.ops[0]
-        if isinstance(op, (ast.Eq, ast.In)) and is_name(left):
-            names |= consts(right)
-        elif isinstance(op, ast.Eq) and is_name(right):
-            names |= consts(left)
-    return Guard("refusal", mod.where(node), label, secret=bool(re.search(SECRET_RX, text)),
-                 destructive=bool(re.search(DESTRUCTIVE_RX, text)), path=bool(re.search(PATH_RX, text)),
-                 unresolved=unresolved, tools=names or None)
+def _dnf(e, limit=32):
+    """A condition as OR of AND-lists of (expr, negated). Negated or oversized parts stay whole."""
+    if isinstance(e, ast.BoolOp) and isinstance(e.op, ast.Or):
+        out = [c for v in e.values for c in _dnf(v, limit)]
+    elif isinstance(e, ast.BoolOp) and isinstance(e.op, ast.And):
+        out = [[]]
+        for v in e.values:
+            out = [a + b for a in out for b in _dnf(v, limit)]
+            if len(out) > limit:
+                return [[(e, False)]]
+    else:
+        out = [[(e, False)]]
+    return out
+
+
+def _is_name_expr(mod, e) -> bool:
+    return bool(re.search(r"(tool_name|\.name|\[[\"']name[\"']\])\s*$", mod.src(e)))
+
+
+def _const_value(idx, mod, e):
+    """(True, value) for a literal or a module constant assigned once to a literal; (False, None) otherwise."""
+    if isinstance(e, ast.Constant):
+        return True, e.value
+    if isinstance(e, ast.Name) and e.id in mod.assigns and isinstance(mod.assigns[e.id], ast.Constant):
+        stores = [n for n in ast.walk(mod.tree) if isinstance(n, ast.Name) and n.id == e.id and isinstance(n.ctx, ast.Store)]
+        rebound = any(isinstance(n, (ast.Global, ast.Nonlocal)) and e.id in n.names for n in ast.walk(mod.tree))
+        if len(stores) == 1 and not rebound:
+            return True, mod.assigns[e.id].value
+    return False, None
+
+
+def _conjunct(idx, mod, e, neg, fn, tainted):
+    """Classify one AND-part of a refusing condition.
+    ('const', bool) | ('name', {tools}) | ('test', {classes}, node) | ('presence', name) | ('inverted', text) |
+    ('condition', text) | ('unresolved', why)"""
+    while isinstance(e, ast.UnaryOp) and isinstance(e.op, ast.Not):
+        e, neg = e.operand, not neg
+    if isinstance(e, ast.Compare) and len(e.ops) == 1:
+        op, right = e.ops[0], e.comparators[0]
+        if isinstance(right, ast.Constant) and (right.value is None or isinstance(right.value, bool)) and \
+                isinstance(op, (ast.Is, ast.IsNot, ast.Eq, ast.NotEq)):
+            # x is not None / x == True keep x's meaning; x is None / x == False / x != True invert it
+            same = isinstance(op, (ast.Is, ast.Eq)) == (right.value is True)
+            return _conjunct(idx, mod, e.left, neg if same else not neg, fn, tainted)
+    known, val = _const_value(idx, mod, e)
+    if known:
+        return ("const", bool(val) != neg)
+    text = mod.src(e)[:60]
+    if isinstance(e, ast.Compare) and len(e.ops) == 1 and isinstance(e.ops[0], (ast.Eq, ast.In, ast.NotEq, ast.NotIn)):
+        left, right, op = e.left, e.comparators[0], e.ops[0]
+        side = right if _is_name_expr(mod, left) else left if isinstance(op, (ast.Eq, ast.NotEq)) and _is_name_expr(mod, right) else None
+        if side is not None:
+            vals = [_const_str(idx, mod, x) for x in (side.elts if isinstance(side, (ast.Tuple, ast.List, ast.Set)) else [side])]
+            if None in vals:
+                return ("unresolved", f"{mod.where(e)} tool-name test {text} is not readable")
+            if neg != isinstance(op, (ast.NotEq, ast.NotIn)):
+                return ("condition", f"not {text}")
+            return ("name", set(vals))
+    if not _uses(e, tainted):
+        return ("condition", text)
+    if isinstance(e, (ast.Name, ast.Attribute)):
+        return ("condition", f"not {text}") if neg else ("presence", _dotted(e))
+    cover, unresolved = _cover_text(idx, mod, e, fn)
+    if unresolved:
+        return ("unresolved", unresolved)
+    classes = {c for c, rx in (("secret", SECRET_RX), ("destructive", DESTRUCTIVE_RX), ("path", PATH_RX)) if re.search(rx, cover)}
+    if isinstance(e, ast.Compare) and len(e.ops) == 1:
+        op, left, right = e.ops[0], e.left, e.comparators[0]
+        exact = isinstance(op, (ast.Eq, ast.NotEq)) or (isinstance(op, (ast.In, ast.NotIn)) and _uses(left, tainted)
+                                                        and isinstance(right, (ast.Tuple, ast.List, ast.Set, ast.Dict, ast.Constant)))
+        if exact and classes - {"path"}:
+            return ("condition", f"{text} matches exact values only")
+        if isinstance(op, (ast.NotIn, ast.NotEq)):
+            neg = not neg
+    if neg:   # "refuse unless inside the repo" is the natural form of a path test; any other inverted test is not proof
+        return ("test", {"path"}, e) if classes == {"path"} else ("inverted", f"not {text}")
+    return ("test", classes, e)
+
+
+def _refusals_from_if(idx, mod, node: ast.If, label, fn=None, context=(), tainted=None):
+    """Guards for one refusing `if`: one per OR-branch of its condition, combined with the conditions it sits under.
+    A branch covers a class only when every part of it tests the tool's input for that class; anything else that must
+    also hold (a flag, another class, a test the audit cannot read) makes that class partial, with the reason."""
+    if tainted is None:
+        tainted = _taint(fn, {a.arg for a in fn.args.args + fn.args.kwonlyargs}) if fn is not None else set()
+    blocker = next((c for c in context if isinstance(c, str)), "")
+    pre = []                               # enclosing conditions: an AND of their parts; an OR stays one part
+    for t, n in (c for c in context if not isinstance(c, str)):
+        branches = _dnf(t)
+        pre += branches[0] if not n and len(branches) == 1 else [(t, n)]
+    guards = []
+    for branch in _dnf(node.test):
+        parts = [_conjunct(idx, mod, e, n, fn, tainted) for e, n in pre + branch]
+        if any(p[0] == "const" and not p[1] for p in parts):
+            continue                       # this branch can never refuse
+        parts = [p for p in parts if p[0] != "const"]
+        names = [p[1] for p in parts if p[0] == "name"]
+        tools = set.intersection(*names) if names else None
+        if names and not tools:
+            continue
+        unres = next((p[1] for p in parts if p[0] == "unresolved"), "")
+        tests = [p for p in parts if p[0] == "test"]
+        others = [p[1] for p in parts if p[0] in ("condition", "inverted")]
+        others += [p[1] for p in parts if p[0] == "presence" and not any(_uses(t[2], {p[1].split(".")[0]}) for t in tests)]
+        if blocker:
+            others.append(blocker)
+        g = Guard("refusal", mod.where(node), label, unresolved=unres, tools=tools)
+        if not tests and not others:       # refuses every call (of the named tools)
+            g.secret = g.destructive = g.path = True
+        for c in CLASSES:
+            if tests and not others and all(c in t[1] for t in tests):
+                setattr(g, c, True)
+            elif any(c in t[1] for t in tests) or (others and not tests) or \
+                    (any(p[0] == "inverted" for p in parts) and c != "path"):
+                extra = [mod.src(t[2])[:50] for t in tests if c not in t[1]] + others
+                g.partial[c] = f"{mod.where(node)} {label} refuses {c} input only when {' and '.join(extra[:3]) or 'other conditions'} also hold"
+        guards.append(g)
+    return guards
+
+
+def _refusing_ifs(fn, kind, test_ok):
+    """(If, context) for every refusing `if` in fn, with the conditions it sits under (and why it might not run).
+    An earlier `if` that exits without refusing (e.g. `return None` for one tool) is a condition too."""
+    out = []
+
+    def walk(body, ctx):
+        ctx = list(ctx)
+        for st in body:
+            if isinstance(st, ast.If):
+                if _is_refusal_body(st.body, kind) and test_ok(st.test):
+                    out.append((st, tuple(ctx)))
+                walk(st.body, ctx + [(st.test, False)])
+                walk(st.orelse, ctx + [(st.test, True)])
+                if not _is_refusal_body(st.body, kind) and any(isinstance(x, (ast.Return, ast.Raise)) for x in st.body):
+                    ctx.append((st.test, True))           # later code runs only when this test was false
+            elif isinstance(st, (ast.With, ast.AsyncWith, ast.For, ast.AsyncFor)):
+                walk(st.body, ctx)
+            elif isinstance(st, ast.While):
+                walk(st.body, ctx + [f"{getattr(st, 'lineno', 0)}: inside a while loop"])
+            elif isinstance(st, (ast.Try,) + ((ast.TryStar,) if hasattr(ast, "TryStar") else ())):
+                why = f"line {st.lineno}: inside try (an exception handler can skip the refusal)"
+                walk(st.body, ctx + [why])
+                for h in st.handlers:
+                    walk(h.body, ctx + [why])
+                walk(st.orelse + st.finalbody, ctx + [why])
+            elif isinstance(st, ast.Match):
+                for case in st.cases:
+                    walk(case.body, ctx + [f"line {st.lineno}: inside a match case"])
+    walk(fn.body, [])
+    return out
 
 
 def _is_refusal_body(body, kind) -> bool:
@@ -541,57 +712,164 @@ def _is_refusal_body(body, kind) -> bool:
     return False
 
 
+def _local_aliases(mod: Module, fn) -> dict:
+    """Names bound in fn (or at module level) to a module, function or object the audit can name:
+    `runner = subprocess`, `go = subprocess.run`, `client = httpx.Client()`, `with open(p) as f`."""
+    out = {}
+    for name, value in mod.assigns.items():
+        if isinstance(value, (ast.Name, ast.Attribute, ast.Call)):
+            out.setdefault(name, value)
+    local = {}
+    for n in ast.walk(fn):
+        if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name):
+            local.setdefault(n.targets[0].id, n.value)
+        elif isinstance(n, (ast.With, ast.AsyncWith)):
+            for item in n.items:
+                if isinstance(item.optional_vars, ast.Name):
+                    local.setdefault(item.optional_vars.id, item.context_expr)
+    out.update(local)
+    return out
+
+
+def _full_name(mod: Module, aliases: dict, node, depth=0) -> str:
+    """Dotted name of a callee with local and module aliases expanded (`runner.run` -> `subprocess.run`)."""
+    d = _dotted(node)
+    head, _, rest = d.partition(".")
+    if depth < 4 and head in aliases and head not in mod.alias and isinstance(aliases[head], (ast.Name, ast.Attribute)):
+        base = _full_name(mod, aliases, aliases[head], depth + 1)
+        return base + ("." + rest if rest else "")
+    return mod.full(node)
+
+
+FIXED_ARG = {"shell": ("args", "cmd", "command"), "open": ("file", "path"), "fetch": ("url",), "write": ()}
+
+
+def _fixed_text(idx, mod, call, kind):
+    """The constant target of a call that receives none of the tool's input, or None when the audit cannot read it."""
+    vals = list(call.args[:1]) if kind != "write" else list(call.args)
+    vals += [k.value for k in call.keywords if k.arg in FIXED_ARG[kind]]
+    if not vals:
+        return ""
+    out = []
+    for v in vals:
+        s = _const_str(idx, mod, v)
+        if s is None:
+            lst = _str_list(idx, mod, v)
+            if lst is None:
+                return None
+            s = " ".join(lst)
+        out.append(s)
+    return " ".join(out)
+
+
+def _capability(call, full, head, on_tainted):
+    """The kind of thing a call does: shell | open | write | read | fetch | computer | None."""
+    attr = call.func.attr if isinstance(call.func, ast.Attribute) else ""
+    if head in COMPUTER_HEADS:
+        return "computer"
+    if full in SHELL_FUNCS or full.split(".")[-1] in ("system", "popen") and head == "os":
+        return "shell"
+    if full in ("open", "io.open", "builtins.open", "codecs.open", "os.open") or (attr == "open" and on_tainted):
+        return "open"
+    if on_tainted and attr in WRITE_ATTRS:
+        return "write"
+    if on_tainted and attr in READ_ATTRS:
+        return "read"
+    if full in WRITE_FUNCS:
+        return "write"
+    if head in FETCH_HEADS or full.startswith("urllib.request") or full.endswith("urlopen") or full.endswith("urlretrieve"):
+        return "fetch"
+    return None
+
+
+def _is_data(node) -> bool:
+    """A literal, a comprehension or a call of a pure builtin (dict(), str(), list(), ...)."""
+    if isinstance(node, (ast.Constant, ast.JoinedStr, ast.List, ast.Dict, ast.Tuple, ast.Set, ast.ListComp, ast.DictComp,
+                         ast.SetComp, ast.GeneratorExp, ast.BinOp, ast.Subscript)):
+        return True
+    return isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in \
+        {"dict", "list", "set", "tuple", "str", "bytes", "int", "float", "sorted", "reversed", "enumerate", "zip", "range", "frozenset"}
+
+
 def function_reach(idx: Index, mod: Module, fn, tainted=None, depth=0) -> Reach:
-    """Follow the data a tool receives into calls that run commands, write or read files, fetch or use a computer."""
+    """Follow the data a tool receives into calls that run commands, write or read files, fetch or use a computer.
+    A capability is never dropped silently: a call the audit cannot follow is UNRESOLVED, and a call with a fixed
+    target is still classified (a fixed `git push` is irreversible; a fixed `git status` is listed, not hidden)."""
     reach = Reach()
     if tainted is None:
         tainted = {a.arg for a in fn.args.args + fn.args.kwonlyargs + ([fn.args.vararg] if fn.args.vararg else [])
                    + ([fn.args.kwarg] if fn.args.kwarg else [])} - TAINT_SKIP
     tainted = _taint(fn, tainted)
-    refusals = [(n.lineno, _refusal_from_if(idx, mod, n, "inline refusal (early return)", fn))
-                for n in ast.walk(fn) if isinstance(n, ast.If) and _uses(n.test, tainted) and _is_refusal_body(n.body, "early")]
+    aliases = _local_aliases(mod, fn)
+    refusals = [(n.end_lineno or n.lineno, g)
+                for n, ctx in _refusing_ifs(fn, "early", lambda t: _uses(t, tainted))
+                for g in _refusals_from_if(idx, mod, n, "inline refusal (early return)", fn, ctx, tainted)]
 
     def before(line):
-        return [g for l, g in refusals if l < line]
+        return [g for end, g in refusals if end < line]   # a capability inside the refusing branch is not guarded by it
 
     def add(cat, node):
         if not any(c == cat and w == mod.where(node) for c, w, _ in reach.caps):
             reach.caps.append((cat, mod.where(node), before(node.lineno)))
 
     for call in (n for n in ast.walk(fn) if isinstance(n, ast.Call)):
-        full = mod.full(call.func)
-        head = full.split(".")[0]
         args = list(call.args) + [k.value for k in call.keywords]
         hit = any(_uses(a, tainted) for a in args)
+        if not isinstance(call.func, (ast.Name, ast.Attribute)):
+            if hit or _uses(call.func, tainted) or not isinstance(call.func, ast.Call) or \
+                    _dotted(call.func) in ("getattr", "__import__", "importlib.import_module", "eval"):
+                reach.unresolved.append(f"{mod.where(call)} {mod.src(call.func)[:40]}(...) is a computed call the audit cannot follow")
+            continue
+        full = _full_name(mod, aliases, call.func)
+        head = full.split(".")[0]
         on_tainted = isinstance(call.func, ast.Attribute) and _uses(call.func.value, tainted)
-        if head in COMPUTER_HEADS:
+        attr = call.func.attr if isinstance(call.func, ast.Attribute) else ""
+        if attr and isinstance(call.func.value, ast.Call) and attr not in WRITE_ATTRS | READ_ATTRS | {"open"}:
+            continue     # e.g. urlopen(url).read(): the inner call is the capability
+        cap = _capability(call, full, head, on_tainted)
+        if cap == "computer":
             add("computer", call); continue
         if not hit and not on_tainted:
+            if cap is None:
+                continue
+            text = _fixed_text(idx, mod, call, "open" if cap == "read" else cap)
+            if text is None:
+                reach.unresolved.append(f"{mod.where(call)} {full}(...) acts on a target the audit cannot read")
+            elif cap in ("shell", "write") and re.search(DESTRUCTIVE_RX, text):
+                add("irreversible", call)
+            elif cap in ("shell", "open", "read") and re.search(SECRET_RX, text):
+                add("read", call)
+            else:
+                reach.fixed.append(f"{text or full} ({mod.where(call)})")
             continue
-        attr = call.func.attr if isinstance(call.func, ast.Attribute) else ""
-        if attr and isinstance(call.func.value, ast.Call) and attr not in WRITE_ATTRS | READ_ATTRS:
-            continue     # e.g. urlopen(url).read(): the inner call is the capability
-        if full in SHELL_FUNCS or full.split(".")[-1] in ("system", "popen") and head == "os":
+        if cap == "shell":
             add("shell", call)
-        elif full in ("open", "io.open", "builtins.open", "codecs.open"):
-            mode = call.args[1] if len(call.args) > 1 else next((k.value for k in call.keywords if k.arg == "mode"), None)
-            m = mode.value if isinstance(mode, ast.Constant) and isinstance(mode.value, str) else "r"
-            if call.args and _uses(call.args[0], tainted):
-                add("write" if any(c in m for c in "wax+") else "read", call)
-        elif on_tainted and attr in WRITE_ATTRS:
-            add("write", call)
-        elif on_tainted and attr in READ_ATTRS:
-            add("read", call)
-        elif full in WRITE_FUNCS:
-            add("write", call)
-        elif head in FETCH_HEADS or full.startswith("urllib.request") or full.endswith("urlopen") or full.endswith("urlretrieve"):
-            add("fetch", call)
-        elif isinstance(call.func, ast.Attribute) and not on_tainted and full.split(".")[0] not in mod.alias:
-            continue     # a method on some local object: not followed (data methods such as dict.get)
+        elif cap == "open":
+            mode = (call.args[0] if call.args else None) if attr else (call.args[1] if len(call.args) > 1 else None)
+            mode = mode or next((k.value for k in call.keywords if k.arg == "mode"), None)
+            m = mode.value if isinstance(mode, ast.Constant) and isinstance(mode.value, str) else ("w" if full == "os.open" else "r")
+            add("write" if any(c in m for c in "wax+") else "read", call)
+        elif cap:
+            add(cap, call)
+        elif isinstance(call.func, ast.Attribute) and not on_tainted and head not in mod.alias:
+            bound = aliases.get(head)
+            if bound is None and isinstance(call.func.value, (ast.Constant, ast.JoinedStr, ast.List, ast.Dict, ast.Tuple, ast.Set)):
+                continue     # a method on a literal: "".join(...)
+            origin = "" if bound is None or _is_data(bound) else _full_name(mod, aliases, bound.func if isinstance(bound, ast.Call) else bound)
+            if bound is not None and (_is_data(bound) or origin.split(".")[0] in SAFE_HEADS or origin in _BUILTIN_SAFE
+                                      or origin in SAFE_CALLS):
+                continue     # a method on local data (a dict, a str, a compiled regex)
+            if isinstance(bound, ast.Call):
+                ocap = _capability(bound, origin, origin.split(".")[0], False)
+                if ocap == "open":
+                    continue     # a handle opened above: the open() call is the capability
+                if ocap:
+                    add(ocap, call); continue
+            reach.unresolved.append(f"{mod.where(call)} {mod.src(call.func)[:40]}(...) receives the tool's input on an object the audit cannot follow")
         elif full in SAFE_CALLS or head in SAFE_HEADS or full in _BUILTIN_SAFE or on_tainted:
             continue
         else:
-            kind = idx.resolve(mod, call.func) if isinstance(call.func, (ast.Name, ast.Attribute)) else ("unknown", full)
+            kind = idx.resolve(mod, call.func)
             if kind[0] == "def" and depth < 4:
                 callee_mod, callee = kind[1], kind[2]
                 params = [a.arg for a in callee.args.args]
@@ -602,7 +880,8 @@ def function_reach(idx: Index, mod: Module, fn, tainted=None, depth=0) -> Reach:
                 for k in call.keywords:
                     if k.arg and _uses(k.value, tainted):
                         passed.add(k.arg)
-                reach.merge(function_reach(idx, callee_mod, callee, passed or set(params), depth + 1), before(call.lineno))
+                sub = function_reach(idx, callee_mod, callee, passed or set(params), depth + 1)
+                reach.merge(sub, before(call.lineno))
             elif kind[0] == "external" and kind[1].split(".")[0] in SAFE_HEADS:
                 continue
             else:
@@ -637,21 +916,32 @@ def _callable_guards(idx, mod, node, label, kinds) -> list:
         return [Guard("refusal", mod.where(node), label, unresolved=f"{mod.where(node)} {mod.src(node)[:50]} is not followed by the audit")]
     gm, fn = kind[1], kind[2]
     tainted = _taint(fn, {a.arg for a in fn.args.args + fn.args.kwonlyargs} - {"self"})
-    found = [_refusal_from_if(idx, gm, n, label, fn) for n in ast.walk(fn)
-             if isinstance(n, ast.If) and any(_is_refusal_body(n.body, k) for k in kinds) and _uses(n.test, tainted)]
+    found = [g for k in kinds for n, ctx in _refusing_ifs(fn, k, lambda t: _uses(t, tainted))
+             for g in _refusals_from_if(idx, gm, n, label, fn, ctx, tainted)]
     if not found:
         return [Guard("refusal", gm.where(fn), label, unresolved=f"{gm.where(fn)} {fn.name} never refuses a call that the audit can see")]
+    return _combine(found, label)
+
+
+def _combine(found, label):
+    """Refusals that apply to every tool combine (one `if` for secrets and another for destructive commands cover
+    both); each keeps only what it proved, so a narrow or conditional branch cannot lend its class to another.
+    Refusals limited to named tools stay separate guards."""
     general = [g for g in found if g.tools is None]
-    specific = [g for g in found if g.tools is not None]
     out = []
     if general:
         readable = [g for g in general if not g.unresolved]
         if readable:
-            out.append(Guard("refusal", readable[0].where, label, secret=any(g.secret for g in readable),
-                             destructive=any(g.destructive for g in readable), path=any(g.path for g in readable)))
+            g = Guard("refusal", readable[0].where, label)
+            for c in CLASSES:
+                if any(getattr(x, c) for x in readable):
+                    setattr(g, c, True)
+                elif any(c in x.partial for x in readable):
+                    g.partial[c] = next(x.partial[c] for x in readable if c in x.partial)
+            out.append(g)
         else:
             out.append(general[0])
-    return out + specific
+    return out + [g for g in found if g.tools is not None]
 
 
 def _callable_guard(idx, mod, node, label, kinds):
@@ -744,8 +1034,10 @@ def _agent_guards(idx: Index, mod: Module, call: ast.Call, track: str) -> list:
                             m = methods.get(mname)
                             if m:
                                 found = True
-                                ifs = [n for n in ast.walk(m) if isinstance(n, ast.If) and _is_refusal_body(n.body, "cancel")]
-                                guards += [_refusal_from_if(idx, cm, n, "BeforeToolCallEvent cancel_tool", m) for n in ifs] or \
+                                tainted = _taint(m, {a.arg for a in m.args.args + m.args.kwonlyargs} - {"self"})
+                                found = [g for n, ctx in _refusing_ifs(m, "cancel", lambda t: _uses(t, tainted))
+                                         for g in _refusals_from_if(idx, cm, n, "BeforeToolCallEvent cancel_tool", m, ctx, tainted)]
+                                guards += _combine(found, "BeforeToolCallEvent cancel_tool") if found else \
                                     [Guard("refusal", cm.where(m), "hook", unresolved=f"{cm.where(m)} hook never cancels a call the audit can see")]
                     if not found:
                         guards.append(Guard("refusal", hmod.where(el), "hook provider", unresolved=f"{hmod.where(el)} hook provider registers no BeforeToolCallEvent callback the audit can read"))
@@ -770,12 +1062,23 @@ def _agent_guards(idx: Index, mod: Module, call: ast.Call, track: str) -> list:
                 for g in _callable_guards(idx, mod, n.value.args[0], "before-tool-call hook", ("false",)):
                     if not (g.unresolved and "never refuses" in g.unresolved):
                         guards.append(g)
-        for n in ast.walk(mod.tree):  # Task(agent=this_agent, human_input=True)
+        me = _assigned_name(mod, call)
+        for n in ast.walk(mod.tree):  # Task(agent=this_agent, human_input=True): a person reviews the final answer
             if isinstance(n, ast.Call) and _dotted(n.func).split(".")[-1] == "Task":
-                hi = _kw(n, "human_input")
-                if isinstance(hi, ast.Constant) and hi.value is True:
-                    guards.append(Guard("approval", mod.where(hi), "human_input=True", tools=None))
+                hi, ag = _kw(n, "human_input"), _kw(n, "agent")
+                if isinstance(hi, ast.Constant) and hi.value is True and me and isinstance(ag, ast.Name) and ag.id == me:
+                    guards.append(Guard("refusal", mod.where(hi), "human_input=True", unresolved=(
+                        f"{mod.where(hi)} Task human_input=True asks a person to review the task's final answer after the "
+                        "agent's tools have run; it approves no tool call")))
     return guards
+
+
+def _assigned_name(mod, call):
+    """The variable an agent constructor is assigned to (`unsafe = Agent(...)`), or None."""
+    for n in ast.walk(mod.tree):
+        if isinstance(n, ast.Assign) and n.value is call and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name):
+            return n.targets[0].id
+    return None
 
 
 def _const_str(idx, mod, n, depth=0):
@@ -871,24 +1174,47 @@ def _sdk_agent(idx, mod, call):
                         if pattern is None:
                             g = Guard("refusal", g.where, g.label, unresolved=f"{mod.where(matcher)} hook matcher {mod.src(matcher)[:40]} is not readable")
                         hook_guards.append((pattern or ".*", g))
+    servers, server_problem = _sdk_servers(idx, mod, call)
+    mcp = {f"mcp__{key}__{n}": impl for key, entries in servers.items() if isinstance(entries, dict) for n, impl in entries.items()}
+    names = list(available) + list(mcp)
+    for a in allowed:                  # an allowed MCP name the audit cannot bind to an attached implementation
+        if a.startswith("mcp__") and a not in names and not (len(a.split("__")) == 2 or a.endswith("__*")):
+            names.append(a)
+    for key, entries in servers.items():
+        if isinstance(entries, str) and not any(n.startswith(f"mcp__{key}__") for n in names):
+            names.append(f"mcp__{key}__*")
     tools = []
-    for name in available + [a for a in allowed if a.startswith("mcp__") and a not in available]:
+    for name in names:
         base = name.split("(")[0]
         reach, guards = Reach(), []
         if any(d.split("(")[0] == base and d.split("(")[1:] in ([], ["*)"], ["**)"]) for d in deny_rules):
             continue     # removed entirely
         cat = CLAUDE_TOOL_CATS.get(base) or ("computer" if "computer" in base.lower() else None)
         if base.startswith("mcp__"):
-            fn = _sdk_mcp_tool(idx, mod, base)
-            if fn is None:
-                reach.unresolved.append(f"{mod.where(call)} {base} is not followed by the audit")
+            key = base.split("__")[1] if len(base.split("__")) > 2 else ""
+            impl = mcp.get(base)
+            if impl is not None:
+                if isinstance(impl, str):
+                    reach.unresolved.append(impl)
+                else:
+                    reach.merge(function_reach(idx, impl[0], impl[1]))
+            elif isinstance(servers.get(key), str):
+                reach.unresolved.append(servers[key])
+            elif server_problem:
+                reach.unresolved.append(server_problem)
+            elif key in servers:
+                continue     # the configured server has no such tool: nothing to run
             else:
-                fmod, f = fn
-                reach.merge(function_reach(idx, fmod, f))
+                reach.unresolved.append(f"{mod.where(call)} {base}: server {key!r} is not in mcp_servers here "
+                                        "(it may come from settings or .mcp.json, which the audit does not bind)")
         elif cat:
             reach.caps.append((cat, mod.where(call), []))
-        auto = base in allowed or name in allowed or mode == "bypassPermissions" or (mode == "acceptEdits" and cat == "write") \
-            or cat == "read"
+        server_wide = any(a in (f"mcp__{base.split('__')[1]}", f"mcp__{base.split('__')[1]}__*") for a in allowed) \
+            if base.startswith("mcp__") and len(base.split("__")) > 1 else False
+        # any allow rule for the tool auto-approves at least part of it, so no approval can be assumed
+        auto = base in allowed or name in allowed or any(x.split("(")[0] == base for x in allowed) or server_wide \
+            or mode == "bypassPermissions" \
+            or (mode == "acceptEdits" and cat == "write") or cat == "read"
         if not auto:
             guards.append(Guard("approval", mod.where(call), f"{base} not in allowed_tools (a person approves)"))
         for d in deny_rules:
@@ -902,15 +1228,47 @@ def _sdk_agent(idx, mod, call):
     return tools
 
 
-def _sdk_mcp_tool(idx, mod, name):
-    _, server, tool = (name.split("__") + ["", ""])[:3]
-    for m in [mod] + [idx.module(p) for p in idx.files.values()]:
-        for n in ast.walk(m.tree):
-            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                for d in n.decorator_list:
-                    if isinstance(d, ast.Call) and d.args and isinstance(d.args[0], ast.Constant) and d.args[0].value == tool:
-                        return m, n
-    return None
+def _sdk_servers(idx, mod, call):
+    """In-process MCP servers attached to these options: ({key: {tool name: (Module, FunctionDef) | why}} or
+    {key: why}, problem). Only tools passed to create_sdk_mcp_server(tools=[...]) of a server in mcp_servers count."""
+    ms = _kw(call, "mcp_servers")
+    if ms is None:
+        return {}, ""
+    smod, d = _tool_list(idx, mod, ms)
+    if not isinstance(d, ast.Dict) or None in d.keys:
+        return {}, f"{mod.where(ms)} mcp_servers={mod.src(ms)[:40]} is not a dict the audit can read"
+    out = {}
+    for k, v in zip(d.keys, d.values):
+        key = _const_str(idx, smod, k)
+        if key is None:
+            return {}, f"{smod.where(k)} an mcp_servers key is not readable"
+        vmod, val = smod, v
+        if isinstance(v, ast.Name):
+            r = idx.resolve(smod, v)
+            vmod, val = (r[1], r[2]) if r[0] == "value" else (smod, None)
+        if not (isinstance(val, ast.Call) and _dotted(val.func).endswith("create_sdk_mcp_server")):
+            out[key] = f"{smod.where(v)} MCP server {key!r} is not an in-process create_sdk_mcp_server(...) the audit can read"
+            continue
+        tl = _kw(val, "tools")
+        lmod, lst = _tool_list(idx, vmod, tl) if tl is not None else (vmod, ast.List(elts=[]))
+        if not isinstance(lst, (ast.List, ast.Tuple)):
+            out[key] = f"{vmod.where(val)} tools of MCP server {key!r} are not a list the audit can read"
+            continue
+        entries = {}
+        for el in lst.elts:
+            r = idx.resolve(lmod, el)
+            if r[0] != "def":
+                entries[f"?{lmod.src(el)[:30]}"] = f"{lmod.where(el)} {lmod.src(el)[:40]} on MCP server {key!r} is not followed by the audit"
+                continue
+            fmod, fn = r[1], r[2]
+            tname = next((dd.args[0].value for dd in fn.decorator_list if isinstance(dd, ast.Call) and dd.args
+                          and isinstance(dd.args[0], ast.Constant) and isinstance(dd.args[0].value, str)), fn.name)
+            entries[tname] = (fmod, fn)
+        if any(n.startswith("?") for n in entries):
+            out[key] = next(v for n, v in entries.items() if n.startswith("?"))
+        else:
+            out[key] = entries
+    return out, ""
 
 
 def find_agents(idx: Index, tid: str, files) -> list:
@@ -982,23 +1340,25 @@ def judge_agent(agent) -> dict:
                     good.append(f"{name} ({words}) at {w} guarded by {g.label} {g.where}")
                 elif any(v is None for v in verdicts):
                     g = next(g for g, v in zip(gs + inline, verdicts) if v is None)
-                    unclear.append(f"{name} ({words}) at {w}: {g.unresolved}")
+                    unclear.append(f"{name} ({words}) at {w}: {g.why(cid, cat)}")
                 else:
                     bad.append(f"{name} ({words}) at {w} has no guard that " +
                                {"G1": "refuses or approves it", "G2": "keeps secrets out", "G3": "stops destructive use"}[cid])
         head = f"{where} {label}"
+        fixed = [f for _, reach, _ in tools for f in reach.fixed]
+        note = f"; fixed actions the model cannot change: {', '.join(fixed[:3])}" if fixed else ""
         if bad:
             out[cid] = ("MISSING", f"{head}: " + "; ".join(bad[:4]))
         elif unclear:
             out[cid] = ("UNRESOLVED", f"{head}: " + "; ".join(unclear[:3]))
         elif good:
-            out[cid] = ("VERIFIED", f"{head}: " + "; ".join(good[:4]))
+            out[cid] = ("VERIFIED", f"{head}: " + "; ".join(good[:4]) + note)
         else:
             names = ", ".join(n for n, _, _ in tools) or "no tools"
             out[cid] = ("VERIFIED", f"{head}: tools [{names}]; no " +
                         {"G1": "shell, file-write, web or computer capability",
                          "G2": "tool can read files, run commands, fetch URLs or use a computer",
-                         "G3": "tool can run commands, write anywhere or use a computer"}[cid])
+                         "G3": "tool can run commands, write anywhere or use a computer"}[cid] + note)
     return out
 
 
@@ -1023,12 +1383,16 @@ def guard_results(idx: Index, tid: str, files) -> dict:
 # ------------------------------------------------------------------ Claude Code settings (1.4.2)
 def claude_results(r: "Repo", settings) -> dict:
     """G1-G3 from .claude/settings*.json by the same rule: each built-in tool is removed, gated or ungated."""
-    perms, mode, sandbox_auto = {"allow": [], "deny": [], "ask": []}, "default", False
-    lines = {}
+    perms, mode, sandbox_auto, sandbox_on = {"allow": [], "deny": [], "ask": []}, "default", False, False
+    lines, problem = {}, ""
     for p in settings:
+        if not r._readable(p):     # e.g. a link to a file outside the repo: its rules can't be proven from the repo
+            problem = problem or f"{r.rel(p)} is a link out of the repo (or not readable), so its rules are not read"
+            continue
         try:
             data = json.loads(r.text(p) or "{}")
         except json.JSONDecodeError:
+            problem = problem or f"{r.rel(p)} is not valid JSON, so its rules are not read"
             continue
         pm = data.get("permissions", {}) or {}
         for k in perms:
@@ -1036,10 +1400,35 @@ def claude_results(r: "Repo", settings) -> dict:
         mode = pm.get("defaultMode", mode)
         sb = data.get("sandbox", {}) or {}
         sandbox_auto = sandbox_auto or bool(sb.get("enabled") and sb.get("autoAllowBashIfSandboxed"))
+        sandbox_on = sandbox_on or bool(sb.get("enabled"))
         for i, line in enumerate(r.text(p).splitlines(), 1):
             lines.setdefault(line.strip().strip(",").strip('"'), f"{r.rel(p)}:{i}")
 
     first = f"{r.rel(settings[0])}:1" if settings else ""
+
+    def rule_guard(x, kind):
+        """What one scoped rule proves. A file rule covers secrets when its pattern names a secret anywhere in the
+        tree (`**/.env*`, `~/.ssh/**`); a single path is narrower. A Bash rule covers a destructive command when it
+        matches that command with any arguments (`git push *`), and secrets only when it matches them in any command."""
+        tool, scope = x.split("(")[0], x.split("(", 1)[1][:-1] if "(" in x else ""
+        g = Guard("refusal", at(x), f"{kind} {x}")
+        if tool == "Bash":
+            m = re.match(r"^\s*(git push|git reset --hard|rm -rf)(\s*:?\s*\*?)$", scope)
+            if m:
+                g.destructive = True
+            elif re.search(DESTRUCTIVE_RX, scope):
+                g.partial["destructive"] = f"{at(x)} {kind} {x} matches only that exact form of the command"
+            if re.search(SECRET_RX, scope):
+                if scope.startswith("*"):
+                    g.secret = True
+                else:
+                    g.partial["secret"] = f"{at(x)} {kind} {x} covers secrets only in commands starting {scope.split('*')[0].strip()!r}"
+        elif re.search(SECRET_RX, scope):
+            if re.match(r"^(\./|/)?\*\*/", scope) or re.match(r"^~/\.(ssh|aws|gnupg|config/gcloud)\b", scope):
+                g.secret = True
+            else:
+                g.partial["secret"] = f"{at(x)} {kind} {x} covers only {scope}"
+        return g
 
     def at(rule):
         return lines.get(rule, first)
@@ -1048,8 +1437,8 @@ def claude_results(r: "Repo", settings) -> dict:
         return [x for x in perms[kind] if x.split("(")[0] == tool or (tool.startswith("mcp__") and x.startswith(tool))]
 
     whole = lambda x: "(" not in x or x.split("(", 1)[1].rstrip(")") in ("*", "**", "")
-    meaningful = [x for x in perms["deny"] if x.split("(")[0] in CLAUDE_TOOL_CATS and (whole(x) or re.search(SECRET_RX, x) or re.search(DESTRUCTIVE_RX, x))] \
-        + [x for x in perms["ask"] if x.split("(")[0] in CLAUDE_TOOL_CATS and CLAUDE_TOOL_CATS[x.split("(")[0]] in G1_CATS]
+    meaningful = [x for x in perms["deny"] + perms["ask"] if x.split("(")[0] in CLAUDE_TOOL_CATS
+                  and (whole(x) or any(getattr(rule_guard(x, "deny"), c) for c in CLASSES))]
     computer = sorted({x.split("(")[0] for x in perms["allow"] + perms["ask"] if "computer" in x.lower()})
     tools = []
     for tool in CLAUDE_BUILTINS + computer:
@@ -1057,23 +1446,22 @@ def claude_results(r: "Repo", settings) -> dict:
         if any(whole(x) for x in rules("deny", tool)):
             continue
         guards = []
-        if rules("ask", tool):
-            guards.append(Guard("approval", at(rules("ask", tool)[0]), f"ask {rules('ask', tool)[0]}"))
-        else:
-            auto = cat == "read" or bool(rules("allow", tool)) or mode in ("bypassPermissions", "dontAsk") \
-                or (mode == "acceptEdits" and cat == "write") or (tool == "Bash" and sandbox_auto)
-            if not auto:
-                guards.append(Guard("approval", first, f"{tool} needs approval (not in allow, default mode)"))
-        for x in rules("deny", tool):
-            guards.append(Guard("refusal", at(x), f"deny {x}", secret=bool(re.search(SECRET_RX, x)), destructive=bool(re.search(DESTRUCTIVE_RX, x))))
-        if cat == "read":   # Read deny rules also bind Grep and Glob
-            for x in rules("deny", "Read"):
-                if tool != "Read":
-                    guards.append(Guard("refusal", at(x), f"deny {x}", secret=bool(re.search(SECRET_RX, x))))
+        whole_ask = [x for x in rules("ask", tool) if whole(x)]
+        auto = cat == "read" or bool(rules("allow", tool)) or mode in ("bypassPermissions", "dontAsk") \
+            or (mode == "acceptEdits" and cat == "write") or (tool == "Bash" and sandbox_auto)
+        if whole_ask:     # ask outranks allow: a person approves every call
+            guards.append(Guard("approval", at(whole_ask[0]), f"ask {whole_ask[0]}"))
+        elif not auto:
+            guards.append(Guard("approval", first, f"{tool} needs approval (not in allow, default mode)"))
+        for kind in ("ask", "deny"):   # a scoped rule covers only its scope
+            guards += [rule_guard(x, kind) for x in rules(kind, tool) if not whole(x)]
+        if cat == "read" or (tool == "Bash" and sandbox_on):
+            # Read deny rules also bind Grep and Glob, and the sandbox applies them to every command's file reads
+            guards += [rule_guard(x, "deny") for x in rules("deny", "Read") if tool != "Read" and not whole(x)]
         reach = Reach()
         reach.caps.append((cat, at(rules("allow", tool)[0]) if rules("allow", tool) else first, []))
         tools.append((tool, reach, guards))
-    res = judge_agent(("Claude Code", first, tools, [], ""))
+    res = judge_agent(("Claude Code", first, tools, [], problem))
     fixes = ("Add permissions.deny for secrets and destructive commands, and deny or ask for broad tools you allow (Bash, Write, WebFetch).",
              "Deny Read of .env*, *.pem, *.key, ~/.ssh/**, ~/.aws/** (it also binds Grep and Glob), and gate every allowed web or shell tool.",
              "Deny or require approval for git push, reset --hard, rm -rf, and for Write/Edit if you allow them.")
