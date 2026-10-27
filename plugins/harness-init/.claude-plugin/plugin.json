@@ -1,6 +1,6 @@
 {
   "name": "harness-init",
-  "version": "1.4.2",
+  "version": "1.4.4",
   "description": "Scaffold a governed harness: work list with executable done_when checks, a hash-chained ledger that binds approved criteria to evidence (harness approve / verify / check), progress note, decisions log, clean-state checklist, init.sh, CLAUDE.md and safe settings.",
   "author": {
     "name": "Yen-Ching Wu"

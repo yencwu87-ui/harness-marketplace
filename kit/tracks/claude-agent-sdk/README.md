@@ -14,7 +14,8 @@ make run TRACK=claude-agent-sdk          # works on the next failing item in you
 the repo;
 the built-in `Grep` and `Glob` are not offered, because their globs and roots can reach secret files);
 a PreToolUse hook that refuses secret paths, recursive shell searches, destructive commands and writes
-outside the repo; the shell sandbox; a Haiku `explore` subagent with the same restricted tools; turn and
+outside the repo (its first refusals call `kit_guard.refuses`, the kit's guard helper copied beside `agent.py`, in
+the canonical forms harness-audit credits; keep `kit_guard.py` unchanged); the shell sandbox; a Haiku `explore` subagent with the same restricted tools; turn and
 budget limits (`KIT_MAX_TURNS`, `KIT_MAX_BUDGET_USD`); usage appended to `progress/usage.log`.
 
 `--ask` is a one-shot answer with no tools (for the prompt test suites). `--repo . --task "..."` runs the

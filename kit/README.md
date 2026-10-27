@@ -90,6 +90,11 @@ Then:
 | Container (`run-sandboxed.sh`) | Everything outside the mounted repo, for every process | What's inside the repo itself, and any key you pass in |
 | Red team (promptfoo, DeepTeam) | Finds weaknesses before users do | Nothing at run time; it's a test |
 
+Guards the audit can prove: `make audit` credits a code refusal (in a tool or a framework hook) only in the
+canonical forms its `--canonical-forms` flag prints: a top-level `if <test>: <refuse>` on the tool's own input, tests
+joined only by `or`. `shared/kit_guard.py` is the kit's guard helper: `if kit_guard.refuses(command): return "refused"`.
+Copy it unchanged; the audit recognises it by its pinned sha256. Any other shape scores UNRESOLVED, with the reason.
+
 ## Honest expectations
 
 Results depend on the workload and how you measure them. None of the sources promise a
