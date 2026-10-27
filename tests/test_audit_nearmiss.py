@@ -1,10 +1,14 @@
 """Generated near-miss tests: for every kind of guard the audit credits, a positive case that earns credit and
 generated near-misses of it that must not.
 
-The near-misses are the shapes that fooled earlier versions (Codex rounds 1 and 2): a narrower scope, a different
+The near-misses are the shapes that fooled earlier versions (Codex rounds 1 to 3): a narrower scope, a different
 agent, a different MCP server or tool, a condition or flag in front of the guard, a guard behind a symlink to a file
-outside the repo, and a Boolean that reads true but means false. Each is built from the same positive case by one
-change, so a pass here means the audit noticed that one change.
+outside the repo, and a Boolean that reads true but means false. Round 3 (1.4.4) adds: `for` versus `while`, a
+loop-local exit versus a function-level refusal, the right versus the wrong input field or parameter, rebinding after
+capturing an input, readable helpers that always (or never) refuse, anchored versus unanchored regexes, reach through
+zero-input helpers, wildcard approval with an MCP map the audit cannot read, and directory versus file symlinks.
+Each is built from the same positive case by one change, so a pass here means the audit noticed that one change.
+From 1.4.4 the positives are written in the canonical guard forms (`audit.py --canonical-forms`).
 
 Every tool here is an unrestricted shell (`run(command)`), so a guard that loses its credit loses all of G1-G3,
 except where a case names the checks it targets.
@@ -56,16 +60,18 @@ class RefusalKind:
         self.name, self.imports, self.header, self.x, self.n, self.refuse = name, imports, header, x, n, refuse
         self.tail, self.wire, self.unwire, self.other_agent, self.early_allow = tail, wire, unwire, other_agent, early_allow
 
-    def source(self, cond=None, structure=None, wiring=None, prelude=""):
-        p = P.format(x=self.x)
-        cond = (cond or "{p}").format(x=self.x, n=self.n, p=p)
-        refusal = indent(f"if {cond}:\n{indent(self.refuse)}")             # at the function's body level
+    def source(self, cond=None, structure=None, wiring=None, prelude="", module="", refuse=None, x=None, header=None,
+               tail=None):
+        x = x or self.x
+        p = P.format(x=x)
+        cond = (cond or "{p}").format(x=x, n=self.n, p=p)
+        refusal = indent(f"if {cond}:\n{indent(refuse or self.refuse)}")   # at the function's body level
         if structure:
             refusal = structure.format(n=self.n, refusal=indent(refusal))
-        fn = self.header + prelude + refusal + self.tail
+        fn = (header or self.header) + prelude + refusal + (self.tail if tail is None else tail)
         if self.name.startswith("BeforeToolCallEvent"):                   # Strands: the method lives in the Gate class
             fn = indent(fn) + SHELL_TOOL
-        return ("import os, re, subprocess\n" + SECRET + FLAG + "ENFORCE_OFF = False\n" + self.imports + fn +
+        return ("import os, re, subprocess\n" + SECRET + FLAG + "ENFORCE_OFF = False\n" + module + self.imports + fn +
                 (wiring if wiring is not None else self.wire))
 
 
@@ -258,6 +264,220 @@ class ApprovalNearMisses(unittest.TestCase):
                "worker = Agent(role='w', goal='g', backstory='b', tools=[run])\n"
                "task = Task(description='d', expected_output='o', agent=worker, human_input=True)\n")
         self.assertEqual(score({"agent.py": src})[0], 0)
+
+
+
+# ------------------------------------------------------------------ 1.4.4: Codex round-3 families
+# Per kind: a value that is not the tool's input (wrong parameter or field), and a change to the input before the test.
+WRONG_VALUE = {
+    "inline refusal (OpenAI Agents SDK)": dict(x="label", header="def run(command, label=''):\n"),
+    "before_tool_callback (Google ADK)": dict(x="str(tool_context)"),
+    "before-tool-call hook (CrewAI)": dict(x="str(ctx)"),
+    "BeforeToolCallEvent hook (Strands)": dict(x="str(event.selected_tool)"),
+    "function middleware (Microsoft Agent Framework)": dict(x="str(context.function)"),
+    "PreToolUse hook (Claude Agent SDK)": dict(x="description", header="async def gate(data, tool_use_id, context):\n"
+                                               "    description = data.get('tool_input', {}).get('description', '')\n"),
+}
+REBIND = {
+    "inline refusal (OpenAI Agents SDK)": dict(prelude="    original = command\n    command = ''\n",
+                                               tail="    return subprocess.run(original, shell=True).returncode\n"),
+    "before_tool_callback (Google ADK)": dict(prelude="    args.clear()\n"),
+    "before-tool-call hook (CrewAI)": dict(prelude="    ctx.tool_input = {}\n"),
+    "BeforeToolCallEvent hook (Strands)": dict(prelude="    event.tool_use = {}\n"),
+    "function middleware (Microsoft Agent Framework)": dict(prelude="    context.arguments = {}\n"),
+    "PreToolUse hook (Claude Agent SDK)": dict(prelude="    command = ''\n"),
+}
+LOOP_MISSES = {
+    "inside a for loop over a literal": "    for _ in [1]:\n{refusal}",
+    "inside an empty for loop": "    for _ in []:\n{refusal}",
+    "inside a for loop over range(1)": "    for _ in range(1):\n{refusal}",
+    "inside while True ... break": "    while True:\n{refusal}        break\n",
+    "inside a with block": "    with open(os.devnull):\n{refusal}",
+}
+LOOP_LOCAL_EXITS = {"continue": "continue", "break": "break"}
+HELPERS = {          # a readable helper decides; none of these is a canonical test, whatever it returns
+    "helper that always returns False": "False and ({p})",
+    "helper that always returns True": "True",
+    "helper with the real test": "{p}",
+    "helper that tests only long inputs": "len(v) > 9 and ({p})",
+}
+REGEX_POSITIVE = "re.search(r'\\.env|rm -rf|git push', {x})"
+REGEX_MISSES = {
+    "re.match": "re.match(r'\\.env|rm -rf|git push', {x})",
+    "re.fullmatch": "re.fullmatch(r'\\.env|rm -rf|git push', {x})",
+    "anchored with ^": "re.search(r'^(\\.env|rm -rf|git push)', {x})",
+    "anchored with $": "re.search(r'(\\.env|rm -rf|git push)$', {x})",
+    "compiled pattern with .match": "PATTERN.match({x})",
+    "pattern built at run time": "re.search(PATTERN_TEXT, {x})",
+}
+REGEX_MODULE = "PATTERN = re.compile(r'\\.env|rm -rf|git push')\nPATTERN_TEXT = '|'.join(['\\\\.env', 'rm -rf', 'git push'])\n"
+
+
+class Round3NearMisses(unittest.TestCase):
+    """One change to each kind's canonical positive: no credit. The positives keep theirs."""
+
+    def check(self, kind, label, files, want=0):
+        with self.subTest(kind=kind.name, case=label):
+            pts, st = score(files)
+            self.assertEqual(pts, want, (st, files["agent.py"]))
+
+    def test_for_versus_while_and_other_blocks_earn_nothing(self):
+        for kind in KINDS:
+            for label, structure in LOOP_MISSES.items():
+                self.check(kind, label, {"agent.py": kind.source(structure=structure)})
+
+    def test_a_loop_local_exit_is_not_a_function_level_refusal(self):
+        for kind in KINDS:
+            self.check(kind, "function-level refusal (positive)", {"agent.py": kind.source()}, want=8)
+            for label, exit_ in LOOP_LOCAL_EXITS.items():
+                self.check(kind, f"loop-local {label}", {"agent.py": kind.source(structure="    for _ in [1]:\n{refusal}",
+                                                                                     refuse=exit_)})
+
+    def test_the_right_input_earns_credit_and_the_wrong_one_does_not(self):
+        for kind in KINDS:
+            self.check(kind, "the tool's own input (positive)", {"agent.py": kind.source()}, want=8)
+            self.check(kind, "another parameter or field", {"agent.py": kind.source(**WRONG_VALUE[kind.name])})
+
+    def test_changing_the_input_before_the_test_earns_nothing(self):
+        for kind in KINDS:
+            self.check(kind, "input changed or rebound", {"agent.py": kind.source(**REBIND[kind.name])})
+
+    def test_readable_helpers_are_not_canonical(self):
+        for kind in KINDS:
+            for label, body in HELPERS.items():
+                helper = f"def blocked(v):\n    return {body.format(p=P.format(x='v'))}\n"
+                self.check(kind, label, {"agent.py": kind.source(cond="blocked({x})", module=helper)})
+
+    def test_anchored_regexes_earn_nothing_and_unanchored_search_earns_credit(self):
+        for kind in KINDS:
+            self.check(kind, "re.search (positive)", {"agent.py": kind.source(cond=REGEX_POSITIVE, module=REGEX_MODULE)}, want=8)
+            for label, cond in REGEX_MISSES.items():
+                self.check(kind, label, {"agent.py": kind.source(cond=cond, module=REGEX_MODULE)})
+
+    def test_the_sdk_field_must_be_the_one_the_tool_executes(self):
+        kind = next(k for k in KINDS if k.name.startswith("PreToolUse"))
+        for field, want in (("command", 8), ("file_path", 0), ("description", 0)):
+            header = f"async def gate(data, tool_use_id, context):\n    command = data.get('tool_input', {{}}).get('{field}', '')\n"
+            self.check(kind, f"field {field}", {"agent.py": kind.source(header=header)}, want=want)
+
+
+class ReachNearMisses(unittest.TestCase):
+    """A guarded tool keeps its credit; one extra call it cannot see past takes it away."""
+    BASE = ("import re, subprocess\nfrom agents import Agent\n{module}def run(command):\n"
+            "    if '.env' in command or 'rm -rf' in command or 'git push' in command:\n        return 'denied'\n"
+            "{extra}    return subprocess.run(command, shell=True).returncode\nagent = Agent(name='w', tools=[run])\n")
+
+    def test_zero_input_helpers_are_followed(self):
+        self.assertEqual(score({"agent.py": self.BASE.format(module="", extra="")})[0], 8)
+        cases = {
+            "fixed push in a zero-input helper": ("def push():\n    return subprocess.run('git push', shell=True)\n", "    push()\n"),
+            "two helpers deep": ("def a():\n    return subprocess.run('git push', shell=True)\ndef b():\n    return a()\n", "    b()\n"),
+            "fixed delete in a helper": ("import shutil\ndef wipe():\n    shutil.rmtree('/constructed')\n", "    wipe()\n"),
+            "fixed secret read in a helper": ("from pathlib import Path\ndef peek():\n    return Path('.env').read_text()\n", "    peek()\n"),
+            "an object the audit cannot follow": ("import external_service\n", "    external_service.client.reset()\n"),
+        }
+        for label, (module, extra) in cases.items():
+            with self.subTest(case=label):
+                pts, st = score({"agent.py": self.BASE.format(module=module, extra=extra)})
+                self.assertLess(pts, 8, (st, label))
+
+    def test_a_refusal_reaches_a_helper_only_through_the_same_name(self):
+        helper = "def execute(cmd):\n    return subprocess.run(cmd, shell=True).returncode\n"
+        good = self.BASE.format(module=helper, extra="").replace("    return subprocess.run(command, shell=True).returncode\nagent",
+                                                                 "    return execute(command)\nagent")
+        self.assertEqual(score({"agent.py": good})[0], 8)
+        for label, call in {"converted": "execute(command.strip())", "another value": "execute('git status')",
+                            "wrapped": "execute(f'{command}')"}.items():
+            with self.subTest(case=label):
+                self.assertEqual(score({"agent.py": good.replace("execute(command)", call)})[0], 0)
+        rebinding_helper = helper.replace("    return", "    cmd = cmd + ' '\n    return")
+        self.assertEqual(score({"agent.py": good.replace(helper, rebinding_helper)})[0], 0)
+
+
+class McpMapNearMisses(unittest.TestCase):
+    SDK = "from claude_agent_sdk import ClaudeAgentOptions, create_sdk_mcp_server, tool\n{defs}opts = ClaudeAgentOptions(tools=[], allowed_tools={allowed}, mcp_servers={servers})\n"
+    NARROW = "@tool('status', 'fixed', {})\ndef status(args):\n    return 'ok'\nprod = create_sdk_mcp_server(name='prod', tools=[status])\n"
+
+    def test_unknown_maps_are_unresolved_whatever_is_approved(self):
+        maps = {"imported": ("from servers import SERVERS\n", "SERVERS"),
+                "built by a call": ("from servers import make_servers\n", "make_servers()"),
+                "an external server value": ("from servers import PROD\n", "{'prod': PROD}"),
+                "a stdio server dict": ("", "{'prod': {'type': 'stdio', 'command': 'prod-mcp'}}")}
+        for allowed in ("['mcp__prod__*']", "['mcp__prod']", "['mcp__prod__execute']", "[]"):
+            for label, (defs, servers) in maps.items():
+                with self.subTest(allowed=allowed, map=label):
+                    pts, st = score({"agent.py": self.SDK.format(defs=defs, allowed=allowed, servers=servers)})
+                    self.assertEqual(set(st.values()), {"UNRESOLVED"}, st)
+
+    def test_a_known_narrow_map_keeps_its_credit_and_an_unlisted_wildcard_does_not(self):
+        self.assertEqual(score({"agent.py": self.SDK.format(defs=self.NARROW, allowed="['mcp__prod__*']",
+                                                           servers="{'prod': prod}")})[0], 8)
+        pts, st = score({"agent.py": self.SDK.format(defs=self.NARROW, allowed="['mcp__other__*']", servers="{'prod': prod}")})
+        self.assertEqual(set(st.values()), {"UNRESOLVED"}, st)
+
+
+class SymlinkNearMisses(unittest.TestCase):
+    """Directory versus file links, in the tree and out of it: only what resolves inside the audited root is read."""
+    SETTINGS = json.dumps({"permissions": {"ask": ["Bash(*)", "WebFetch", "Write", "Edit"],
+                                           "deny": ["MultiEdit", "NotebookEdit", "WebSearch", "Read", "Grep", "Glob"]}})
+    POLICY = ("def gate(tool, args, tool_context):\n    if '.env' in str(args) or 'rm -rf' in str(args) or 'git push' in str(args):\n"
+              "        return {'error': 'denied'}\n    return None\n")
+    AGENT = ("import subprocess\nfrom google.adk.agents import Agent\nfrom {mod} import gate\n" + SHELL_TOOL +
+             "agent = Agent(name='w', tools=[run], before_tool_callback=gate)\n")
+
+    def setUp(self):
+        self.base = Path(tempfile.mkdtemp())
+        self.out = self.base / "outside"
+        (self.out / "claude").mkdir(parents=True)
+        (self.out / "claude" / "settings.json").write_text(self.SETTINGS)
+        (self.out / "policy.py").write_text(self.POLICY)
+        (self.out / "pkg").mkdir()
+        (self.out / "pkg" / "policy.py").write_text(self.POLICY)
+
+    def tearDown(self):
+        shutil.rmtree(self.base)
+
+    def repo(self, name):
+        d = self.base / name
+        d.mkdir()
+        return d
+
+    def test_settings_through_file_and_directory_links(self):
+        d = self.repo("plain")
+        (d / ".claude").mkdir()
+        (d / ".claude" / "settings.json").write_text(self.SETTINGS)
+        self.assertEqual(points(audit(d)), 8)                                        # positive
+        d = self.repo("dir_in")
+        (d / "real_claude").mkdir()
+        (d / "real_claude" / "settings.json").write_text(self.SETTINGS)
+        (d / ".claude").symlink_to("real_claude", target_is_directory=True)
+        self.assertEqual(points(audit(d)), 8)                                        # an in-tree directory link
+        d = self.repo("file_in")
+        (d / ".claude").mkdir()
+        (d / "settings.real.json").write_text(self.SETTINGS)
+        (d / ".claude" / "settings.json").symlink_to("../settings.real.json")
+        self.assertEqual(points(audit(d)), 8)                                        # an in-tree file link
+        d = self.repo("dir_out")
+        (d / ".claude").symlink_to(self.out / "claude", target_is_directory=True)
+        self.assertEqual(points(audit(d)), 0)
+        d = self.repo("file_out")
+        (d / ".claude").mkdir()
+        (d / ".claude" / "settings.json").symlink_to(self.out / "claude" / "settings.json")
+        self.assertEqual(points(audit(d)), 0)
+
+    def test_guard_modules_through_file_and_directory_links(self):
+        d = self.repo("plain_mod")
+        (d / "policy.py").write_text(self.POLICY)
+        (d / "agent.py").write_text(self.AGENT.format(mod="policy"))
+        self.assertEqual(points(audit(d)), 8)                                        # positive
+        d = self.repo("file_out_mod")
+        (d / "policy.py").symlink_to(self.out / "policy.py")
+        (d / "agent.py").write_text(self.AGENT.format(mod="policy"))
+        self.assertEqual(points(audit(d)), 0)
+        d = self.repo("dir_out_mod")
+        (d / "pkg").symlink_to(self.out / "pkg", target_is_directory=True)
+        (d / "agent.py").write_text(self.AGENT.format(mod="pkg.policy"))
+        self.assertEqual(points(audit(d)), 0)
 
 
 if __name__ == "__main__":
