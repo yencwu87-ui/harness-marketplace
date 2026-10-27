@@ -1226,10 +1226,9 @@ def _sdk_agent(idx, mod, call):
             or (mode == "acceptEdits" and cat == "write") or cat == "read"
         if not auto:
             guards.append(Guard("approval", mod.where(call), f"{base} not in allowed_tools (a person approves)"))
-        for d in deny_rules:
+        for d in deny_rules:       # the same scope standard as Claude Code settings: a scoped rule covers its scope
             if d.split("(")[0] == base and "(" in d:
-                guards.append(Guard("refusal", mod.where(call), f"disallowed_tools {d}", secret=bool(re.search(SECRET_RX, d)),
-                                    destructive=bool(re.search(DESTRUCTIVE_RX, d))))
+                guards.append(_rule_guard(d, "disallowed_tools", mod.where(call)))
         for pattern, g in hook_guards:      # the matcher picks the tools; a name test inside the hook narrows further
             if _matches(pattern, base) and (g.tools is None or base in g.tools):
                 guards.append(g)
@@ -1389,6 +1388,32 @@ def guard_results(idx: Index, tid: str, files) -> dict:
     return out
 
 
+def _rule_guard(x, kind, where):
+    """What one scoped permission rule proves: the same standard for Claude Code settings and Agent SDK
+    disallowed_tools. A file rule covers secrets when its pattern names a secret anywhere in the tree (`**/.env*`,
+    `~/.ssh/**`); a single path is narrower. A Bash rule covers a destructive command when it matches that command with
+    any arguments (`git push *`), and secrets only when it matches them in any command (`*.env*`)."""
+    tool, scope = x.split("(")[0], x.split("(", 1)[1][:-1] if "(" in x else ""
+    g = Guard("refusal", where, f"{kind} {x}")
+    if tool == "Bash":
+        m = re.match(r"^\s*(git push|git reset --hard|rm -rf)\s*:?\s*\*$", scope)   # any arguments: needs the *
+        if m:
+            g.destructive = True
+        elif re.search(DESTRUCTIVE_RX, scope):
+            g.partial["destructive"] = f"{where} {kind} {x} matches only that exact form of the command"
+        if re.search(SECRET_RX, scope):
+            if scope.startswith("*"):
+                g.secret = True
+            else:
+                g.partial["secret"] = f"{where} {kind} {x} covers secrets only in commands starting {scope.split('*')[0].strip()!r}"
+    elif re.search(SECRET_RX, scope):
+        if re.match(r"^(\./|/)?\*\*/", scope) or re.match(r"^~/\.(ssh|aws|gnupg|config/gcloud)\b", scope):
+            g.secret = True
+        else:
+            g.partial["secret"] = f"{where} {kind} {x} covers only {scope}"
+    return g
+
+
 # ------------------------------------------------------------------ Claude Code settings (1.4.2)
 def claude_results(r: "Repo", settings) -> dict:
     """G1-G3 from .claude/settings*.json by the same rule: each built-in tool is removed, gated or ungated."""
@@ -1415,30 +1440,6 @@ def claude_results(r: "Repo", settings) -> dict:
 
     first = f"{r.rel(settings[0])}:1" if settings else ""
 
-    def rule_guard(x, kind):
-        """What one scoped rule proves. A file rule covers secrets when its pattern names a secret anywhere in the
-        tree (`**/.env*`, `~/.ssh/**`); a single path is narrower. A Bash rule covers a destructive command when it
-        matches that command with any arguments (`git push *`), and secrets only when it matches them in any command."""
-        tool, scope = x.split("(")[0], x.split("(", 1)[1][:-1] if "(" in x else ""
-        g = Guard("refusal", at(x), f"{kind} {x}")
-        if tool == "Bash":
-            m = re.match(r"^\s*(git push|git reset --hard|rm -rf)(\s*:?\s*\*?)$", scope)
-            if m:
-                g.destructive = True
-            elif re.search(DESTRUCTIVE_RX, scope):
-                g.partial["destructive"] = f"{at(x)} {kind} {x} matches only that exact form of the command"
-            if re.search(SECRET_RX, scope):
-                if scope.startswith("*"):
-                    g.secret = True
-                else:
-                    g.partial["secret"] = f"{at(x)} {kind} {x} covers secrets only in commands starting {scope.split('*')[0].strip()!r}"
-        elif re.search(SECRET_RX, scope):
-            if re.match(r"^(\./|/)?\*\*/", scope) or re.match(r"^~/\.(ssh|aws|gnupg|config/gcloud)\b", scope):
-                g.secret = True
-            else:
-                g.partial["secret"] = f"{at(x)} {kind} {x} covers only {scope}"
-        return g
-
     def at(rule):
         return lines.get(rule, first)
 
@@ -1447,7 +1448,7 @@ def claude_results(r: "Repo", settings) -> dict:
 
     whole = lambda x: "(" not in x or x.split("(", 1)[1].rstrip(")") in ("*", "**", "")
     meaningful = [x for x in perms["deny"] + perms["ask"] if x.split("(")[0] in CLAUDE_TOOL_CATS
-                  and (whole(x) or any(getattr(rule_guard(x, "deny"), c) for c in CLASSES))]
+                  and (whole(x) or any(getattr(_rule_guard(x, "deny", at(x)), c) for c in CLASSES))]
     computer = sorted({x.split("(")[0] for x in perms["allow"] + perms["ask"] if "computer" in x.lower()})
     tools = []
     for tool in CLAUDE_BUILTINS + computer:
@@ -1463,10 +1464,10 @@ def claude_results(r: "Repo", settings) -> dict:
         elif not auto:
             guards.append(Guard("approval", first, f"{tool} needs approval (not in allow, default mode)"))
         for kind in ("ask", "deny"):   # a scoped rule covers only its scope
-            guards += [rule_guard(x, kind) for x in rules(kind, tool) if not whole(x)]
+            guards += [_rule_guard(x, kind, at(x)) for x in rules(kind, tool) if not whole(x)]
         if cat == "read" or (tool == "Bash" and sandbox_on):
             # Read deny rules also bind Grep and Glob, and the sandbox applies them to every command's file reads
-            guards += [rule_guard(x, "deny") for x in rules("deny", "Read") if tool != "Read" and not whole(x)]
+            guards += [_rule_guard(x, "deny", at(x)) for x in rules("deny", "Read") if tool != "Read" and not whole(x)]
         reach = Reach()
         reach.caps.append((cat, at(rules("allow", tool)[0]) if rules("allow", tool) else first, []))
         tools.append((tool, reach, guards))

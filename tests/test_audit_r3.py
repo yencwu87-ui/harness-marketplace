@@ -250,6 +250,12 @@ class R3_05_SdkRuleScope(unittest.TestCase):
             with self.subTest(deny=deny):
                 self.assertEqual(score(self.sdk(deny))[1], score(self.native(deny))[1])
 
+    def test_a_rule_without_a_wildcard_matches_only_the_bare_command(self):
+        for src in (self.sdk, self.native):
+            with self.subTest(source=src.__name__):
+                self.assertNotEqual(score(src(["Bash(git push)", "Bash(rm -rf)"]))[1][2], "VERIFIED")
+                self.assertEqual(score(src(["Bash(git push *)", "Bash(rm -rf:*)"]))[1][2], "VERIFIED")
+
 
 class R3_06_SandboxEscapes(unittest.TestCase):
     OTHERS = ["Write", "Edit", "MultiEdit", "NotebookEdit", "WebFetch", "WebSearch", "Read", "Grep", "Glob"]
