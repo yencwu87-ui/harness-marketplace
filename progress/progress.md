@@ -1,5 +1,27 @@
 # Progress
 
+**Updated:** 28 Oct 2026  **Item:** 1.4.5b, one regression found after delivery (coordinator brief, not a work-list item)  **Status:** passed locally except the 12 port tests, awaiting the coordinator's run outside the sandbox
+
+## What changed
+- kit/tracks/claude-agent-sdk/agent.py: new first PreToolUse hook `trace_tool_call` (trace only, deep copy, returns {}); the trace write left `deny_secrets`; `guard_tool_input` unchanged
+- kit/tracks/claude-agent-sdk/harness_track.json: tool_hook.where -> agent.py:trace_tool_call; README; CHANGELOG under 1.4.5; DECISIONS
+- tests/test_live_safety.py: two port-free tests on hook order and the trace of a refused attempt
+
+## Verdicts
+- Cause (guard refuses before the trace write): VERIFIED (red on 67ca076: deliver/1.4.5b/logs/red_vs_67ca076.log)
+- New tests green after the fix: VERIFIED (deliver/1.4.5b/logs/unittest_after_fix.log)
+- Other full tracks: no refusal ahead of the trace write (they have no code refusal; claude-code traces from a settings hook that only observes): VERIFIED by reading the starters
+- Audit credit unchanged: SDK starter check lines identical to 67ca076, self-audit 93, fairness a=8 b=0 c=2, starters 8/8: VERIFIED (deliver/1.4.5b/logs/audit_*.log, test_audit_fairness.log)
+- PresetIntegration SDK test and the other 11 port tests: UNRESOLVED here (sandbox refuses bind); the coordinator runs them
+
+## Blocker
+none
+
+## Next action
+Coordinator runs the 12 port tests outside the sandbox, then Codex round 5.
+
+---
+
 **Updated:** 28 Oct 2026  **Item:** 1.4.5, Codex round-4 fix round (coordinator brief, not a work-list item)  **Status:** passed locally, awaiting Codex round 5 and owner review
 
 ## What changed
