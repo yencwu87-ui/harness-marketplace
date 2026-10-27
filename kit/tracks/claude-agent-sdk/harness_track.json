@@ -11,7 +11,7 @@
   "entry": "agent.py",
   "tool_hook": {
     "kind": "callback",
-    "where": "agent.py:deny_secrets"
+    "where": "agent.py:trace_tool_call"
   },
   "reach_sources": [
     {

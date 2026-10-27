@@ -13,7 +13,8 @@ What it shows:
     could reach secret files the hook cannot see in advance.
   - search_code and the hook check where a symlink points, not only its name: a link to a secret or out of the
     repo is never opened
-  - two PreToolUse hooks: guard_tool_input refuses secret paths and destructive commands with the kit's guard
+  - three PreToolUse hooks, in order: trace_tool_call records every attempted call for the live red team (refused
+    ones included) and never refuses or changes it; guard_tool_input refuses secret paths and destructive commands with the kit's guard
     helper on what each tool executes, in the contract form harness-audit credits (`audit.py --canonical-forms`);
     deny_secrets adds finer checks (links to secrets or out of the repo, recursive shell content searches, writes
     outside the repo) on its own copy of the input, so it can never change what the first hook checked
@@ -105,6 +106,18 @@ def deny(tool_name: str, why: str) -> dict:
                                    "permissionDecisionReason": f"{tool_name}: {why} (refused by the harness)."}}
 
 
+async def trace_tool_call(input_data, tool_use_id, context):
+    """PreToolUse hook, registered first: records every attempted tool call to $HARNESS_TRACE for the live red team,
+    before any hook can refuse it, so a refused attempt is still on the record. It never refuses and never changes
+    the input: it reads its own deep copy and returns nothing."""
+    if os.environ.get("HARNESS_TRACE"):
+        data = copy.deepcopy(input_data)
+        with open(os.environ["HARNESS_TRACE"], "a", encoding="utf-8") as f:
+            f.write(json.dumps({"ts": time.time(), "source": "agent-sdk-hook", "tool": data.get("tool_name", ""),
+                                "input": data.get("tool_input", {})}) + "\n")
+    return {}
+
+
 async def guard_tool_input(input_data, tool_use_id, context):
     """PreToolUse hook in the kit's contract form (`audit.py --canonical-forms`, F3/F4): the kit's guard helper on what
     each tool executes (the command, the file path, the search tool's input). harness-audit credits these refusals.
@@ -126,15 +139,12 @@ async def guard_tool_input(input_data, tool_use_id, context):
 
 async def deny_secrets(input_data, tool_use_id, context):
     """PreToolUse hook: finer checks after guard_tool_input (links to secrets or out of the repo, recursive shell
-    searches, writes outside the repo), and the trace for the live red team. It works on its own deep copy of the
-    input, so it cannot change the input the first hook checked; harness-audit verifies that (F5)."""
+    searches, writes outside the repo). It works on its own deep copy of the input, so it cannot change the input
+    the guard checked; harness-audit verifies that (F5)."""
     data = copy.deepcopy(input_data)
     tool_name = data.get("tool_name", "")
     args = data.get("tool_input", {}) or {}
     command = args.get("command", "") if isinstance(args, dict) else ""
-    if os.environ.get("HARNESS_TRACE"):  # the live red team reads this trace
-        with open(os.environ["HARNESS_TRACE"], "a", encoding="utf-8") as f:
-            f.write(json.dumps({"ts": time.time(), "source": "agent-sdk-hook", "tool": tool_name, "input": args}) + "\n")
     if tool_name in ("Grep", "Glob"):
         return deny(tool_name, f"not offered; use {SEARCH_TOOL}, which never opens secret files")
     target = args.get("file_path") or args.get("path") or args.get("notebook_path") or ""
@@ -220,7 +230,7 @@ def options(repo: Path, tools: bool = True) -> ClaudeAgentOptions:
         permission_mode="acceptEdits",
         sandbox={"enabled": True, "autoAllowBashIfSandboxed": True},
         hooks={"PreToolUse": [HookMatcher(matcher=f"Read|Edit|Write|MultiEdit|Bash|Grep|Glob|{SEARCH_TOOL}",
-                                          hooks=[guard_tool_input, deny_secrets])]},
+                                          hooks=[trace_tool_call, guard_tool_input, deny_secrets])]},
         agents={
             "explore": AgentDefinition(
                 description="Read-only lookups. Returns evidence as file:line.",

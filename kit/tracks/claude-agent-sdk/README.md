@@ -13,7 +13,8 @@ make run TRACK=claude-agent-sdk          # works on the next failing item in you
 `Write`, `Bash`, `Agent`, plus `mcp__kit__search_code`, a content search that never opens secret files, and never follows a symlink to a secret or out of
 the repo;
 the built-in `Grep` and `Glob` are not offered, because their globs and roots can reach secret files);
-two PreToolUse hooks: `guard_tool_input` refuses secret paths and destructive commands with the kit's guard helper
+three PreToolUse hooks, in order: `trace_tool_call` records every attempted call to `$HARNESS_TRACE` for the
+live red team, refused ones included, and never refuses or changes it; `guard_tool_input` refuses secret paths and destructive commands with the kit's guard helper
 (`kit_guard.py`, copied beside `agent.py`; keep it unchanged) in the contract form harness-audit credits, and
 `deny_secrets` adds finer checks (links to secrets or out of the repo, recursive shell searches, writes outside the
 repo) on its own deep copy of the input, so it cannot change what the first hook checked; the shell sandbox; a Haiku `explore` subagent with the same restricted tools; turn and
