@@ -617,7 +617,7 @@ CANONICAL_FORMS = (
      "which escapes a newline. `not in` and `==` tests are allowed in a predicate but never count toward coverage. "
      "kit_guard.refuses covers both classes."),
 )
-KIT_GUARD_SHA256 = "5cfe52b3cec24baf8e6c80d7000f1f0c2bd69144e61e79de514a17ca384f6c41"   # kit/shared/kit_guard.py
+KIT_GUARD_SHA256 = "263800b27043abba4be398b413af468308640f0be58f0186f247549f5119fc7f"   # kit/shared/kit_guard.py
 CLASS_KEYWORDS = {"secret": (".env", ".pem", ".key", ".ssh", ".aws", "id_rsa", "credentials"),
                   "destructive": ("git push", "reset --hard", "rm -rf")}
 PROBES = ("{k}", "{k} x", "cat {k}", "x;{k}", "echo ok; {k} --flag", "echo ok\n{k} y", "'{k}'", '"{k}"', "`{k}`",

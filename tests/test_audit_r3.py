@@ -127,7 +127,7 @@ class R3_02_PredicateBindsTheExecutedInput(unittest.TestCase):
         src_from = src.replace("import kit_guard\n", "from kit_guard import refuses\n").replace("kit_guard.refuses(", "refuses(")
         self.assertEqual(score({"agent.py": src, "kit_guard.py": helper})[0], 8)
         self.assertEqual(score({"agent.py": src_from, "kit_guard.py": helper})[0], 8)
-        edited = helper.replace("return bool(", "return False and bool(", 1)
+        edited = helper.replace("return secret(value) or destructive(value)", "return False", 1)
         self.assertNotEqual(edited, helper)
         self.assertEqual(score({"agent.py": src, "kit_guard.py": edited})[0], 0)
         self.assertEqual(score({"agent.py": src})[0], 0)                       # helper missing: unreadable
@@ -364,22 +364,7 @@ class CanonicalFormsAreOneList(unittest.TestCase):
         self.assertEqual(hashlib.sha256(data).hexdigest(), a.KIT_GUARD_SHA256)
         self.assertEqual((ROOT / "kit/tracks/claude-agent-sdk/kit_guard.py").read_bytes(), data)
 
-    def test_the_helper_refuses_every_probe_and_passes_ordinary_input(self):
-        a = load_audit()
-        spec = importlib.util.spec_from_file_location("kit_guard_under_test", KIT_GUARD)
-        kg = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(kg)
-        for cls, keywords in a.CLASS_KEYWORDS.items():
-            for k in keywords:
-                for probe in a.probes(k):
-                    with self.subTest(cls=cls, probe=probe):
-                        self.assertTrue(kg.refuses(probe))
-                        self.assertTrue(kg.refuses({"tool_input": {"command": probe}}))
-                        self.assertTrue(kg.refuses(["x", {"file_path": probe}]))
-        for ok in ("python3 -m pytest -q", "git status --short", "src/app.py", {"file_path": "docs/README.md", "content": "x"},
-                   "", None, {"pattern": "def add", "path": "src"}):
-            with self.subTest(ordinary=ok):
-                self.assertFalse(kg.refuses(ok))
+    # 1.4.5: the helper's F7 probe test is replaced by the generated class table in tests/test_kit_guard.py
 
 
 class JudgementFixtures(unittest.TestCase):
