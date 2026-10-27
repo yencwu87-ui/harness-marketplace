@@ -10,7 +10,8 @@ make run TRACK=claude-agent-sdk          # works on the next failing item in you
 ```
 
 `agent.py` shows: one item per run; model and effort set once; a small tool surface (`Read`, `Edit`,
-`Write`, `Bash`, `Agent`, plus `mcp__kit__search_code`, a content search that never opens secret files;
+`Write`, `Bash`, `Agent`, plus `mcp__kit__search_code`, a content search that never opens secret files, and never follows a symlink to a secret or out of
+the repo;
 the built-in `Grep` and `Glob` are not offered, because their globs and roots can reach secret files);
 a PreToolUse hook that refuses secret paths, recursive shell searches, destructive commands and writes
 outside the repo; the shell sandbox; a Haiku `explore` subagent with the same restricted tools; turn and
