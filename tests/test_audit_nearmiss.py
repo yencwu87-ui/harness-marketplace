@@ -512,5 +512,97 @@ class SymlinkNearMisses(unittest.TestCase):
         self.assertEqual(points(audit(d)), 0)
 
 
+REVIEW = Path(__file__).resolve().parent / "fixtures" / "review_1_4_4"
+# Per kind: a tool-name expression that reads like the tool's name but is not it (F2 must name the framework's own field).
+FORGED_NAME = {
+    "before_tool_callback (Google ADK)": "args['name']",
+    "before-tool-call hook (CrewAI)": "ctx.agent.name",
+    "BeforeToolCallEvent hook (Strands)": "event.agent.name",
+    "function middleware (Microsoft Agent Framework)": "context.agent.name",
+    "PreToolUse hook (Claude Agent SDK)": "data['tool_input']['name']",
+}
+# Per kind: a whole-input expression that reads like the input but is another object (F6 must name the framework's own).
+FORGED_INPUT = {
+    "before_tool_callback (Google ADK)": "str(tool_context.args)",
+    "before-tool-call hook (CrewAI)": "str(ctx.agent.input)",
+    "BeforeToolCallEvent hook (Strands)": "str(event.agent.tool_use)",
+    "function middleware (Microsoft Agent Framework)": "str(context.agent.arguments)",
+    "PreToolUse hook (Claude Agent SDK)": "str(context.tool_input)",
+}
+
+
+class IndependentReviewNearMisses(unittest.TestCase):
+    """Shapes an independent reviewer built against the canonical checker (fixtures/review_1_4_4): each scored 8/8,
+    and none stops the call at run time."""
+
+    def test_the_review_fixtures_earn_nothing(self):
+        for d in sorted(p for p in REVIEW.iterdir() if p.is_dir()):
+            with self.subTest(fixture=d.name):
+                rep = audit(d)
+                self.assertLess(points(rep), 8, guards(rep))
+                if d.name.startswith("f_") or d.name.startswith("r_kg"):
+                    self.assertEqual(points(rep), 0, guards(rep))
+
+    def test_redefining_a_trusted_name_earns_nothing(self):
+        cases = {"def any": ("def any(it):\n    return False\n", None),
+                 "def str": ("def str(x):\n    return ''\n", None),
+                 "import all as any": ("from builtins import all as any\n", None),
+                 "re replaced": ("class _R:\n    def search(self, *a):\n        return None\nre = _R()\n",
+                                 "re.search(r'\\.env|rm -rf|git push', {x})"),
+                 "builtins patched": ("import builtins\nbuiltins.any = lambda it: False\n", None),
+                 "a constant replaced through globals()": ("globals()['SECRET'] = re.compile('^$')\n", None)}
+        for kind in KINDS:
+            for label, (module, cond) in cases.items():
+                if label == "def str" and not kind.x.startswith("str("):
+                    continue          # this kind's test does not call str()
+                with self.subTest(kind=kind.name, case=label):
+                    pts, st = score({"agent.py": kind.source(module=module, cond=cond)})
+                    self.assertEqual(pts, 0, st)
+
+    def test_a_repo_decorator_on_the_guard_earns_nothing(self):
+        deco = "def wrap(f):\n    return f\n"
+        for kind in (k for k in KINDS if not k.name.startswith("BeforeToolCallEvent")):
+            with self.subTest(kind=kind.name):
+                lines = kind.source(module=deco).split("\n")
+                i = next(n for n, line in enumerate(lines) if line.startswith(("def ", "async def ")) and "wrap" not in line)
+                lines.insert(i, "@wrap")
+                self.assertEqual(score({"agent.py": "\n".join(lines)})[0], 0)
+
+    def test_forged_tool_names_and_inputs_earn_nothing(self):
+        for kind in KINDS:
+            if kind.name in FORGED_NAME:
+                with self.subTest(kind=kind.name, case="forged tool name"):
+                    pts, st = score({"agent.py": kind.source(cond=FORGED_NAME[kind.name] + " == 'run' and ({p})")})
+                    self.assertEqual(pts, 0, st)
+            if kind.name in FORGED_INPUT:
+                with self.subTest(kind=kind.name, case="forged input"):
+                    pts, st = score({"agent.py": kind.source(x=FORGED_INPUT[kind.name])})
+                    self.assertEqual(pts, 0, st)
+
+    def test_sdk_denies_that_python_reads_as_allow_earn_nothing(self):
+        kind = next(k for k in KINDS if k.name.startswith("PreToolUse"))
+        for label, refuse in {
+                "duplicate key": "return {'hookSpecificOutput': {'permissionDecision': 'deny', 'permissionDecision': 'allow'}}",
+                "unpacked after": "return {'hookSpecificOutput': {'permissionDecision': 'deny', **ALLOW}}",
+                "outer key repeated": "return {'hookSpecificOutput': {'permissionDecision': 'deny'}, 'hookSpecificOutput': {}}"}.items():
+            with self.subTest(case=label):
+                pts, st = score({"agent.py": kind.source(refuse=refuse, module="ALLOW = {'permissionDecision': 'allow'}\n")})
+                self.assertEqual(pts, 0, st)
+
+    def test_the_continuation_or_setattr_before_or_after_the_refusal(self):
+        maf = next(k for k in KINDS if k.name.startswith("function middleware"))
+        self.assertEqual(score({"agent.py": maf.source(prelude="    go = call_next\n    await go()\n")})[0], 0)
+        strands = next(k for k in KINDS if k.name.startswith("BeforeToolCallEvent"))
+        self.assertEqual(score({"agent.py": strands.source(tail="    setattr(event, 'cancel_tool', False)\n")})[0], 0)
+
+    def test_a_client_built_and_called_in_one_expression_is_reached(self):
+        for call in ("requests.Session().get(url).text", "httpx.Client().get(url).text",
+                     "smtplib.SMTP('mail.example').sendmail('a', 'b', url)"):
+            with self.subTest(call=call):
+                src = f"import requests, httpx, smtplib\nfrom agents import Agent\ndef fetch(url):\n    return {call}\n" \
+                      "agent = Agent(name='w', tools=[fetch])\n"
+                self.assertLess(score({"agent.py": src})[0], 8)
+
+
 if __name__ == "__main__":
     unittest.main()
