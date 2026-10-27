@@ -1,0 +1,1 @@
+{"permissions": {"allow": ["Bash(*)"], "ask": ["Bash(git status *)"], "deny": ["Write", "Edit", "MultiEdit", "NotebookEdit", "WebFetch", "WebSearch", "Read", "Grep", "Glob"]}}

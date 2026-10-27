@@ -237,6 +237,38 @@ class DenySecrets(unittest.TestCase):
         finally:
             shutil.rmtree(d)
 
+    def test_the_search_tool_never_follows_links_into_secrets_or_out_of_the_repo(self):
+        """R2-06: innocently named links to .env, .aws/credentials and an outside file are never opened."""
+        base = Path(tempfile.mkdtemp())
+        try:
+            d, outside = base / "repo", base / "outside"
+            for rel, t in {"repo/src/app.py": "TOKEN_NAME = 'x'\n", "repo/.env": "TOKEN=canary-env-link\n",
+                           "repo/.aws/credentials": "TOKEN canary-aws-link\n", "outside/notes.txt": "TOKEN canary-outside-link\n",
+                           "repo/docs/real.md": "TOKEN in docs\n"}.items():
+                (base / rel).parent.mkdir(parents=True, exist_ok=True)
+                (base / rel).write_text(t)
+            (d / "ordinary.txt").symlink_to(".env")
+            (d / "src" / "notes.md").symlink_to("../.aws/credentials")
+            (d / "src" / "readme.txt").symlink_to(outside / "notes.txt")
+            (d / "linked_dir").symlink_to(outside, target_is_directory=True)
+            (d / "docs" / "same.md").symlink_to("real.md")              # a safe link inside the repo
+            self.agent.set_repo(d)
+            for path in (".", "src", "src/..", "linked_dir", "ordinary.txt", "src/readme.txt"):
+                text = json.dumps(asyncio.run(self.agent.search_code.handler({"pattern": "TOKEN", "path": path})))
+                with self.subTest(path=path):
+                    self.assertNotIn("canary", text)
+            text = json.dumps(asyncio.run(self.agent.search_code.handler({"pattern": "TOKEN", "path": "."})))
+            self.assertIn("src/app.py", text)
+            self.assertIn("docs/real.md", text)
+            self.assertIn("docs/same.md", text)
+            # the hook refuses a Read through the same links
+            for target in ("ordinary.txt", "src/notes.md", str(d / "src" / "readme.txt")):
+                with self.subTest(read=target):
+                    self.assertEqual(self.decide("Read", {"file_path": target}, repo=str(d)), "deny")
+            self.assertEqual(self.decide("Read", {"file_path": "docs/same.md"}, repo=str(d)), "allow")
+        finally:
+            shutil.rmtree(base)
+
     def test_options_restrict_the_tool_surface(self):
         o = self.agent.options(Path("/constructed/repo"))
         self.assertNotIn("Grep", o.tools)
