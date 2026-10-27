@@ -1,4 +1,4 @@
-"""kit_guard: the harness kit's guard helper (version 3, harness-marketplace 1.4.6). It imports nothing.
+"""kit_guard: the harness kit's guard helper (version 4, harness-marketplace 1.4.7). It imports nothing.
 
     import subprocess
     from kit_guard import refuses
@@ -11,6 +11,10 @@
 refuses(value) is True when value names a secret path or is a destructive command. value may be a string (a command,
 a path or a URL) or a tool's whole input (a dict or a list): every string inside it is checked on its own, keys
 included, and a list of strings is also checked as one argument vector (`['rm', '-rf', 'x']`).
+
+Before any other step, every string is also read with each backslash-newline pair removed, as the shell removes a
+line continuation (outside single quotes, inside double quotes too), and with every such pair removed wherever it is;
+the value is refused when any of these forms (the unjoined one included) is refused.
 
 The classes, as this helper defines them (harness-audit credits exactly these):
   secret       a path part named .env or starting with .env (.env.local, .env_prod, .envrc); ending in .pem, .key,
@@ -428,8 +432,13 @@ def _split_substitutions(tok):
 
 
 def _destructive_text(s, depth=0):
+    """A nested shell (bash -c '...') joins its own continued lines, so each level reads every continuation form."""
     if depth > 4:
         return False
+    return any(_destructive_form(f, depth) for f in _continuations(s))
+
+
+def _destructive_form(s, depth):
     toks = _tokens(s)
     if toks is None:                                      # unbalanced quotes: judge the words without them
         toks = _tokens(_unquoted(s)) or _unquoted(s).split()
@@ -441,6 +450,57 @@ def _destructive_text(s, depth=0):
             if any(c in w for c in " ;&|\n`$(") and _destructive_text(w, depth + 1):
                 return True
     return False
+
+
+def _joined(s):
+    """s with each backslash-newline pair removed as the shell removes a line continuation: outside single quotes
+    and inside double quotes; a backslash that quotes any other character stays with it."""
+    out, i, n, quote = [], 0, len(s), None
+    while i < n:
+        c = s[i]
+        if quote == "'":
+            out.append(c)
+            quote = None if c == "'" else quote
+            i += 1
+        elif c == "\\" and i + 1 < n:
+            if s[i + 1] != "\n":
+                out.append(s[i:i + 2])
+            i += 2
+        else:
+            if c == "'" and quote is None:
+                quote = "'"
+            elif c == '"':
+                quote = None if quote == '"' else '"'
+            out.append(c)
+            i += 1
+    return "".join(out)
+
+
+def _unjoined(s):
+    return s
+
+
+def _all_pairs_removed(s):
+    return s.replace("\\\r\n", "").replace("\\\n", "")
+
+
+_JOINS = (_unjoined, _joined, _all_pairs_removed)
+
+
+def _continuations(s):
+    """s, s joined as the shell would, and s with every backslash-newline pair removed wherever it is (fail closed)."""
+    if "\\\n" not in s and "\\\r\n" not in s:
+        return [s]
+    return list(dict.fromkeys(f(s) for f in _JOINS))
+
+
+def _forms(value):
+    """Every string and argument vector of value (as _strings yields them), each also in its continuation forms."""
+    for s in _strings(value):
+        if isinstance(s, tuple):
+            yield from dict.fromkeys(tuple(f(x) for x in s) for f in _JOINS)
+        else:
+            yield from _continuations(s)
 
 
 def _strings(value, depth=0):
@@ -468,7 +528,7 @@ def _strings(value, depth=0):
 
 def secret(value) -> bool:
     """True when value names a secret path (the secret class above, globs included)."""
-    for s in _strings(value):
+    for s in _forms(value):
         words = list(s) if isinstance(s, tuple) else (_tokens(s) or []) + [s]
         if any(_secret_word(w) for w in words):
             return True
@@ -477,7 +537,7 @@ def secret(value) -> bool:
 
 def destructive(value) -> bool:
     """True when value is a destructive command (the destructive class above)."""
-    for s in _strings(value):
+    for s in _forms(value):
         if _destructive_argv(list(s)) if isinstance(s, tuple) else _destructive_text(s):
             return True
     return False

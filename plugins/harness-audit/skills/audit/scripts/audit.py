@@ -30,7 +30,7 @@ import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-VERSION = "1.4.6"
+VERSION = "1.4.7"
 SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", "dist", "build", ".next", "target", "site-packages", "third_party", "vendor"}
 MAX_FILES = 60000
 MAX_FILE_BYTES = 400_000
@@ -500,6 +500,19 @@ class Index:
                             self._tampered.add(k[1].split(".")[0])
         return self._tampered
 
+    def module_change(self) -> str:
+        """F1 (R6-02): the first place, in any file tampered() reads, that binds a module object to another name,
+        hands one on, stores through something that is or may be a module, or reaches modules through sys.modules,
+        importlib, __import__ or a namespace ('rel:line what'), or ''."""
+        if getattr(self, "_module_change", None) is None:
+            self._module_change = ""
+            for rel in sorted(self.files) + sorted(self.test_files()):
+                m = self.module(self.files.get(rel) or self._test_files[rel])
+                self._module_change = _ModuleUses(self, m).first()
+                if self._module_change:
+                    break
+        return self._module_change
+
     def test_files(self) -> dict:
         """Test-named Python files, and files in folders the index skips (vendor/, build/, ...), that a non-test
         module imports: never scored as agents, but once imported they can change modules at run time. A test file
@@ -773,7 +786,34 @@ CANONICAL_FORMS = (
      "`__setattr__`/`__setitem__` calls, operator.setitem, an attribute or item store, also through a name bound "
      "to a module, its `__dict__` or `sys.modules`; `__dict__` or `sys.modules` methods; exec, eval or compile; "
      "importlib.reload; an `os.environ[...]` store is not a module change), and the tree has no sitecustomize or "
-     "usercustomize module in any form (.py, compiled, a package) and no .pth file."),
+     "usercustomize module in any form (.py, compiled, a package) and no .pth file. Module objects (1.4.7): in any "
+     "file the audit reads (the same files), a module may only be read (`m.attr`, `m[...]`) and called "
+     "(`m.f(...)`). A module is a name bound by `import`, a name imported with `from` that is a repo module or comes "
+     "from outside the repo and is not capitalised (a capitalised one is taken to be a class), or an attribute of "
+     "either (an attribute of an outside module may be a module). Any of these makes the guard UNRESOLVED, naming the "
+     "file and line, for every helper-credited tool and hook in the tree: binding a module to another name in any "
+     "form (plain, annotated or augmented assignment, walrus, for or with target, unpacking, a default, a class "
+     "attribute, an attribute or item target); returning, yielding or putting one in a display (list, tuple, set, "
+     "dict), except in an `except` clause or the class argument of isinstance/issubclass; passing one to a function "
+     "defined in the repo or to a method the audit cannot resolve, or to an outside callable that may hand it on "
+     "(setattr, delattr, vars, map, filter, iter, next, zip, sorted, min, max, list, tuple, set, dict, super, type, "
+     "and anything from functools, operator, itertools, copy, contextlib, threading, multiprocessing, concurrent, "
+     "asyncio, weakref, types, builtins, copyreg, pickle, sched, atexit; a capitalised name may be passed anywhere); "
+     "an attribute store or deletion, setattr or delattr whose object is, or may be, a module (anything except a "
+     "parameter, a name bound only to a literal, a display or a call of a repo class or function or of dict, list, "
+     "set, tuple, object, frozenset, bytearray, str, int or float, an exception name, a function or a class; a call's "
+     "result, a for or with target and an outside call's result may be a module); an item store or a mutating "
+     "method (update, append, insert, pop, clear, ...) on an object held by a module (os.environ excepted, and "
+     "`sys.path.insert(0, <this file's folder>)`, a folder the shadow check reads); any import of importlib, imp, "
+     "gc, ctypes, inspect, unittest.mock or mock; sys.modules, sys._getframe, sys.meta_path, sys.path_hooks, "
+     "sys.path_importer_cache, sys.settrace or sys.setprofile (also through getattr or `from sys import`); "
+     "`__import__`, `__builtins__`, `__loader__`, `__spec__`, `__annotations__`, globals() or locals(); vars() "
+     "of something that may be a module; a double-underscore attribute other than __name__, __qualname__, __doc__, "
+     "__file__, __version__, __init__, __class__, __module__, __enter__, __exit__, __aenter__, __aexit__ and "
+     "__call__; a frame or traceback attribute (f_globals, f_locals, f_back, tb_frame, gi_frame, ...) or such a "
+     "name as a string; getattr, setattr, delattr or hasattr with a computed name. Arguments a framework passes to "
+     "a hook or tool are taken to be its documented objects, not modules. Not modelled (UNRESOLVED is not claimed "
+     "for them): an outside function not in the list above that hands an argument back or on."),
     ("F2 Tool refusal",
      "The tool function's first statements (after its docstring) are `if refuses(P): return <literal>` or "
      "`if refuses(P): raise <built-in exception>(<literals>)`, with no else. P is the tool function's own parameter, "
@@ -791,8 +831,15 @@ CANONICAL_FORMS = (
      "path with no `..`, `~` or drive, for subprocess.run and check_output (call and check_call: no capture_output "
      "or check; Popen: no timeout either); encoding, errors for getoutput and getstatusoutput; mode, buffering for "
      "os.popen; cwd for asyncio.create_subprocess_shell; nothing for os.system or any other capability; mode, "
-     "buffering, encoding, errors, newline for open (codecs.open: no newline); timeout, headers, allow_redirects, "
-     "follow_redirects, verify and a literal method for a fetch. Any other argument "
+     "buffering, encoding, errors, newline for open (codecs.open: no newline); for a fetch, each callable's own "
+     "list, taken from its signature (1.4.7): requests.get, head, options, delete, post, put, patch and "
+     "requests.Session().<same>: timeout, headers, allow_redirects, verify (request: also a literal method); "
+     "httpx.get, head, options, delete, post, put, patch: timeout, headers, follow_redirects, verify (request and "
+     "stream: also a literal method); httpx.Client().<method>: timeout, headers, follow_redirects (no verify; "
+     "request and stream: also a literal method); urllib.request.urlopen: timeout; urllib.request.Request: headers "
+     "and a literal method; urllib.request.urlretrieve: nothing. A client counts only when built inline with no "
+     "arguments; any other fetch callable (a named client, aiohttp, urllib3, http.client) earns nothing. Any other "
+     "argument "
      "(executable, env, preexec_fn, stdin, bufsize, close_fds, pass_fds, user, opener, closefd, data, params, a cwd "
      "outside the repo, anything unknown), a computed option or `*`/`**` unpacking makes the refusal UNRESOLVED. The "
      "callee name (and the module it comes from) is bound once in the module, and no repo file patches its module. The tool has no decorator except the "
@@ -836,9 +883,16 @@ CANONICAL_FORMS = (
      "provably returns only `{}`, None (no output) or the F3 deny literal: a named value, a computed key, `**` "
      "unpacking, a helper's return, an imported value, a `yield`, `updatedInput` or any other output voids the guard "
      "credit of every hook on the agent (UNRESOLVED), whatever the registration order, since the SDK may run matching "
-     "hooks in parallel. The hooks dict has only literal, distinct keys (no `**`), and options bound to a name are "
-     "bound once and only passed whole to the SDK (ClaudeSDKClient, query) or returned: an attribute read such as "
-     "`opts.hooks[...].append(...)` or another call such as `dataclasses.replace(opts, ...)` voids it too. `can_use_tool`, when set, never passes `updated_input`. Strands: nothing in the repo sets `cancel_tool` to "
+     "hooks in parallel. The hooks dict has only literal, distinct keys (no `**`). The options are passed whole to "
+     "the SDK (ClaudeSDKClient, query), returned, or bound to one name by a plain or annotated assignment (1.4.7: "
+     "any other binding form, such as a walrus, for or with target, unpacking, a chained assignment, an attribute or "
+     "item target, a display, a default or another call, is UNRESOLVED). A bound name is bound once in the module, "
+     "counting every binding form (plain, annotated or augmented assignment, a bare annotation, walrus, for, with, "
+     "except, match, import, global, nonlocal, del, def, class, comprehension), and is only passed whole to the "
+     "SDK or returned: an attribute read such as `opts.hooks[...].append(...)` or another call such as "
+     "`dataclasses.replace(opts, ...)` voids it too, and so does another file importing the name (or *) from the "
+     "module or reading it through the module, or any `.options` or `._options` attribute in the tree (a client "
+     "keeps its options there until it connects). `can_use_tool`, when set, never passes `updated_input`. Strands: nothing in the repo sets `cancel_tool` to "
      "anything but a non-empty literal, deletes or augments it, or calls setattr or delattr with a computed name."),
     ("F6 Classes",
      "A credited refusal covers the two classes the helper defines, secret and destructive (kit_guard.py's docstring "
@@ -852,7 +906,7 @@ CANONICAL_FORMS = (
      "the reason \"hand-written refusal: use the kit guard helper to earn credit\" or the rule it breaks. It earns "
      "no points; it does not count as missing either."),
 )
-KIT_GUARD_SHA256 = "949cb6e9dec7ec5fbb3d390f89889ee6c4ff2b2d2fd96e06dd406c33c0357443"   # kit/shared/kit_guard.py
+KIT_GUARD_SHA256 = "2fc756dc5e007a6318c3c37b7aaff5ac1fa2e1de10e3714d7eb0ea2e311e60fb"   # kit/shared/kit_guard.py
 KIT_GUARD_MODULE, KIT_GUARD_NAME = "kit_guard", "refuses"
 STARTUP_MODULES = ("sitecustomize", "usercustomize")   # run at interpreter start, in any form (.py, .pyc, package)
 DUNDER_SETTERS = {"__setattr__", "__delattr__", "__setitem__", "__delitem__"}
@@ -996,6 +1050,10 @@ def _helper_check(idx, mod):
     shadow = idx.helper_shadows() or idx.stdlib_shadow([mod.rel, target.rel])
     if shadow:
         return None, shadow
+    change = idx.module_change()
+    if change:
+        return None, (f"{change}: a module may be bound to another name or changed at run time, so the guarded call "
+                      "may not be the real capability")
     tampered = idx.tampered()
     hit = next((t for t in (target.path, mod.path, "*") + KIT_GUARD_DEPS if t in tampered), None) or \
         next((t for t in sorted(x for x in tampered if isinstance(x, str)) if t in STDLIB_NAMES), None)
@@ -1003,6 +1061,14 @@ def _helper_check(idx, mod):
         what = {target.path: target.rel, mod.path: mod.rel, "*": "a module reached through sys.modules or a call"}
         return None, f"{what.get(hit, f'the `{hit}` module')} is changed at run time somewhere in the repo"
     return KIT_GUARD_NAME, ""
+
+
+def _pinned_helper(idx, mod) -> bool:
+    """`mod` is a kit_guard.py whose bytes are the pinned helper's."""
+    if mod.path.name != "kit_guard.py":
+        return False
+    data = idx.r.data(mod.path)
+    return data is not None and hashlib.sha256(data).hexdigest() == KIT_GUARD_SHA256
 
 
 def _is_kit_guard(idx, mod, func) -> bool:
@@ -1113,11 +1179,30 @@ CAPABILITY_SIGNATURES = {
     "open": OPEN_POSITIONAL, "io.open": OPEN_POSITIONAL, "builtins.open": OPEN_POSITIONAL,
     "codecs.open": ("filename", "mode", "encoding", "errors", "buffering"), "os.open": ("path", "flags", "mode"),
 }
-FETCH_SIGNATURES = {"get": ("url", "params"), "head": ("url",), "options": ("url",), "delete": ("url",),
-                    "post": ("url", "data", "json"), "put": ("url", "data"), "patch": ("url", "data"),
-                    "request": ("method", "url"), "stream": ("method", "url"), "urlopen": ("url", "data", "timeout"),
-                    "urlretrieve": ("url", "filename", "reporthook", "data"),
-                    "Request": ("url", "data", "headers", "origin_req_host", "unverifiable", "method")}
+# Each fetch callable the audit credits: its positional parameters and the written options it really takes (its own
+# signature: requests 2.32, httpx 0.28 and the standard library). A fetch outside this table earns nothing.
+_REQ = ("timeout", "headers", "allow_redirects", "verify")
+_HTTPX = ("timeout", "headers", "follow_redirects", "verify")
+_HTTPX_CLIENT = ("timeout", "headers", "follow_redirects")          # Client methods take no verify (the client does)
+FETCH_CALLABLES = {
+    "requests.get": (("url", "params"), _REQ), "requests.post": (("url", "data", "json"), _REQ),
+    "requests.put": (("url", "data"), _REQ), "requests.patch": (("url", "data"), _REQ),
+    **{f"requests.{m}": (("url",), _REQ) for m in ("head", "options", "delete")},
+    "requests.request": (("method", "url"), _REQ + ("method",)),
+    **{f"requests.Session().{m}": (("url",), _REQ) for m in ("get", "head", "options", "delete")},
+    "requests.Session().post": (("url", "data", "json"), _REQ),
+    **{f"requests.Session().{m}": (("url", "data"), _REQ) for m in ("put", "patch")},
+    "requests.Session().request": (("method", "url"), _REQ + ("method",)),
+    **{f"httpx.{m}": (("url",), _HTTPX) for m in ("get", "head", "options", "delete", "post", "put", "patch")},
+    **{f"httpx.{m}": (("method", "url"), _HTTPX + ("method",)) for m in ("request", "stream")},
+    **{f"httpx.Client().{m}": (("url",), _HTTPX_CLIENT) for m in ("get", "head", "options", "delete", "post", "put",
+                                                                    "patch")},
+    **{f"httpx.Client().{m}": (("method", "url"), _HTTPX_CLIENT + ("method",)) for m in ("request", "stream")},
+    "urllib.request.urlopen": (("url", "data", "timeout"), ("timeout",)),
+    "urllib.request.Request": (("url", "data", "headers", "origin_req_host", "unverifiable", "method"),
+                               ("headers", "method")),
+    "urllib.request.urlretrieve": (("url", "filename", "reporthook", "data"), ()),
+}
 _RUN_OPTIONS = ("shell", "capture_output", "text", "check", "timeout", "encoding", "errors", "universal_newlines", "cwd")
 # The allow-list, per capability: only options that capability really takes (a TypeError is not a guard).
 ALLOWED_OPTIONS = {
@@ -1129,8 +1214,7 @@ ALLOWED_OPTIONS = {
     "os.popen": ("mode", "buffering"), "asyncio.create_subprocess_shell": ("cwd",),
     "open": ("mode", "buffering", "encoding", "errors", "newline"), "io.open": ("mode", "buffering", "encoding", "errors", "newline"),
     "builtins.open": ("mode", "buffering", "encoding", "errors", "newline"),
-    "codecs.open": ("mode", "encoding", "errors", "buffering"),
-    "fetch": ("timeout", "headers", "allow_redirects", "follow_redirects", "verify", "method")}
+    "codecs.open": ("mode", "encoding", "errors", "buffering")}
 
 
 def _cwd_inside(v) -> bool:
@@ -1146,13 +1230,21 @@ def _op_arg(call, cat, full):
     one, or for anything else (a path receiver such as Path(p).read_text(), a copy, a delete)."""
     if any(isinstance(a, ast.Starred) for a in call.args) or any(k.arg is None for k in call.keywords):
         return None
-    name = full.split(".")[-1] if full else (call.func.attr if isinstance(call.func, ast.Attribute) else "")
+    fetch = None
+    if cat == "fetch":
+        f = call.func
+        if isinstance(f, ast.Attribute) and isinstance(f.value, ast.Call) and not f.value.args and \
+                not f.value.keywords and isinstance(f.value.func, (ast.Name, ast.Attribute)):
+            ctor = ".".join(full.split(".")[:-1]) if full else ""
+            fetch = FETCH_CALLABLES.get(f"{ctor}().{f.attr}")          # requests.Session().get(P): built inline
+        elif not (isinstance(f, ast.Attribute) and isinstance(f.value, ast.Call)):
+            fetch = FETCH_CALLABLES.get(full)
     if cat == "shell":
         params = CAPABILITY_SIGNATURES.get(full, ("command",))       # any other shell capability: its one argument
     elif cat in ("read", "write", "open") and full in ("open", "io.open", "builtins.open", "codecs.open", "os.open"):
         params = CAPABILITY_SIGNATURES[full]
-    elif cat == "fetch" and name in FETCH_SIGNATURES:
-        params = FETCH_SIGNATURES[name]
+    elif fetch is not None:
+        params = fetch[0]
     else:
         return None
     op = params[1] if params[0] == "method" else params[0]
@@ -1163,7 +1255,7 @@ def _op_arg(call, cat, full):
         if k.arg in bound:
             return None
         bound[k.arg] = k.value
-    allowed = ALLOWED_OPTIONS["fetch"] if cat == "fetch" else ALLOWED_OPTIONS.get(full, ())
+    allowed = fetch[1] if fetch is not None else ALLOWED_OPTIONS.get(full, ())
     for p, v in bound.items():
         if p == op:
             continue
@@ -1468,6 +1560,264 @@ def _module_handles(m) -> set:
 def _is_environ(m, node) -> bool:
     """`os.environ[...] = ...` or `del os.environ[...]`: changes the environment, not a module."""
     return isinstance(node, ast.Subscript) and m.full(node.value) == "os.environ"
+
+
+# F1 (R6-02): module objects. A module may be read (`m.attr`) and called (`m.f(...)`), and nothing else: binding it
+# to another name, handing it on, or storing through anything that is or may be a module withholds helper credit.
+MODULE_SOURCES = ("importlib", "imp", "gc", "ctypes", "inspect", "unittest.mock", "mock")   # hand out modules or namespaces
+SYS_SOURCES = {"modules", "_getframe", "_current_frames", "_current_exceptions", "meta_path", "path_hooks",
+               "path_importer_cache", "settrace", "setprofile"}
+FRAME_ATTRS = {"f_globals", "f_locals", "f_builtins", "f_back", "f_code", "tb_frame", "tb_next", "gi_frame", "cr_frame",
+               "ag_frame", "gi_code", "cr_code", "ag_code"}
+DUNDER_READS = {"__name__", "__qualname__", "__doc__", "__file__", "__version__", "__init__", "__class__", "__module__",
+                "__enter__", "__exit__", "__aenter__", "__aexit__", "__call__", "__main__"}
+NAMESPACE_STRINGS = FRAME_ATTRS | {"__dict__", "__globals__", "__builtins__", "__code__", "__closure__", "__self__",
+                                   "__func__", "__wrapped__", "__setattr__", "__delattr__", "__getattribute__",
+                                   "__subclasses__", "__mro__", "__bases__", "__base__", "__loader__", "__spec__",
+                                   "__import__", "__defaults__", "__kwdefaults__", "__annotations__", "__traceback__",
+                                   "__objclass__", "__setitem__", "__delitem__", "__getattr__"}
+NAMESPACE_NAMES = {"__import__", "__builtins__", "__loader__", "__spec__", "__annotations__", "globals", "locals"}
+# Outside callables that may hand an argument on to other code, or change it: a module passed to one is handed on.
+LAUNDERERS = {"setattr", "delattr", "vars", "map", "filter", "iter", "next", "zip", "enumerate", "reversed", "sorted",
+              "min", "max", "list", "tuple", "set", "frozenset", "dict", "super", "type", "object"}
+LAUNDER_HEADS = {"functools", "operator", "itertools", "copy", "contextlib", "threading", "multiprocessing",
+                 "concurrent", "asyncio", "weakref", "types", "builtins", "copyreg", "pickle", "sched", "atexit"}
+# Outside callables that only read their arguments here: a module may be passed to them.
+READERS = {"isinstance", "issubclass", "hasattr", "getattr", "print", "repr", "str", "id", "len", "callable", "bool",
+           "hash", "format", "dir"}
+SAFE_BASE_CALLS = {"dict", "list", "set", "tuple", "object", "frozenset", "bytearray", "str", "int", "float"}
+
+
+class _ModuleUses:
+    """F1 (R6-02): where one file binds, hands on, or changes a module object; `first()` is the first such place."""
+
+    def __init__(self, idx, m):
+        self.idx, self.m = idx, m
+        self.parents = _parents(m.tree)
+        self.kinds = {}             # name -> "module" | "from" (a name imported with `from` from outside the repo)
+        for n in ast.walk(m.tree):
+            if isinstance(n, ast.Import):
+                for a in n.names:
+                    self.kinds[a.asname or a.name.split(".")[0]] = "module"
+            elif isinstance(n, ast.ImportFrom):
+                for a in n.names:
+                    if a.name == "*":
+                        continue
+                    dotted = "." * n.level + (n.module + "." if n.module else "") + a.name
+                    k = idx.resolve_dotted(m, dotted)
+                    if k[0] == "module":
+                        self.kinds[a.asname or a.name] = "module"
+                    elif k[0] in ("external", "unknown"):
+                        self.kinds.setdefault(a.asname or a.name, "from")
+
+    def kind(self, e):
+        """'module' when e is, or may be, a module (an imported module, an attribute of one, a lower-case name
+        imported with `from` from outside the repo), 'class' for a capitalised such name, None otherwise."""
+        root = e
+        while isinstance(root, (ast.Attribute, ast.Subscript)):
+            root = root.value
+        if not isinstance(root, ast.Name) or root.id not in self.kinds:
+            return None
+        if e is not root:
+            k = self.idx.resolve_dotted(self.m, self.m.full(e)) if isinstance(e, ast.Attribute) else ("unknown",)
+            return None if k[0] in ("def", "class", "value") else "module"
+        if self.kinds[root.id] == "from" and root.id[:1].isupper():
+            return "class"
+        return "module"
+
+    def environ(self, e):
+        """e is os.environ, or an item or attribute of it (a string or a method): the environment, not a module."""
+        while isinstance(e, (ast.Subscript, ast.Attribute)) and self.m.full(e) != "os.environ":
+            e = e.value
+        return isinstance(e, ast.Attribute) and self.m.full(e) == "os.environ"
+
+    def callee_outside(self, func):
+        """The callee's full name when it is an outside module's function or a builtin, else None."""
+        full = self.m.full(func) if isinstance(func, (ast.Name, ast.Attribute)) else ""
+        head = full.split(".")[0]
+        if isinstance(func, ast.Name) and func.id in dir(builtins) and \
+                func.id not in self.m.funcs and func.id not in self.m.classes and func.id not in self.kinds:
+            return full
+        if head in self.kinds and self.idx.resolve_dotted(self.m, full)[0] == "external":
+            return full
+        return None
+
+    def scope_binds(self, node, name):
+        """The nodes binding `name` in the innermost function around node that binds it (or the module)."""
+        p = self.parents.get(node)
+        while p is not None:
+            if isinstance(p, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                found = _binds(p, name)
+                if found:
+                    return p, found
+            p = self.parents.get(p)
+        return None, _binds(self.m.tree, name)
+
+    def safe_value(self, v):
+        """A value that is not a module: a literal or display, or a call of a repo class or function or a builtin
+        constructor (a repo function that returned a module is caught where it returns it)."""
+        if isinstance(v, (ast.Constant, ast.JoinedStr, ast.List, ast.Tuple, ast.Set, ast.Dict, ast.ListComp,
+                          ast.SetComp, ast.DictComp, ast.GeneratorExp, ast.BinOp, ast.UnaryOp, ast.Compare)):
+            return True
+        if isinstance(v, ast.Call) and isinstance(v.func, (ast.Name, ast.Attribute)):
+            if isinstance(v.func, ast.Name) and v.func.id in SAFE_BASE_CALLS and v.func.id not in self.kinds:
+                return True
+            return self.idx.resolve(self.m, v.func)[0] in ("def", "class")
+        return False
+
+    def may_be_module(self, e, node):
+        """F1: whether the object an attribute is stored on (or set or deleted with setattr/delattr) is, or may be,
+        a module. A base the audit cannot resolve counts as may-be-a-module."""
+        while isinstance(e, (ast.Attribute, ast.Subscript)):
+            e = e.value
+        if not isinstance(e, ast.Name):
+            return True                                    # a call's result, a comprehension, ...
+        if self.kind(e):
+            return True
+        fn, found = self.scope_binds(node, e.id)
+        if not found:
+            return True                                    # a name bound nowhere here (a builtin, a star import)
+        for b in found:
+            p = self.parents.get(b)
+            if isinstance(b, ast.arg) or isinstance(b, ast.ExceptHandler) or \
+                    isinstance(b, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                continue                                   # a parameter, an exception, a function or class object
+            if isinstance(b, ast.Name) and isinstance(b.ctx, ast.Del) or isinstance(p, ast.AugAssign):
+                continue
+            if isinstance(p, (ast.Assign, ast.AnnAssign, ast.NamedExpr)) and isinstance(b, ast.Name) and \
+                    (p.targets if isinstance(p, ast.Assign) else [p.target]) == [b] and \
+                    p.value is not None and self.safe_value(p.value):
+                continue
+            if isinstance(p, ast.AnnAssign) and p.value is None:
+                continue
+            return True                                    # global, nonlocal, for, with, import, match, ...
+        return False
+
+    def in_annotation(self, node):
+        """node is (part of) an annotation: `x: T`, `def f(a: T) -> T`."""
+        child, p = node, self.parents.get(node)
+        while p is not None:
+            if (isinstance(p, (ast.arg, ast.AnnAssign)) and p.annotation is child) or \
+                    (isinstance(p, (ast.FunctionDef, ast.AsyncFunctionDef)) and p.returns is child):
+                return True
+            if isinstance(p, ast.stmt):
+                return False
+            child, p = p, self.parents.get(p)
+        return False
+
+    def own_folder_on_path(self, call):
+        """`sys.path.insert(0, <this file's folder>)` or `.append(...)`: a folder the shadow check reads already."""
+        if self.m.full(call.func) not in ("sys.path.insert", "sys.path.append") or call.keywords:
+            return False
+        arg = call.args[-1] if call.args else None
+        if isinstance(arg, ast.Call) and isinstance(arg.func, ast.Name) and arg.func.id == "str" and len(arg.args) == 1:
+            arg = arg.args[0]
+        own = {"Path(__file__).resolve().parent", "Path(__file__).parent", "Path(__file__).absolute().parent",
+               "os.path.dirname(__file__)", "os.path.dirname(os.path.abspath(__file__))",
+               "os.path.dirname(os.path.realpath(__file__))"}
+        text = ast.unparse(arg) if arg is not None else ""
+        names_ok = self.m.alias.get("Path", "pathlib.Path") == "pathlib.Path" and self.m.alias.get("os", "os") == "os" \
+            and "Path" not in self.m.funcs and "Path" not in self.m.classes
+        return text in own and names_ok and (len(call.args) == 1 or (isinstance(call.args[0], ast.Constant)))
+
+    def first(self):
+        m = self.m
+        for n in ast.walk(m.tree):
+            why = self.why(n)
+            if why:
+                return f"{m.where(n)} {why}"
+        return ""
+
+    def why(self, n):
+        m = self.m
+        if isinstance(n, ast.Import):
+            for a in n.names:
+                if a.name.split(".")[0] in MODULE_SOURCES or a.name in MODULE_SOURCES:
+                    return f"imports {a.name}, which hands out modules or their namespaces"
+        if isinstance(n, ast.ImportFrom) and not n.level and n.module:
+            if n.module.split(".")[0] in MODULE_SOURCES or n.module in MODULE_SOURCES or \
+                    any(f"{n.module}.{a.name}" in MODULE_SOURCES for a in n.names):
+                return f"imports from {n.module}, which hands out modules or their namespaces"
+            if n.module == "sys" and any(a.name in SYS_SOURCES or a.name == "*" for a in n.names):
+                return "imports sys.modules or another import or frame hook"
+            if n.module == "builtins" and any(a.name == "*" or a.name in NAMESPACE_NAMES or a.name.startswith("__")
+                                              for a in n.names):
+                return "imports a namespace builtin"
+        if isinstance(n, ast.Name) and n.id in NAMESPACE_NAMES and n.id not in self.kinds:
+            return f"uses {n.id}, which reaches modules or namespaces by name"
+        if isinstance(n, ast.Constant) and isinstance(n.value, str) and n.value in NAMESPACE_STRINGS:
+            return f"names the attribute {n.value!r}, which reaches a namespace"
+        if isinstance(n, ast.Attribute):
+            if n.attr in FRAME_ATTRS or (n.attr.startswith("__") and n.attr not in DUNDER_READS):
+                return f"reads .{n.attr}, which reaches a namespace or code"
+            if n.attr in SYS_SOURCES and m.full(n.value) == "sys":
+                return f"uses sys.{n.attr}"
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id not in m.funcs:
+            if n.func.id in ("getattr", "setattr", "delattr", "hasattr") and \
+                    (len(n.args) < 2 or not (isinstance(n.args[1], ast.Constant) and isinstance(n.args[1].value, str))):
+                return f"{n.func.id}() with a computed attribute name"
+            if n.func.id == "getattr" and len(n.args) >= 2 and self.kind(n.args[0]) and n.args[1].value in SYS_SOURCES \
+                    and m.full(n.args[0]) == "sys":
+                return f"getattr(sys, {n.args[1].value!r})"
+            if n.func.id in ("setattr", "delattr") and n.args and self.may_be_module(n.args[0], n):
+                return f"{n.func.id}() on something that is, or may be, a module"
+            if n.func.id == "vars" and (not n.args or self.may_be_module(n.args[0], n)):
+                return "vars() of something that is, or may be, a module"
+        if isinstance(n, (ast.Attribute, ast.Subscript)) and isinstance(n.ctx, (ast.Store, ast.Del)):
+            if isinstance(n, ast.Subscript):
+                if self.kind(n.value) and not self.environ(n.value):
+                    return "stores into an object held by a module"
+            elif self.may_be_module(n.value, n):
+                return (f"sets or deletes .{n.attr} on something that is, or may be, a module "
+                        f"({m.src(n.value)[:40]})")
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr in MUTATORS and \
+                self.kind(n.func.value) and not self.environ(n.func.value) and not self.own_folder_on_path(n):
+            return f"changes an object held by a module ({m.src(n.func)[:40]})"
+        if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load) and n.id in self.kinds:
+            return self.escape(n)
+        return ""
+
+    def escape(self, name):
+        """Why the module value starting at `name` is bound to another name or handed on, or ''."""
+        cur = name
+        while True:
+            p = self.parents.get(cur)
+            if isinstance(p, (ast.Attribute, ast.Subscript)) and p.value is cur and isinstance(p.ctx, ast.Load):
+                cur = p
+                continue
+            break
+        kind = self.kind(cur)
+        if kind is None or self.environ(cur):
+            return ""
+        p = self.parents.get(cur)
+        text = self.m.src(cur)[:40]
+        if isinstance(p, ast.Call) and p.func is cur:
+            return ""
+        if isinstance(p, (ast.Attribute, ast.Subscript)):           # a store or a read on it, judged elsewhere
+            return ""
+        if self.in_annotation(cur):
+            return ""
+        if isinstance(p, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and \
+                (cur in p.decorator_list or cur in getattr(p, "bases", ())):
+            return ""
+        # a value inside a display or a choice is judged where the display or the choice goes
+        while (isinstance(p, (ast.List, ast.Tuple, ast.Set, ast.BoolOp, ast.Starred)) or
+               (isinstance(p, ast.Dict) and cur in p.values) or (isinstance(p, ast.IfExp) and p.test is not cur)):
+            cur, p = p, self.parents.get(p)
+        if isinstance(p, (ast.Compare, ast.Expr, ast.FormattedValue, ast.If, ast.While, ast.Assert, ast.ExceptHandler)) \
+                or (isinstance(p, ast.IfExp) and p.test is cur):
+            return ""
+        if isinstance(p, ast.keyword):
+            p = self.parents.get(p)
+        if isinstance(p, ast.Call) and cur is not p.func:
+            full = self.callee_outside(p.func)
+            if full is not None and (kind == "class" or full in READERS or
+                                     (full not in LAUNDERERS and full.split(".")[0] not in LAUNDER_HEADS)):
+                return ""                       # read by an outside callable (subprocess.run(c, stdout=subprocess.PIPE))
+            if kind == "class" and full is None and isinstance(p.func, ast.Attribute):
+                return ""                       # a class handed to a method (registry.add_callback(Event, ...))
+            return f"hands a module value ({text}) to {self.m.src(p.func)[:40]}"
+        return f"binds or hands on a module value ({text}) here"
 
 
 def _sdk_deny_literal(v) -> bool:
@@ -1780,6 +2130,8 @@ def function_reach(idx: Index, mod: Module, fn, tainted=None, depth=0, carry=())
             continue         # the kit's pinned guard helper only reads its argument
         else:            # followed whether or not it receives the tool's input: a fixed helper can still push
             kind = idx.resolve(mod, call.func)
+            if kind[0] == "def" and _pinned_helper(idx, kind[1]):
+                continue     # the pinned helper reads its argument and nothing else, credited or not
             if kind[0] == "def" and depth < 4:
                 callee_mod, callee = kind[1], kind[2]
                 params = [a.arg for a in callee.args.args]
@@ -2082,28 +2434,73 @@ def _unresolved_reach(why):
     return r
 
 
+def _sdk_call(mod, call) -> bool:
+    """A call of the Claude Agent SDK (ClaudeSDKClient, query, ...)."""
+    return isinstance(call, ast.Call) and mod.full(call.func).split(".")[0] == "claude_agent_sdk"
+
+
 def _sdk_options_changed(idx, mod, call) -> str:
-    """F5: why the options built by `call` may not be the ones the agent runs with, or ''. When they are bound to a
-    name, the name is bound once and only ever passed whole to a call of the SDK (ClaudeSDKClient, query) or
-    returned; an attribute read (`opts.hooks[...].append`), any other call (`dataclasses.replace(opts, ...)`) or a
-    second binding may change or replace the hooks."""
+    """F5: why the options built by `call` may not be the ones the agent runs with, or ''. They are passed whole to a
+    call of the SDK (ClaudeSDKClient, query), returned, or bound to a name by a plain or annotated assignment of one
+    name; any other binding form (walrus, for, with, unpacking, a chained assignment, an attribute or item, a
+    display, a default, another call) is not modelled and so UNRESOLVED. A bound name is bound once in the module
+    (every binding form counts: augmented and annotated assignment, walrus, for, with, except, match, import,
+    global, nonlocal, del, def, class, comprehension) and is only ever passed whole to the SDK or returned; no
+    other file imports it or reads it through this module; and nothing reads a client's `options`."""
     parents = _parents(mod.tree)
     p = parents.get(call)
-    if not (isinstance(p, ast.Assign) and len(p.targets) == 1 and isinstance(p.targets[0], ast.Name)):
-        return ""
-    name = p.targets[0].id
+    if isinstance(p, ast.keyword):
+        p = parents.get(p)
+    if isinstance(p, ast.Return) or (_sdk_call(mod, p) and call is not p.func):
+        return _client_options_read(idx, mod)
+    named = (isinstance(p, ast.Assign) and len(p.targets) == 1 and isinstance(p.targets[0], ast.Name)) or \
+        (isinstance(p, ast.AnnAssign) and isinstance(p.target, ast.Name) and p.value is call)
+    if not named:
+        return (f"{mod.where(call)} the options are bound by a form the audit does not model "
+                f"({mod.src(p)[:40] if p is not None else 'module'}), so the options the agent runs with may differ")
+    name = (p.targets[0] if isinstance(p, ast.Assign) else p.target).id
     if len(_binds(mod.tree, name)) != 1:
         return f"{mod.where(p)} `{name}` is bound more than once, so the options the agent runs with may differ"
     for n in ast.walk(mod.tree):
-        if not (isinstance(n, ast.Name) and n.id == name and isinstance(n.ctx, ast.Load)):
+        if not (isinstance(n, ast.Name) and n.id == name and not isinstance(n.ctx, ast.Store)):
+            continue
+        if n is (p.targets[0] if isinstance(p, ast.Assign) else p.target):
             continue
         up = parents.get(n)
         if isinstance(up, ast.keyword):
             up = parents.get(up)
-        if isinstance(up, ast.Return) or (isinstance(up, ast.Call) and n is not up.func and
-                                          mod.full(up.func).split(".")[0] == "claude_agent_sdk"):
+        if isinstance(n.ctx, ast.Load) and (isinstance(up, ast.Return) or (_sdk_call(mod, up) and n is not up.func)):
             continue
         return f"{mod.where(n)} `{name}` is used after it is built ({mod.src(up)[:40]}), so its hooks may change"
+    elsewhere = _imported_elsewhere(idx, mod, name)
+    if elsewhere:
+        return elsewhere
+    return _client_options_read(idx, mod)
+
+
+def _imported_elsewhere(idx, mod, name) -> str:
+    """F5: where another file imports `name` (or *) from mod, or reads it through mod; '' when nowhere."""
+    for rel in sorted(idx.files) + sorted(idx.test_files()):
+        m = idx.module(idx.files.get(rel) or idx._test_files[rel])
+        if m is mod:
+            continue
+        for n in ast.walk(m.tree):
+            if isinstance(n, ast.ImportFrom) and any(a.name in (name, "*") for a in n.names):
+                if idx.find("." * n.level + (n.module or ""), m) is mod:
+                    return f"{m.where(n)} imports `{name}` from {mod.rel}, so its hooks may change"
+            elif isinstance(n, ast.Attribute) and n.attr == name and idx.resolve(m, n.value)[:2] == ("module", mod):
+                return f"{m.where(n)} reads `{name}` through {mod.rel}, so its hooks may change"
+    return ""
+
+
+def _client_options_read(idx, mod) -> str:
+    """F5: where some file reads or sets an `options` attribute (a client keeps its options there until it
+    connects), or ''."""
+    for rel in sorted(idx.files) + sorted(idx.test_files()):
+        m = idx.module(idx.files.get(rel) or idx._test_files[rel])
+        for n in ast.walk(m.tree):
+            if isinstance(n, ast.Attribute) and n.attr in ("options", "_options"):
+                return f"{m.where(n)} reads or sets .{n.attr}, so a client's options may change before it connects"
     return ""
 
 

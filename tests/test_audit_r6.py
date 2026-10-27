@@ -81,7 +81,7 @@ class R6Acceptance(unittest.TestCase):
     def test_transitive_module_alias_patch_loses_credit(self):
         pts, st, rep = fixture_points("alias_patch")
         self.assertEqual(pts, 0, st)
-        self.assertIn("patch.py:", str(rep["checks"]))          # the file and line are named
+        self.assertIn("patch.py:", str(list(guards(rep).values())))       # the file and line are named
 
     def test_annotated_options_mutation_loses_credit(self):
         pts, st, _ = fixture_points("annotated_opts")
