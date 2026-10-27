@@ -14,7 +14,8 @@ What it shows:
   - search_code and the hook check where a symlink points, not only its name: a link to a secret or out of the
     repo is never opened
   - a PreToolUse hook that refuses secret paths (file tools, the search tool and shell), recursive shell
-    content searches, destructive shell commands, and writes outside the repo
+    content searches, destructive shell commands, and writes outside the repo; its first refusals are written in
+    the canonical guard forms (kit_guard on the field each tool executes), so harness-audit can prove them
   - an OS-level sandbox for shell commands (Claude Code's sandbox; see README for platform support)
   - a cheap Haiku "explore" subagent for lookups, with the same restricted tools
   - bounded turns and budget, then prints usage and appends it to progress/usage.log
@@ -26,6 +27,7 @@ import asyncio
 import json
 import os
 import re
+import sys
 import time
 from pathlib import Path
 
@@ -40,6 +42,9 @@ from claude_agent_sdk import (
     query,
     tool,
 )
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))   # kit_guard.py ships beside this file
+import kit_guard  # noqa: E402  the kit's guard helper; harness-audit credits it by its pinned sha256
 
 MODEL = os.environ.get("KIT_MODEL", "opus")          # alias or full id, e.g. claude-opus-5-5
 EFFORT = os.environ.get("KIT_EFFORT", "medium")      # low | medium | high | xhigh | max
@@ -99,12 +104,22 @@ def deny(tool_name: str, why: str) -> dict:
 
 
 async def deny_secrets(input_data, tool_use_id, context):
-    """PreToolUse hook: refuse secret paths, recursive shell searches, destructive commands and writes outside the repo."""
+    """PreToolUse hook: refuse secret paths, recursive shell searches, destructive commands and writes outside the repo.
+    The first three refusals are canonical guard forms (`audit.py --canonical-forms`): the kit's guard helper on the
+    field each tool executes, at the top of this function. The checks after them are finer and stay as they are."""
     tool_name = input_data.get("tool_name", "")
+    command = input_data.get("tool_input", {}).get("command", "")
+    file_path = input_data.get("tool_input", {}).get("file_path", "")
     args = input_data.get("tool_input", {}) or {}
     if os.environ.get("HARNESS_TRACE"):  # the live red team reads this trace
         with open(os.environ["HARNESS_TRACE"], "a", encoding="utf-8") as f:
             f.write(json.dumps({"ts": time.time(), "source": "agent-sdk-hook", "tool": tool_name, "input": args}) + "\n")
+    if kit_guard.refuses(command):
+        return deny(tool_name, "the command names a secret path or is destructive")
+    if kit_guard.refuses(file_path):
+        return deny(tool_name, "secret path")
+    if tool_name == SEARCH_TOOL and kit_guard.refuses(input_data.get("tool_input")):
+        return deny(tool_name, "secret path")
     if tool_name in ("Grep", "Glob"):
         return deny(tool_name, f"not offered; use {SEARCH_TOOL}, which never opens secret files")
     target = args.get("file_path") or args.get("path") or args.get("notebook_path") or ""
@@ -114,7 +129,6 @@ async def deny_secrets(input_data, tool_use_id, context):
         return deny(tool_name, "a link to a secret or out of the repo")
     if any(isinstance(v, str) and is_secret(v) for k, v in args.items() if k in ("glob", "pattern") and "/" in v):
         return deny(tool_name, "secret path")
-    command = args.get("command", "")
     if command and SECRET_TEXT.search(command):
         return deny(tool_name, "command names a secret path")
     if command and SHELL_SEARCH.search(command):

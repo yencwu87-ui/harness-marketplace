@@ -44,7 +44,9 @@ class R2_01_RefusalMeaning(unittest.TestCase):
         body = ("ENFORCE = {flag}\ndef run(command{param}):\n    if {outer}:\n"
                 "        if '.env' in command or 'rm -rf' in command or 'git push' in command:\n            return 'denied'\n"
                 "    return subprocess.run(command, shell=True).returncode\nagent = Agent(name='w', tools=[run])\n")
-        cases = {"module constant True": (dict(flag="True", param="", outer="ENFORCE"), 8),
+        # 1.4.4: a refusal nested under any `if` is not a canonical form (F1), even when the condition is a module
+        # constant that is always True. 1.4.3 credited that case (8); it is now a documented false negative.
+        cases = {"module constant True": (dict(flag="True", param="", outer="ENFORCE"), 0),
                  "module constant False": (dict(flag="False", param="", outer="ENFORCE"), 0),
                  "parameter the model sets, default True": (dict(flag="True", param=", enforce=True", outer="enforce"), 0),
                  "parameter default False (Codex)": (dict(flag="True", param=", enforce=False", outer="enforce"), 0)}

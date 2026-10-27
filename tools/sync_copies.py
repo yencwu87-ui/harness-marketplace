@@ -9,6 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 COPIES = {
     "tools/harness.py": ["plugins/harness-init/skills/init/templates/harness.py", "kit/shared/scripts/harness.py"],
     "tools/redteam_live": ["plugins/harness-redteam/skills/redteam/templates/live", "kit/testing/live"],
+    "kit/shared/kit_guard.py": ["kit/tracks/claude-agent-sdk/kit_guard.py"],
 }
 
 
