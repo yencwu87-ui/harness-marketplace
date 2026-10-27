@@ -6,8 +6,12 @@ standard, sandbox credit needs a sandbox without escapes, and every file the aud
 
 Fixtures under tests/fixtures/codex_r3 come from Codex's round-3 review of 1.4.3 (see its README).
 """
+import hashlib
+import importlib.util
 import json
 import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -337,6 +341,45 @@ class R3_07_ReadsStayInTheRoot(unittest.TestCase):
         self.assertEqual(r.text(self.repo / "file_out.md"), "")
         self.assertEqual(r.text(self.repo / "dir_out" / "notes.md"), "")
         self.assertEqual(r.text(self.repo / "dir_out" / "settings.json"), "")
+
+
+class CanonicalFormsAreOneList(unittest.TestCase):
+    """The scorer, `--canonical-forms` and the audit's SKILL.md read the same list; the helper the audit trusts by
+    hash refuses every probe the coverage rule (F7) uses."""
+
+    def test_the_docs_section_is_the_scorer_list(self):
+        a = load_audit()
+        out = subprocess.run([sys.executable, str(ROOT / "plugins/harness-audit/skills/audit/scripts/audit.py"),
+                              "--canonical-forms"], capture_output=True, text=True)
+        self.assertEqual(out.stdout.rstrip("\n"), a.canonical_forms_text())
+        skill = (ROOT / "plugins/harness-audit/skills/audit/SKILL.md").read_text()
+        block = skill.split("<!-- canonical-forms:start", 1)[1].split("-->", 1)[1].split("<!-- canonical-forms:end -->")[0]
+        self.assertEqual(block.strip("\n"), a.canonical_forms_text())
+        self.assertEqual([n for n, _ in a.CANONICAL_FORMS], [f"F{i} " + n.split(" ", 1)[1] for i, n in
+                                                              enumerate((n for n, _ in a.CANONICAL_FORMS), 1)])
+
+    def test_the_pinned_helper_is_the_shipped_one_and_its_copies(self):
+        a = load_audit()
+        data = KIT_GUARD.read_bytes()
+        self.assertEqual(hashlib.sha256(data).hexdigest(), a.KIT_GUARD_SHA256)
+        self.assertEqual((ROOT / "kit/tracks/claude-agent-sdk/kit_guard.py").read_bytes(), data)
+
+    def test_the_helper_refuses_every_probe_and_passes_ordinary_input(self):
+        a = load_audit()
+        spec = importlib.util.spec_from_file_location("kit_guard_under_test", KIT_GUARD)
+        kg = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(kg)
+        for cls, keywords in a.CLASS_KEYWORDS.items():
+            for k in keywords:
+                for probe in a.probes(k):
+                    with self.subTest(cls=cls, probe=probe):
+                        self.assertTrue(kg.refuses(probe))
+                        self.assertTrue(kg.refuses({"tool_input": {"command": probe}}))
+                        self.assertTrue(kg.refuses(["x", {"file_path": probe}]))
+        for ok in ("python3 -m pytest -q", "git status --short", "src/app.py", {"file_path": "docs/README.md", "content": "x"},
+                   "", None, {"pattern": "def add", "path": "src"}):
+            with self.subTest(ordinary=ok):
+                self.assertFalse(kg.refuses(ok))
 
 
 class JudgementFixtures(unittest.TestCase):

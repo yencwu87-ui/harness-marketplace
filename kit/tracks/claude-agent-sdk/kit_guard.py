@@ -21,7 +21,8 @@ import re
 
 SECRET = re.compile(r"\.env\b|\.pem\b|\.key\b|\.p12\b|\.pfx\b|\.ssh\b|\.aws\b|\.gnupg\b|\.netrc\b|"
                     r"\bid_(rsa|dsa|ecdsa|ed25519)\b|credentials", re.I)
-DESTRUCTIVE = re.compile(r"\bgit\s+push\b|\bgit\s+reset\s+--hard\b|\bgit\s+clean\b|"
+# git push / git clean with any options before them (`git -C repo push`), any `reset --hard`, rm with a recursive flag
+DESTRUCTIVE = re.compile(r"\bgit\b[^;&|\n]*?\s(push|clean)\b|\breset\s+--hard\b|"
                          r"\brm\s+(-{1,2}\S*\s+)*-{1,2}([a-zA-Z]*[rR][a-zA-Z]*|recursive)\b")
 
 

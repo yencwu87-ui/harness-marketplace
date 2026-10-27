@@ -571,7 +571,7 @@ CANONICAL_FORMS = (
      "with re.match or re.fullmatch, or otherwise missing one probe does not cover the keyword. `not in` and `==` "
      "tests are allowed in a predicate but never count toward coverage. kit_guard.refuses covers both classes."),
 )
-KIT_GUARD_SHA256 = "b6e67ef8f65d7ff09cc87bd2eca1d326d1c4920af1bbedef09e45a7ea78bf55d"   # kit/shared/kit_guard.py
+KIT_GUARD_SHA256 = "5cfe52b3cec24baf8e6c80d7000f1f0c2bd69144e61e79de514a17ca384f6c41"   # kit/shared/kit_guard.py
 CLASS_KEYWORDS = {"secret": (".env", ".pem", ".key", ".ssh", ".aws", "id_rsa", "credentials"),
                   "destructive": ("git push", "reset --hard", "rm -rf")}
 PROBES = ("{k}", "{k} x", "cat {k}", "x;{k}", "echo ok; {k} --flag", "echo ok\n{k} y", "'{k}'", '"{k}"', "`{k}`",
@@ -1711,8 +1711,9 @@ def guard_results(idx: Index, tid: str, files) -> dict:
         res = [judge_agent(a)[cid] for a in agents]
         st = max((s for s, _ in res), key=RANK.get)
         ev = "; ".join(e for _, e in res)
-        out[cid] = (st, ev, f"{name}: {fixes[i]}" + (" Where the audit cannot follow a tool or guard, make it a plain function "
-                                                     "in this repo or state it in docs/IMPACT.md." if st == "UNRESOLVED" else ""))
+        out[cid] = (st, ev, f"{name}: {fixes[i]}" + (" Where the audit cannot prove a guard, write it in a canonical form "
+                                                     "(audit.py --canonical-forms; kit/shared/kit_guard.py is the kit's helper) "
+                                                     "and keep tools as plain functions in this repo." if st == "UNRESOLVED" else ""))
     return out
 
 
