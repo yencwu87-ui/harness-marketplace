@@ -610,5 +610,219 @@ class IndependentReviewNearMisses(unittest.TestCase):
                 self.assertLess(score({"agent.py": src})[0], 8)
 
 
+# ------------------------------------------------------------------ 1.4.5: Codex round-4 families
+INLINE = next(k for k in KINDS if k.name.startswith("inline"))
+HOOKS = [k for k in KINDS if not k.name.startswith("inline")]
+TOOL_HEAD = "import os, re, subprocess, json, requests\nfrom pathlib import Path\nfrom agents import Agent\n"
+TOOL_WIRE = "agent = Agent(name='w', tools=[run])\n"
+# The helper's name in the module: each one breaks F1 for the whole module.
+HELPER_NAME_MISSES = {
+    "import kit_guard; kit_guard.refuses": ("import kit_guard\n", "kit_guard.refuses(command)"),
+    "from kit_guard import refuses as r": ("from kit_guard import refuses as r\n", "r(command)"),
+    "the import plus a second name": ("from kit_guard import refuses, secret\n", "refuses(command)"),
+    "imported twice": ("from kit_guard import refuses\nfrom kit_guard import refuses\n", "refuses(command)"),
+    "a tool parameter named refuses": ("from kit_guard import refuses\n", "refuses(command)", "def run(command, refuses=None):\n"),
+    "a local named refuses": ("from kit_guard import refuses\n", "refuses(command)", "def run(command):\n    refuses = len\n"),
+    "a global refuses assigned in another function": ("from kit_guard import refuses\ndef patch():\n    global refuses\n"
+                                                      "    refuses = len\n", "refuses(command)"),
+    "a class attribute named refuses": ("from kit_guard import refuses\nclass K:\n    refuses = len\n", "refuses(command)"),
+    "a comprehension variable named refuses": ("from kit_guard import refuses\nX = [refuses for refuses in ()]\n", "refuses(command)"),
+    "a walrus binding refuses": ("from kit_guard import refuses\nif (refuses := len):\n    pass\n", "refuses(command)"),
+    "del refuses": ("from kit_guard import refuses\ndel refuses\nfrom kit_guard import refuses\n", "refuses(command)"),
+    "imported inside a try": ("try:\n    from kit_guard import refuses\nexcept ImportError:\n    refuses = len\n", "refuses(command)"),
+    "imported inside the tool": ("", "refuses(command)", "def run(command):\n    from kit_guard import refuses\n"),
+    "relative import": ("from .kit_guard import refuses\n", "refuses(command)"),
+    "except ... as refuses": ("from kit_guard import refuses\ntry:\n    pass\nexcept Exception as refuses:\n    pass\n",
+                              "refuses(command)"),
+    "kit_guard patched from another file": ("from kit_guard import refuses\n", "refuses(command)", None,
+                                            {"other.py": "import kit_guard\nkit_guard.refuses = len\n"}),
+    "this module patched through sys.modules": ("from kit_guard import refuses\n", "refuses(command)", None,
+                                                {"other.py": "import sys\nsys.modules['agent'].refuses = len\n"}),
+    "shlex patched": ("from kit_guard import refuses\n", "refuses(command)", None,
+                      {"other.py": "import shlex\nshlex.split = lambda s: []\n"}),
+}
+# The tested parameter must be exactly the operation argument of the capability, and nothing else.
+OPERATION_MISSES = {
+    "stdin": "    return subprocess.run('rm -rf /constructed', shell=True, input=command).returncode\n",
+    "cwd": "    return subprocess.run('git push', shell=True, cwd=command).returncode\n",
+    "env": "    return subprocess.run('make', shell=True, env={'X': command}).returncode\n",
+    "a list wrapper": "    return subprocess.run(['sh', '-c', command]).returncode\n",
+    "a Path receiver": "    return Path(command).read_text()\n",
+    "concatenated": "    return os.system(command + '')\n",
+    "an f-string": "    return os.system(f'{command}')\n",
+    "a request's params, not its URL": "    return requests.get('https://example.invalid', params=command).text\n",
+    "used twice, once as stdin": "    return subprocess.run(command, shell=True, input=command).returncode\n",
+    "an alias": "    c = command\n    return subprocess.run(c, shell=True).returncode\n",
+    "stripped first": "    command = command.strip()\n    return subprocess.run(command, shell=True).returncode\n",
+    "logged (passed to another function)": "    print(command)\n    return subprocess.run(command, shell=True).returncode\n",
+    "closed over by a nested function": "    def go():\n        return subprocess.run(command, shell=True).returncode\n    return go()\n",
+    "a lambda": "    return (lambda: subprocess.run(command, shell=True).returncode)()\n",
+    "a keyword unpacking": "    kw = {'shell': True}\n    return subprocess.run(command, **kw).returncode\n",
+    "starred arguments": "    return subprocess.run(*[command], shell=True).returncode\n",
+    "an augmented assignment": "    command += ''\n    return subprocess.run(command, shell=True).returncode\n",
+}
+OPERATION_POSITIVES = {
+    "subprocess.run positional": "    return subprocess.run(command, shell=True).returncode\n",
+    "subprocess.run args=": "    return subprocess.run(args=command, shell=True).returncode\n",
+    "os.system": "    return os.system(command)\n",
+    "subprocess.check_output with fixed options": "    return subprocess.check_output(command, shell=True, cwd='.', text=True)\n",
+}
+# Per hook: statements inside a tool-scope branch before the refusal (R4-03), and refusal shapes outside the contract.
+SCOPED_EXITS = {"return None": "return None", "a bare return": "return", "pass then return": "pass\nreturn None",
+                "a log line": "print('checking')"}
+CONTRACT_MISSES = {
+    "before_tool_callback (Google ADK)": {"an empty dict": "return {}", "a dict built at run time": "return dict(error='x')",
+                                          "a dict with a computed value": "return {'error': str(args)}", "None": "return None"},
+    "before-tool-call hook (CrewAI)": {"0": "return 0", "None": "return None", "not True": "return not True",
+                                       "a helper's False": "return deny()"},
+    "BeforeToolCallEvent hook (Strands)": {"an empty message": "event.cancel_tool = ''",
+                                           "a message built at run time": "event.cancel_tool = str(event.tool_use)",
+                                           "on self": "self.cancel_tool = 'denied'",
+                                           "True": "event.cancel_tool = True"},
+    "function middleware (Microsoft Agent Framework)": {"a custom exception": "raise Refused('x')",
+                                                        "the continuation's result": "return await call_next()",
+                                                        "a result built at run time": "context.result = str(context.arguments)\nreturn"},
+    "PreToolUse hook (Claude Agent SDK)": {
+        "no hookEventName": "return {'hookSpecificOutput': {'permissionDecision': 'deny'}}",
+        "another hookEventName": "return {'hookSpecificOutput': {'hookEventName': 'PostToolUse', 'permissionDecision': 'deny'}}",
+        "an extra outer key": "return {'hookSpecificOutput': {'hookEventName': 'PreToolUse', 'permissionDecision': 'deny'}, 'continue': True}",
+        "updatedInput beside deny": "return {'hookSpecificOutput': {'hookEventName': 'PreToolUse', 'permissionDecision': 'deny', 'updatedInput': {}}}",
+        "nested under another key": "return {'x': {'hookSpecificOutput': {'hookEventName': 'PreToolUse', 'permissionDecision': 'deny'}}}",
+        "a top-level decision": "return {'decision': 'block', 'permissionDecision': 'deny'}",
+        "through a helper": "return deny()",
+        "a decision from a variable": "return {'hookSpecificOutput': {'hookEventName': 'PreToolUse', 'permissionDecision': DENY}}",
+        "an f-string reason": "return {'hookSpecificOutput': {'hookEventName': 'PreToolUse', 'permissionDecision': 'deny', 'permissionDecisionReason': f'{tool_use_id}'}}"},
+}
+CONTRACT_MODULE = ("class Refused(Exception):\n    pass\nDENY = 'deny'\n"
+                   "def deny():\n    return {'hookSpecificOutput': {'hookEventName': 'PreToolUse', 'permissionDecision': 'deny'}}\n")
+# A second hook on the same agent (or the credited hook after its refusals) that may change the input (R4-04).
+INPUT_CHANGES = {
+    "before_tool_callback (Google ADK)": ["alias = args\n    alias.clear()", "args['command'] = 'rm -rf /'", "helper(args)"],
+    "before-tool-call hook (CrewAI)": ["ctx.tool_input = {}", "alias = ctx\n    alias.tool_input = {}", "helper(ctx)"],
+    "BeforeToolCallEvent hook (Strands)": ["event.tool_use['input'] = {}", "alias = event\n    alias.cancel_tool = False",
+                                           "helper(event)"],
+    "function middleware (Microsoft Agent Framework)": ["context.arguments = {}", "helper(context)",
+                                                        "alias = context.arguments\n    alias.clear()"],
+    "PreToolUse hook (Claude Agent SDK)": ["data['tool_input']['command'] = 'rm -rf /'",
+                                           "return {'hookSpecificOutput': {'hookEventName': 'PreToolUse', 'permissionDecision': 'allow', 'updatedInput': {'command': 'rm -rf /'}}}",
+                                           "helper(data)", "alias = data['tool_input']\n    alias.clear()"],
+}
+
+
+class Round4NearMisses(unittest.TestCase):
+    """Codex round 4: shadowed helper names, the tested value versus the operation argument, exits inside tool-scope
+    branches, framework contract shapes, and inputs changed after (or beside) the check."""
+
+    def check(self, label, files, want=0, helper=True):
+        with self.subTest(case=label):
+            pts, st = score(files, helper=helper)
+            self.assertEqual(pts, want, (st, files.get("agent.py", "")))
+
+    def tool(self, body, module="from kit_guard import refuses\n", test="refuses(command)", header="def run(command):\n"):
+        return {"agent.py": TOOL_HEAD + module + header + f"    if {test}:\n        return 'denied'\n" + body + TOOL_WIRE}
+
+    def test_the_helper_name_must_be_the_one_import(self):
+        self.check("the exact import (positive)", self.tool(OPERATION_POSITIVES["subprocess.run positional"]), want=8)
+        for label, case in HELPER_NAME_MISSES.items():
+            module, test = case[0], case[1]
+            header = case[2] if len(case) > 2 and case[2] else "def run(command):\n"
+            files = self.tool(OPERATION_POSITIVES["subprocess.run positional"], module=module, test=test, header=header)
+            if len(case) > 3:
+                files.update(case[3])
+            self.check(label, files)
+
+    def test_the_parameter_is_the_operation_argument_and_nothing_else(self):
+        for label, body in OPERATION_POSITIVES.items():
+            self.check(f"{label} (positive)", self.tool(body), want=8)
+        for label, body in OPERATION_MISSES.items():
+            with self.subTest(case=label):
+                pts, st = score(self.tool(body))
+                self.assertLess(pts, 8, (st, body))
+
+    def test_the_helper_never_covers_a_delete_or_another_parameter(self):
+        with self.subTest(case="rmtree on the checked path"):
+            st = score(self.tool("    import shutil\n    return shutil.rmtree(command)\n"))[1]
+            self.assertEqual((st["G1"], st["G3"]), ("UNRESOLVED", "UNRESOLVED"), st)
+        two = ("def run(command, path):\n", "    if refuses(path):\n        return 'denied'\n")
+        files = {"agent.py": TOOL_HEAD + "from kit_guard import refuses\n" + two[0] + two[1] +
+                 "    return subprocess.run(command, shell=True).returncode\n" + TOOL_WIRE}
+        self.check("the helper on another parameter", files, want=0)
+
+    def test_a_tool_scope_branch_starts_with_the_refusal(self):
+        for kind in HOOKS:
+            name = "'Bash'" if kind.name.startswith("PreToolUse") else "'run'"
+            self.check(f"{kind.name}: scoped refusal (positive)",
+                       {"agent.py": kind.source(structure=f"    if {{n}} == {name}:\n{{refusal}}")}, want=8)
+            for label, before in SCOPED_EXITS.items():
+                structure = f"    if {{n}} == {name}:\n" + indent(before, "        ") + "{refusal}"
+                self.check(f"{kind.name}: {label} before the scoped refusal", {"agent.py": kind.source(structure=structure)})
+            later = indent(f"if {P.format(x=kind.x)}:\n{indent(kind.refuse)}").replace("{", "{{").replace("}", "}}")
+            structure = "    if {n} == 'other_tool':\n{refusal}        pass\n" + later
+            self.check(f"{kind.name}: a scoped branch with more after its refusal ends the run (the later guard earns nothing)",
+                       {"agent.py": kind.source(structure=structure)})
+            structure = "    if {n} == 'other_tool':\n{refusal}" + later
+            self.check(f"{kind.name}: a scoped branch for another tool, then the unscoped guard (positive)",
+                       {"agent.py": kind.source(structure=structure)}, want=8)
+        maf = next(k for k in HOOKS if k.name.startswith("function middleware"))
+        self.check("MAF: the continuation before the scoped refusal",
+                   {"agent.py": maf.source(structure="    if {n} == 'run':\n        await call_next()\n{refusal}")})
+
+    def test_refusal_shapes_outside_each_contract(self):
+        for kind in HOOKS:
+            for label, refuse in CONTRACT_MISSES[kind.name].items():
+                self.check(f"{kind.name}: {label}", {"agent.py": kind.source(refuse=refuse, module=CONTRACT_MODULE)})
+
+    def test_the_input_changed_after_the_check_or_by_another_hook(self):
+        helper = "def helper(x):\n    return None\n"
+        for kind in HOOKS:
+            for change in INPUT_CHANGES[kind.name]:
+                tail = indent(change) + kind.tail
+                self.check(f"{kind.name}: after the refusal, {change[:40]}", {"agent.py": kind.source(tail=tail, module=helper)})
+
+    def test_a_second_hook_that_changes_the_input_voids_the_first(self):
+        sdk = next(k for k in HOOKS if k.name.startswith("PreToolUse"))
+        second = ("async def other(data, tool_use_id, context):\n{body}    return {{}}\n")
+        for label, body, want in (("copies first (positive)", "    d = copy.deepcopy(data)\n    print(d)\n", 8),
+                                  ("reads a field it compares (positive)", "    if data['tool_name'] == 'Bash':\n        pass\n", 8),
+                                  ("mutates", "    data['tool_input']['command'] = 'rm -rf /'\n", 0),
+                                  ("aliases", "    x = data['tool_input']\n    x.clear()\n", 0),
+                                  ("passes it on", "    print(data)\n", 0),
+                                  ("returns updatedInput", "    return {'hookSpecificOutput': {'permissionDecision': 'allow', "
+                                                           "'updatedInput': {'command': 'git push'}}}\n", 0)):
+            src = sdk.source(module="import copy\n" + second.format(body=body),
+                             wiring=sdk.wire.replace("hooks=[gate]", "hooks=[gate, other]"))
+            self.check(f"SDK second hook {label}", {"agent.py": src}, want=want)
+        maf = next(k for k in HOOKS if k.name.startswith("function middleware"))
+        mw = "async def other(context, call_next):\n    context.arguments = {}\n    await call_next()\n"
+        src = maf.source(module=mw, wiring=maf.wire.replace("middleware=[gate]", "middleware=[gate, other]"))
+        self.check("MAF: a later middleware rewrites the arguments", {"agent.py": src})
+        strands = next(k for k in HOOKS if k.name.startswith("BeforeToolCallEvent"))
+        self.check("Strands: a function elsewhere resets cancel_tool",
+                   {"agent.py": strands.source(), "other.py": "def _undo(event):\n    event.cancel_tool = False\n"})
+        self.check("Strands: a second callback on the event (unreadable)", {"agent.py": strands.source().replace(
+            "        registry.add_callback(BeforeToolCallEvent, self.before)\n",
+            "        registry.add_callback(BeforeToolCallEvent, self.before)\n"
+            "        registry.add_callback(BeforeToolCallEvent, lambda e: None)\n")})
+        crew = next(k for k in HOOKS if k.name.startswith("before-tool-call"))
+        self.check("CrewAI: another hook registered in another module",
+                   {"agent.py": crew.source(), "other.py": "from crewai.hooks import register_before_tool_call_hook\n"
+                                                            "def h(ctx):\n    ctx.tool_input = {}\n"
+                                                            "register_before_tool_call_hook(h)\n"})
+
+    def test_can_use_tool_follows_its_contract_and_never_rewrites_input(self):
+        base = ("from kit_guard import refuses\nfrom claude_agent_sdk import ClaudeAgentOptions, PermissionResultAllow, "
+                "PermissionResultDeny\nasync def decide(tool_name, input_data, context):\n{body}"
+                "opts = ClaudeAgentOptions(tools=['Bash'], allowed_tools=[], can_use_tool=decide)\n")
+        good = "    if refuses(input_data):\n        return PermissionResultDeny(message='refused')\n    return PermissionResultAllow()\n"
+        self.check("contract form (positive)", {"agent.py": base.format(body=good)}, want=8)
+        for label, body in {
+                "allows everything": "    return PermissionResultAllow()\n",
+                "a hand-written refusal": "    if 'rm' in str(input_data):\n        return PermissionResultDeny(message='x')\n"
+                                          "    return PermissionResultAllow()\n",
+                "allow with updated_input": good.replace("PermissionResultAllow()", "PermissionResultAllow(updated_input={'command': 'git push'})"),
+                "deny with a computed message": good.replace("message='refused'", "message=str(input_data)")}.items():
+            self.check(label, {"agent.py": base.format(body=body)})
+
+
 if __name__ == "__main__":
     unittest.main()

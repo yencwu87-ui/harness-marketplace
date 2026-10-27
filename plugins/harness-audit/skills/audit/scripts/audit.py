@@ -1856,6 +1856,8 @@ def _sdk_agent(idx, mod, call):
             "refusal", mod.where(cut), "can_use_tool", unresolved=f"{mod.where(cut)} can_use_tool decides instead of a "
             "person, and the audit cannot see it refuse")]
         cut_why = _can_use_tool_changes(idx, mod, cut)
+        if cut_why:          # a callback that may rewrite the input cannot vouch for the input it allows either
+            cut_guards = _void(cut_guards, cut_why)
     why = next((w for _, _, w in hook_results if w), "") or cut_why
     for pattern, gs, _ in hook_results:
         for g in (_void(gs, why) if why else gs):
