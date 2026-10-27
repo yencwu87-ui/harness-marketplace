@@ -438,19 +438,39 @@ class Index:
         if getattr(self, "_tampered", None) is None:
             self._tampered = set()
             for dp, dns, fns in os.walk(self.r.root):          # every folder, skipped ones too: names only
-                for fn in fns:
-                    if fn in ("sitecustomize.py", "usercustomize.py") or fn.endswith(".pth"):
+                for fn in fns + dns:
+                    if fn.split(".")[0] in STARTUP_MODULES or fn.endswith(".pth"):
                         self._tampered.add("*")             # runs at interpreter start, before any guard
             for rel in list(self.files) + list(self.test_files()):
                 m = self.module(self.files.get(rel) or self._test_files[rel])
+                handles = _module_handles(m)
                 for n in ast.walk(m.tree):
                     target = None
+                    if isinstance(n, ast.Call):
+                        fname = n.func.id if isinstance(n.func, ast.Name) else ""
+                        if fname in ("exec", "eval", "compile") or (fname == "vars" and n.args) or \
+                                (isinstance(n.func, ast.Attribute) and n.func.attr in DUNDER_SETTERS) or \
+                                m.full(n.func) in ("operator.setitem", "operator.delitem", "object.__setattr__",
+                                                   "object.__delattr__", "type.__setattr__"):
+                            self._tampered.add("*")          # code from text, vars(module)[...], x.__setattr__(...)
+                        root = n.func.value if isinstance(n.func, ast.Attribute) else None
+                        while isinstance(root, (ast.Attribute, ast.Subscript)):
+                            root = root.value
+                        if isinstance(n.func, ast.Attribute) and n.func.attr in MUTATORS and \
+                                isinstance(root, ast.Name) and root.id in handles:
+                            self._tampered.add("*")          # mods = sys.modules; mods.pop(...)
+                    if isinstance(n, (ast.Attribute, ast.Subscript)) and isinstance(n.ctx, (ast.Store, ast.Del)):
+                        root = n.value
+                        while isinstance(root, (ast.Attribute, ast.Subscript)):
+                            root = root.value
+                        if isinstance(root, ast.Name) and root.id in handles and not _is_environ(m, n):
+                            self._tampered.add("*")          # d = subprocess.__dict__; d['run'] = ...
                     if isinstance(n, (ast.Attribute, ast.Subscript)) and isinstance(n.ctx, (ast.Store, ast.Del)):
                         target = n.value
                     elif isinstance(n, ast.Call) and isinstance(n.func, ast.Name):
                         if n.func.id in ("setattr", "delattr") and n.args:
                             target = n.args[0]
-                        elif n.func.id in ("globals", "vars", "locals", "exec", "eval", "__import__"):
+                        elif n.func.id in ("globals", "vars", "locals", "__import__"):
                             self._tampered.add(m.path)
                     elif isinstance(n, ast.Name) and n.id == "__builtins__":
                         self._tampered.add("builtins")
@@ -468,6 +488,8 @@ class Index:
                     elif isinstance(target, ast.Call) or (isinstance(target, ast.Name) and target.id in m.alias and
                                                           m.alias[target.id].split(".")[0] in ("sys", "importlib", "builtins")):
                         self._tampered.add("*")     # sys.modules[...].x = ..., import_module(...).x = ...: any module
+                    elif isinstance(target, ast.Name) and _is_environ(m, n):
+                        pass                                  # os.environ['X'] = ...: the environment, not a module
                     elif isinstance(target, ast.Name):
                         k = self.resolve(m, target)
                         if k[0] == "module":
@@ -479,8 +501,9 @@ class Index:
         return self._tampered
 
     def test_files(self) -> dict:
-        """Test-named Python files that a non-test module imports: never scored as agents, but once imported they
-        can change modules at run time. A test file nothing imports runs only under the test runner."""
+        """Test-named Python files, and files in folders the index skips (vendor/, build/, ...), that a non-test
+        module imports: never scored as agents, but once imported they can change modules at run time. A test file
+        nothing imports runs only under the test runner."""
         if getattr(self, "_test_files", None) is None:
             self._test_files = {}
             tests = {}
@@ -488,6 +511,14 @@ class Index:
                 rel = self.r.rel(f).replace(os.sep, "/")
                 if f.suffix == ".py" and _is_test_path(rel):
                     tests[rel] = f
+            for dp, dns, fns in os.walk(self.r.root):        # folders the index skips (vendor/, build/, ...)
+                dns[:] = [d for d in dns if d not in (".git", "__pycache__")]
+                rel_dir = os.path.relpath(dp, self.r.root).replace(os.sep, "/")
+                if not any(part in SKIP_DIRS for part in rel_dir.split("/")):
+                    continue
+                for fn in fns:
+                    if fn.endswith(".py"):
+                        tests[f"{rel_dir}/{fn}"] = Path(dp) / fn
             todo = [self.module(self.files[rel]) for rel in self.files]
             seen = set()
             while todo:
@@ -525,8 +556,18 @@ class Index:
             self._helper_shadows = ""
             for dp, dns, fns in os.walk(self.r.root):
                 rel = os.path.relpath(dp, self.r.root)
-                if os.path.basename(dp) == "__pycache__" or _is_test_path(rel.replace(os.sep, "/") + "/x"):
+                if _is_test_path(rel.replace(os.sep, "/") + "/x"):
                     continue           # test folders hold deliberately broken copies; they are not import roots
+                if os.path.basename(dp) == "__pycache__":
+                    for fn in fns:
+                        if fn.startswith(KIT_GUARD_MODULE + ".") and fn.endswith(".pyc"):
+                            data = self.r.data(Path(dp) / fn) or b""
+                            flags = int.from_bytes(data[4:8], "little") if len(data) >= 8 else -1
+                            if flags not in (0, 3):       # 0: checked by timestamp; 3: checked by source hash
+                                self._helper_shadows = (f"{os.path.join(rel, fn)} is a compiled kit_guard that Python "
+                                                        "loads without checking it against kit_guard.py")
+                                return self._helper_shadows
+                    continue
                 for d in dns:
                     if d == KIT_GUARD_MODULE or d.startswith(KIT_GUARD_MODULE + "."):
                         self._helper_shadows = f"{os.path.join(rel, d)} is a kit_guard package that an import may load instead"
@@ -719,15 +760,20 @@ CANONICAL_FORMS = (
      "level exactly as `from kit_guard import refuses`, and only while that file's sha256 equals the pinned "
      "KIT_GUARD_SHA256. In the module, `refuses` is never rebound, shadowed (a parameter, local, def, class, loop or "
      "except name), reassigned, deleted, declared global or nonlocal, or imported again; `kit_guard` is imported "
-     "nowhere else in the module (`import kit_guard`, an alias). Every kit_guard module in the tree outside test "
-     "folders is that file: no kit_guard package, compiled kit_guard module or differing kit_guard.py. The helper "
+     "nowhere else in the module (`import kit_guard`, an alias, importlib.import_module or __import__ of it or of a "
+     "computed name). Every kit_guard module in the tree outside test "
+     "folders is that file: no kit_guard package, compiled kit_guard module or differing kit_guard.py, and no "
+     "kit_guard pyc in __pycache__ that Python would load without checking it (unchecked-hash). The helper "
      "imports nothing (built-in functions and types only), and no folder Python may put first on sys.path for the "
      "module or the helper (the repo root and every folder down to each file) holds a module or package named like a "
      "standard-library module (`shlex.py`, `re/__init__.py`, `subprocess.py`, a compiled one): it would replace that "
      "module for the helper, the capability or what they load. No repo file (a test file that a module imports "
-     "included) changes the module, kit_guard, `builtins` or any standard-library module at run time (globals(), "
-     "setattr, an attribute store, `__dict__` or `sys.modules` methods, importlib.reload), and the tree has no "
-     "sitecustomize.py, usercustomize.py or .pth file."),
+     "included, and a file in a folder the index skips such as vendor/ or build/ that a module imports) changes the "
+     "module, kit_guard, `builtins` or any standard-library module at run time (globals(), vars(x), setattr, "
+     "`__setattr__`/`__setitem__` calls, operator.setitem, an attribute or item store, also through a name bound "
+     "to a module, its `__dict__` or `sys.modules`; `__dict__` or `sys.modules` methods; exec, eval or compile; "
+     "importlib.reload; an `os.environ[...]` store is not a module change), and the tree has no sitecustomize or "
+     "usercustomize module in any form (.py, compiled, a package) and no .pth file."),
     ("F2 Tool refusal",
      "The tool function's first statements (after its docstring) are `if refuses(P): return <literal>` or "
      "`if refuses(P): raise <built-in exception>(<literals>)`, with no else. P is the tool function's own parameter, "
@@ -740,13 +786,16 @@ CANONICAL_FORMS = (
      "bufsize, executable, stdin, stdout, stderr, preexec_fn, close_fds, shell, cwd, env, ...; open takes file, mode, "
      "buffering, encoding, errors, newline, closefd, opener; a fetch takes its URL and the method's own positional "
      "parameters; any other capability takes P alone). P is the sole operation-bearing argument, and every other "
-     "supplied argument, positional or keyword, is a literal on this list: shell, capture_output, text, check, "
-     "timeout, encoding, errors, universal_newlines, and cwd as a relative path with no `..`, `~` or drive, for a "
-     "shell call (also mode and buffering for os.popen); mode, buffering, encoding, errors, newline for open; timeout, "
-     "headers, allow_redirects, follow_redirects, verify and a literal method for a fetch. Any other argument "
+     "supplied argument, positional or keyword, is a literal that the capability itself takes and that is on this "
+     "list: shell, capture_output, text, check, timeout, encoding, errors, universal_newlines, and cwd as a relative "
+     "path with no `..`, `~` or drive, for subprocess.run and check_output (call and check_call: no capture_output "
+     "or check; Popen: no timeout either); encoding, errors for getoutput and getstatusoutput; mode, buffering for "
+     "os.popen; cwd for asyncio.create_subprocess_shell; nothing for os.system or any other capability; mode, "
+     "buffering, encoding, errors, newline for open (codecs.open: no newline); timeout, headers, allow_redirects, "
+     "follow_redirects, verify and a literal method for a fetch. Any other argument "
      "(executable, env, preexec_fn, stdin, bufsize, close_fds, pass_fds, user, opener, closefd, data, params, a cwd "
      "outside the repo, anything unknown), a computed option or `*`/`**` unpacking makes the refusal UNRESOLVED. The "
-     "callee name is bound once, and no repo file patches its module. The tool has no decorator except the "
+     "callee name (and the module it comes from) is bound once in the module, and no repo file patches its module. The tool has no decorator except the "
      "framework's own."),
     ("F3 Hook contracts",
      "A framework hook earns credit only when its first statements are `if refuses(INPUT): <refusal>` in the "
@@ -785,9 +834,11 @@ CANONICAL_FORMS = (
      "or tested, or (Microsoft Agent Framework) as the argument of the continuation call. They are never aliased, "
      "changed, or passed elsewhere. Every Claude Agent SDK PreToolUse hook on the agent, the credited one included, "
      "provably returns only `{}`, None (no output) or the F3 deny literal: a named value, a computed key, `**` "
-     "unpacking, a helper's return, an imported value, `updatedInput` or any other output voids the guard credit of "
-     "every hook on the agent (UNRESOLVED), whatever the registration order, since the SDK may run matching hooks in "
-     "parallel. `can_use_tool`, when set, never passes `updated_input`. Strands: nothing in the repo sets `cancel_tool` to "
+     "unpacking, a helper's return, an imported value, a `yield`, `updatedInput` or any other output voids the guard "
+     "credit of every hook on the agent (UNRESOLVED), whatever the registration order, since the SDK may run matching "
+     "hooks in parallel. The hooks dict has only literal, distinct keys (no `**`), and options bound to a name are "
+     "bound once and only passed whole to the SDK (ClaudeSDKClient, query) or returned: an attribute read such as "
+     "`opts.hooks[...].append(...)` or another call such as `dataclasses.replace(opts, ...)` voids it too. `can_use_tool`, when set, never passes `updated_input`. Strands: nothing in the repo sets `cancel_tool` to "
      "anything but a non-empty literal, deletes or augments it, or calls setattr or delattr with a computed name."),
     ("F6 Classes",
      "A credited refusal covers the two classes the helper defines, secret and destructive (kit_guard.py's docstring "
@@ -801,8 +852,10 @@ CANONICAL_FORMS = (
      "the reason \"hand-written refusal: use the kit guard helper to earn credit\" or the rule it breaks. It earns "
      "no points; it does not count as missing either."),
 )
-KIT_GUARD_SHA256 = "cacf11b571bc35d2225166a7a43647c5c8073325c3e9db018e5ac17ae0539a0e"   # kit/shared/kit_guard.py
+KIT_GUARD_SHA256 = "949cb6e9dec7ec5fbb3d390f89889ee6c4ff2b2d2fd96e06dd406c33c0357443"   # kit/shared/kit_guard.py
 KIT_GUARD_MODULE, KIT_GUARD_NAME = "kit_guard", "refuses"
+STARTUP_MODULES = ("sitecustomize", "usercustomize")   # run at interpreter start, in any form (.py, .pyc, package)
+DUNDER_SETTERS = {"__setattr__", "__delattr__", "__setitem__", "__delitem__"}
 KIT_GUARD_DEPS = ("builtins",)   # the helper imports nothing; it uses built-in functions and types only
 # Modules a repo file may shadow: a file or package of the same name in a folder Python may put first on sys.path.
 STDLIB_NAMES = frozenset(getattr(sys, "stdlib_module_names", ())) or frozenset(
@@ -918,6 +971,10 @@ def _helper_check(idx, mod):
     tops = [n for n in mod.tree.body if isinstance(n, ast.ImportFrom) and n.module == KIT_GUARD_MODULE and not n.level]
     others = [n for n in ast.walk(mod.tree) if isinstance(n, (ast.Import, ast.ImportFrom)) and n not in tops and (
         KIT_GUARD_MODULE in (getattr(n, "module", None) or "").split(".") or any(KIT_GUARD_MODULE in a.name.split(".") for a in n.names))]
+    others += [n for n in ast.walk(mod.tree) if isinstance(n, ast.Call) and n.args
+               and mod.full(n.func) in ("importlib.import_module", "__import__", "importlib.__import__", "builtins.__import__")
+               and not (isinstance(n.args[0], ast.Constant) and isinstance(n.args[0].value, str)
+                        and KIT_GUARD_MODULE not in n.args[0].value.split("."))]
     if not tops:
         return None, "the module does not import the kit helper as `from kit_guard import refuses`"
     if len(tops) > 1 or others:
@@ -1061,15 +1118,24 @@ FETCH_SIGNATURES = {"get": ("url", "params"), "head": ("url",), "options": ("url
                     "request": ("method", "url"), "stream": ("method", "url"), "urlopen": ("url", "data", "timeout"),
                     "urlretrieve": ("url", "filename", "reporthook", "data"),
                     "Request": ("url", "data", "headers", "origin_req_host", "unverifiable", "method")}
-ALLOWED_OPTIONS = {"shell": ("shell", "capture_output", "text", "check", "timeout", "encoding", "errors",
-                             "universal_newlines", "cwd", "mode", "buffering"),          # mode, buffering: os.popen
-                   "read": ("mode", "buffering", "encoding", "errors", "newline"),
-                   "fetch": ("timeout", "headers", "allow_redirects", "follow_redirects", "verify", "method")}
+_RUN_OPTIONS = ("shell", "capture_output", "text", "check", "timeout", "encoding", "errors", "universal_newlines", "cwd")
+# The allow-list, per capability: only options that capability really takes (a TypeError is not a guard).
+ALLOWED_OPTIONS = {
+    "subprocess.run": _RUN_OPTIONS, "subprocess.check_output": _RUN_OPTIONS,
+    "subprocess.call": ("shell", "text", "timeout", "encoding", "errors", "universal_newlines", "cwd"),
+    "subprocess.check_call": ("shell", "text", "timeout", "encoding", "errors", "universal_newlines", "cwd"),
+    "subprocess.Popen": ("shell", "text", "encoding", "errors", "universal_newlines", "cwd"),
+    "subprocess.getoutput": ("encoding", "errors"), "subprocess.getstatusoutput": ("encoding", "errors"),
+    "os.popen": ("mode", "buffering"), "asyncio.create_subprocess_shell": ("cwd",),
+    "open": ("mode", "buffering", "encoding", "errors", "newline"), "io.open": ("mode", "buffering", "encoding", "errors", "newline"),
+    "builtins.open": ("mode", "buffering", "encoding", "errors", "newline"),
+    "codecs.open": ("mode", "encoding", "errors", "buffering"),
+    "fetch": ("timeout", "headers", "allow_redirects", "follow_redirects", "verify", "method")}
 
 
 def _cwd_inside(v) -> bool:
     """A cwd literal that stays inside the repo: relative, no `..` part, no `~`, no drive."""
-    return isinstance(v, str) and not v.startswith(("/", "\\", "~")) and ":" not in v and \
+    return isinstance(v, str) and not v.startswith(("/", "\\")) and "~" not in v and ":" not in v and \
         ".." not in v.replace("\\", "/").split("/")
 
 
@@ -1097,7 +1163,7 @@ def _op_arg(call, cat, full):
         if k.arg in bound:
             return None
         bound[k.arg] = k.value
-    allowed = ALLOWED_OPTIONS["read" if cat in ("read", "write", "open") else cat]
+    allowed = ALLOWED_OPTIONS["fetch"] if cat == "fetch" else ALLOWED_OPTIONS.get(full, ())
     for p, v in bound.items():
         if p == op:
             continue
@@ -1333,7 +1399,9 @@ class _Canon:
                 cap = _capability(call, full, full.split(".")[0], False)
                 if cap == "computer":
                     cap = None
-                if cap and _op_arg(call, cap, full) is n:
+                head = _dotted(call.func).split(".")[0]
+                once = head not in self.mod.alias or len(_binds(self.mod.tree, head)) == 1
+                if cap and once and _op_arg(call, cap, full) is n:
                     continue
             return (f"line {getattr(n, 'lineno', '?')}: `{p}` is used other than as the operation argument of a "
                     "capability call (aliased, passed on, wrapped or another argument)")
@@ -1361,6 +1429,9 @@ class _Canon:
             return (f"{self.mod.where(n)} `{n.id}` is used outside the guard (aliased, changed or passed on), so the "
                     "input the tool runs with may not be the one checked")
         if self.role in ("sdk-hook",):
+            y = next((x for x in ast.walk(self.fn) if isinstance(x, (ast.Yield, ast.YieldFrom))), None)
+            if y is not None:
+                return f"{self.mod.where(y)} this hook yields, so its output is not one the audit can read"
             for r in (x for x in ast.walk(self.fn) if isinstance(x, ast.Return)):
                 if not _sdk_safe_return(self.idx, self.mod, r.value):
                     return (f"{self.mod.where(r)} this hook may return `updatedInput` (or a value the audit cannot "
@@ -1373,6 +1444,30 @@ class _Canon:
         tampered = self.idx.tampered()
         return len(_binds(self.mod.tree, head)) != (1 if head in self.mod.alias else 0) or \
             (head if head in self.mod.alias else "builtins") in tampered or "*" in tampered
+
+
+def _module_handles(m) -> set:
+    """Names in m bound to a module object or a module namespace: `b = builtins`, `d = subprocess.__dict__`,
+    `mods = sys.modules`. A store or mutation through one changes a module."""
+    out = set()
+    for n in ast.walk(m.tree):
+        if isinstance(n, (ast.Assign, ast.AnnAssign, ast.NamedExpr)):
+            targets = n.targets if isinstance(n, ast.Assign) else [n.target]
+            v = n.value
+            if v is None:
+                continue
+            refs = any(isinstance(x, ast.Attribute) and x.attr in ("__dict__", "modules") for x in ast.walk(v))
+            root = v
+            while isinstance(root, ast.Attribute):
+                root = root.value
+            if refs or (isinstance(root, ast.Name) and root.id in m.alias and not isinstance(v, ast.Call)):
+                out |= {t.id for t in targets if isinstance(t, ast.Name)}
+    return out
+
+
+def _is_environ(m, node) -> bool:
+    """`os.environ[...] = ...` or `del os.environ[...]`: changes the environment, not a module."""
+    return isinstance(node, ast.Subscript) and m.full(node.value) == "os.environ"
 
 
 def _sdk_deny_literal(v) -> bool:
@@ -1987,6 +2082,31 @@ def _unresolved_reach(why):
     return r
 
 
+def _sdk_options_changed(idx, mod, call) -> str:
+    """F5: why the options built by `call` may not be the ones the agent runs with, or ''. When they are bound to a
+    name, the name is bound once and only ever passed whole to a call of the SDK (ClaudeSDKClient, query) or
+    returned; an attribute read (`opts.hooks[...].append`), any other call (`dataclasses.replace(opts, ...)`) or a
+    second binding may change or replace the hooks."""
+    parents = _parents(mod.tree)
+    p = parents.get(call)
+    if not (isinstance(p, ast.Assign) and len(p.targets) == 1 and isinstance(p.targets[0], ast.Name)):
+        return ""
+    name = p.targets[0].id
+    if len(_binds(mod.tree, name)) != 1:
+        return f"{mod.where(p)} `{name}` is bound more than once, so the options the agent runs with may differ"
+    for n in ast.walk(mod.tree):
+        if not (isinstance(n, ast.Name) and n.id == name and isinstance(n.ctx, ast.Load)):
+            continue
+        up = parents.get(n)
+        if isinstance(up, ast.keyword):
+            up = parents.get(up)
+        if isinstance(up, ast.Return) or (isinstance(up, ast.Call) and n is not up.func and
+                                          mod.full(up.func).split(".")[0] == "claude_agent_sdk"):
+            continue
+        return f"{mod.where(n)} `{name}` is used after it is built ({mod.src(up)[:40]}), so its hooks may change"
+    return ""
+
+
 def _sdk_agent(idx, mod, call):
     """Claude Agent SDK options: built-in tools by name, permission rules, hooks and in-process MCP tools."""
     tools_kw, allowed_kw = _kw(call, "tools"), _kw(call, "allowed_tools")
@@ -2004,7 +2124,14 @@ def _sdk_agent(idx, mod, call):
         deny_rules = []
     hooks_kw = _kw(call, "hooks")
     hook_results, hook_guards = [], []
+    changed = _sdk_options_changed(idx, mod, call)
+    if changed:
+        hook_results.append((".*", [], changed))
     if isinstance(hooks_kw, ast.Dict):
+        keys = [k.value if isinstance(k, ast.Constant) and isinstance(k.value, str) else None for k in hooks_kw.keys]
+        if None in keys or len(keys) != len(set(keys)):
+            hook_results.append((".*", [], f"{mod.where(hooks_kw)} the hooks dict has a computed, unpacked or repeated "
+                                            "key, so the audit cannot tell which PreToolUse hooks run"))
         for k, v in zip(hooks_kw.keys, hooks_kw.values):
             if not (isinstance(k, ast.Constant) and k.value == "PreToolUse"):
                 continue

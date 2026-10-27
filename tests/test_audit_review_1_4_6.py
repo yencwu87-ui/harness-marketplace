@@ -83,7 +83,7 @@ class ReviewFixtures(unittest.TestCase):
             with self.subTest(case=name, what=what), Copy(name) as d:
                 pts, st = score(d)
                 self.assertLess(pts, 8, st)
-                self.assertNotIn("VERIFIED", st.values(), st)
+                self.assertNotEqual(st["G2"], "VERIFIED", st)   # a read-only tool keeps G1 and G3 (it is not broad)
 
     def test_the_controls_keep_their_credit(self):
         for name in KEEP_CREDIT:

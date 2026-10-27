@@ -18,7 +18,8 @@ The classes, as this helper defines them (harness-audit credits exactly these):
                id_rsa, id_dsa, id_ecdsa or id_ed25519, alone or followed by `.`, `_`, `~` or `-` and anything (.pub,
                .bak); .netrc; .pgpass; credentials or credentials.<anything>; or inside .ssh, .aws, .gnupg, .azure,
                .kube, .docker or .config/gcloud. Upper and lower case are the same. Read after shell quotes and
-               backslashes are removed (or read as Windows separators), %-escapes decoded and simple braces expanded.
+               backslashes are removed (or read as Windows separators), %-escapes decoded (up to three times, so
+               %252e is a dot), simple braces expanded, and `.` and `..` path parts resolved.
   globs        a path part holding `*`, `?` or `[` is read as a superset of what the shell could expand it to: a
                bracket expression (POSIX classes included) is any one character, `?` is one character and `*` is any
                run of characters, a leading dot included. The part is secret when that superset can match a secret
@@ -258,16 +259,30 @@ def _split_parts(w):
     return [p for p in parts if p]
 
 
+def _normalised(parts):
+    """Path parts with `.` dropped and `..` taken back (`.config/x/../gcloud` -> `.config/gcloud`)."""
+    out = []
+    for p in parts:
+        if p == "..":
+            if out:
+                out.pop()
+        elif p != ".":
+            out.append(p)
+    return out
+
+
 def _secret_word(word):
     forms = {_unquoted(word), _drop(word, "\"'`").replace("\\", "/")}
-    forms |= {_percent_decoded(f) for f in forms}
+    for _ in range(3):                                  # %252e -> %2e -> .
+        forms |= {_percent_decoded(f) for f in forms}
     forms |= {_brackets_as_any(f) for f in forms if "[" in f}
     for w in (x for f in forms for x in _expand_braces(f)):
         parts = [p.lower() for p in _split_parts(w)]
         if any(_secret_part(p) for p in parts):
             return True
-        if any(_could_be(a, ".config") and _could_be(b, "gcloud") for a, b in zip(parts, parts[1:])):
-            return True
+        for seq in (parts, _normalised(parts)):
+            if any(_could_be(a, ".config") and _could_be(b, "gcloud") for a, b in zip(seq, seq[1:])):
+                return True
     return False
 
 
