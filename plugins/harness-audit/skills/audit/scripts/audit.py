@@ -479,24 +479,54 @@ class Index:
         return self._tampered
 
     def test_files(self) -> dict:
-        """Test-named Python files: never scored as agents, but they can still change modules at run time."""
+        """Test-named Python files that a non-test module imports: never scored as agents, but once imported they
+        can change modules at run time. A test file nothing imports runs only under the test runner."""
         if getattr(self, "_test_files", None) is None:
             self._test_files = {}
+            tests = {}
             for f in self.r.files():
                 rel = self.r.rel(f).replace(os.sep, "/")
                 if f.suffix == ".py" and _is_test_path(rel):
-                    self._test_files[rel] = f
+                    tests[rel] = f
+            todo = [self.module(self.files[rel]) for rel in self.files]
+            seen = set()
+            while todo:
+                m = todo.pop()
+                for n in ast.walk(m.tree):
+                    names = [a.name for a in n.names] if isinstance(n, ast.Import) else \
+                        [("." * n.level) + (n.module or "")] + [("." * n.level) + ((n.module + ".") if n.module else "") + a.name
+                                                                for a in n.names] if isinstance(n, ast.ImportFrom) else []
+                    for name in names:
+                        rel = self._find_rel(name, m, tests)
+                        if rel and rel not in seen:
+                            seen.add(rel)
+                            self._test_files[rel] = tests[rel]
+                            todo.append(self.module(tests[rel]))
         return self._test_files
+
+    def _find_rel(self, dotted, from_mod, files):
+        level = len(dotted) - len(dotted.lstrip("."))
+        name = dotted.lstrip(".").replace(".", "/")
+        base = Path(from_mod.rel).parent
+        for _ in range(max(level - 1, 0)):
+            base = base.parent
+        bases = [base.as_posix()] if level else [Path(from_mod.rel).parent.as_posix(), ""]
+        for b in bases:
+            for cand in (f"{name}.py", f"{name}/__init__.py"):
+                rel = (f"{b}/{cand}" if b not in ("", ".") else cand)
+                if rel in files:
+                    return rel
+        return None
 
     def helper_shadows(self) -> str:
         """F1: why `import kit_guard` may not load the pinned file: a kit_guard package or compiled module anywhere
-        in the tree (they win over a .py beside them), or a kit_guard.py whose bytes differ; '' when none."""
+        in the tree outside test folders (they win over a .py beside them), or a kit_guard.py whose bytes differ."""
         if getattr(self, "_helper_shadows", None) is None:
             self._helper_shadows = ""
             for dp, dns, fns in os.walk(self.r.root):
-                if os.path.basename(dp) == "__pycache__":
-                    continue
                 rel = os.path.relpath(dp, self.r.root)
+                if os.path.basename(dp) == "__pycache__" or _is_test_path(rel.replace(os.sep, "/") + "/x"):
+                    continue           # test folders hold deliberately broken copies; they are not import roots
                 for d in dns:
                     if d == KIT_GUARD_MODULE or d.startswith(KIT_GUARD_MODULE + "."):
                         self._helper_shadows = f"{os.path.join(rel, d)} is a kit_guard package that an import may load instead"
@@ -660,8 +690,9 @@ CANONICAL_FORMS = (
      "level exactly as `from kit_guard import refuses`, and only while that file's sha256 equals the pinned "
      "KIT_GUARD_SHA256. In the module, `refuses` is never rebound, shadowed (a parameter, local, def, class, loop or "
      "except name), reassigned, deleted, declared global or nonlocal, or imported again; `kit_guard` is imported "
-     "nowhere else in the module (`import kit_guard`, an alias). Every kit_guard module in the tree is that file: no "
-     "kit_guard package, compiled kit_guard module or differing kit_guard.py. No repo file, test files included, "
+     "nowhere else in the module (`import kit_guard`, an alias). Every kit_guard module in the tree outside test "
+     "folders is that file: no kit_guard package, compiled kit_guard module or differing kit_guard.py. No repo file (a test file "
+     "that a module imports included) "
      "changes the module, kit_guard, `builtins`, `re`, `shlex`, `fnmatch` or `urllib` at run time (globals(), "
      "setattr, an attribute store, `__dict__` or `sys.modules` methods, importlib.reload), and the tree has no "
      "sitecustomize.py, usercustomize.py or .pth file."),

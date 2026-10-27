@@ -69,8 +69,12 @@ class ReviewSeams(unittest.TestCase):
                    tool("    return subprocess.run(command, shell=True, capture_output=True, text=True, timeout=30).stdout\n"), want=8)
 
     def test_4_files_the_index_does_not_score_can_still_tamper(self):
-        self.check("a test-named module patches the helper", dict(tool(), **{"test_setup.py": "import kit_guard\nkit_guard.refuses = len\n"}))
-        self.check("a module under tests/ patches subprocess", dict(tool(), **{"tests/helpers.py": "import subprocess\nsubprocess.run = print\n"}))
+        self.check("an imported test-named module patches the helper",
+                   dict(tool(module="import test_setup\n"), **{"test_setup.py": "import kit_guard\nkit_guard.refuses = len\n"}))
+        self.check("an imported module under tests/ patches subprocess",
+                   dict(tool(module="import tests.helpers\n"), **{"tests/__init__.py": "", "tests/helpers.py": "import subprocess\nsubprocess.run = print\n"}))
+        self.check("a test file nothing imports (positive: only the test runner runs it)",
+                   dict(tool(), **{"tests/test_x.py": "import subprocess\nsubprocess.run = print\n"}), want=8)
         self.check("sitecustomize.py", dict(tool(), **{"sitecustomize.py": "x = 1\n"}))
         self.check("sitecustomize.py in a skipped folder", dict(tool(), **{"vendor/sitecustomize.py": "x = 1\n"}))
         self.check("a .pth file", dict(tool(), **{"lib/x.pth": "import os\n"}))
