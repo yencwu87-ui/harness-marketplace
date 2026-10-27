@@ -11,6 +11,8 @@ What it shows:
   - a small tool surface: Read, Edit, Write, Bash, Agent, plus one content-search tool (mcp__kit__search_code)
     that never opens secret files. The built-in Grep and Glob are not offered, because their globs and roots
     could reach secret files the hook cannot see in advance.
+  - search_code and the hook check where a symlink points, not only its name: a link to a secret or out of the
+    repo is never opened
   - a PreToolUse hook that refuses secret paths (file tools, the search tool and shell), recursive shell
     content searches, destructive shell commands, and writes outside the repo
   - an OS-level sandbox for shell commands (Claude Code's sandbox; see README for platform support)
@@ -75,6 +77,22 @@ def inside_repo(path: str) -> bool:
     return p == REPO or p.is_relative_to(REPO)
 
 
+def links_to_secret_or_out(path: str) -> bool:
+    """True when a path goes through a symlink to a secret or out of the repo (`ordinary.txt -> .env`).
+    A link's own name says nothing about its target, so the resolved target is checked too."""
+    p = Path(os.path.expanduser(str(path)))
+    p = p if p.is_absolute() else REPO / p
+    try:
+        real = p.resolve()
+    except OSError:
+        return True
+    if real == p.absolute() or os.path.normpath(p.absolute()) == str(real):
+        return False                        # no link on the way
+    if not (real == REPO or real.is_relative_to(REPO)):
+        return True
+    return is_secret(str(real.relative_to(REPO)))
+
+
 def deny(tool_name: str, why: str) -> dict:
     return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
                                    "permissionDecisionReason": f"{tool_name}: {why} (refused by the harness)."}}
@@ -92,6 +110,8 @@ async def deny_secrets(input_data, tool_use_id, context):
     target = args.get("file_path") or args.get("path") or args.get("notebook_path") or ""
     if target and is_secret(target):
         return deny(tool_name, "secret path")
+    if target and links_to_secret_or_out(target):
+        return deny(tool_name, "a link to a secret or out of the repo")
     if any(isinstance(v, str) and is_secret(v) for k, v in args.items() if k in ("glob", "pattern") and "/" in v):
         return deny(tool_name, "secret path")
     command = args.get("command", "")
@@ -126,8 +146,12 @@ async def search_code(args):
         dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS and not SECRET_PART.match(d)]
         files += [Path(dirpath) / n for n in filenames if not SECRET_PART.match(n)]
     for f in files:
+        real = f.resolve()                  # never follow a link out of the repo or into a secret
+        if not real.is_relative_to(REPO) or is_secret(str(real.relative_to(REPO))) or \
+                (f != root and is_secret(str(f.relative_to(REPO)))):
+            continue
         try:
-            for n, line in enumerate(f.read_text(errors="strict").splitlines(), 1):
+            for n, line in enumerate(real.read_text(errors="strict").splitlines(), 1):
                 if rx.search(line):
                     hits.append(f"{f.relative_to(REPO)}:{n}: {line[:200]}")
         except (OSError, UnicodeDecodeError):
