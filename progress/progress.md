@@ -1,5 +1,32 @@
 # Progress
 
+**Updated:** 28 Oct 2026  **Item:** 1.4.5, Codex round-4 fix round (coordinator brief, not a work-list item)  **Status:** passed locally, awaiting Codex round 5 and owner review
+
+## What changed
+- plugins/harness-audit/skills/audit/scripts/audit.py (1.4.5): code refusals earn credit only through the kit helper (`from kit_guard import refuses`, first statement, parameter passed straight as the operation argument) or a framework's exact contract; hand-written refusals UNRESOLVED; classes from the helper; filesystem.disabled voids the Read-deny binding; can_use_tool read
+- kit/shared/kit_guard.py version 2 (pinned by sha256) and its copy; tests/test_kit_guard.py generated class table
+- kit/tracks/claude-agent-sdk/agent.py: guard_tool_input (contract form) and deny_secrets (deep copy)
+- tests/test_audit_r4.py, tests/test_audit_review_1_4_5.py, Round4NearMisses, tests/fixtures/codex_r4/, tests/fixtures/fairness_1_4_5/
+
+## Verdicts
+- R4-01 to R4-09 fixture tests: VERIFIED (deliver/1.4.5/logs/red_r4_findings_vs_1.4.4.log red on 1.4.4: 23 failures; green in deliver/1.4.5/logs/full_suite_head_sandboxed.log)
+- Independent review seams: VERIFIED closed (deliver/1.4.5/logs/red_independent_review_1_4_5.log red: 23; green in the full run). The reviewer built no bypasses itself: UNRESOLVED whether more exist
+- Fairness matrix a=8 b=0 c=2 on 8 tracks (c in helper form where the original is hand-written), kit starters 8/8: VERIFIED (test_audit_fairness)
+- Tests that need a TCP bind (12): UNRESOLVED in this session (the sandbox refuses bind)
+- Installed-framework smokes, live model runs, real Claude Code sandbox: UNRESOLVED (not installed here; no API keys, as M-003)
+
+## Usage
+- Wall-clock: Tue Oct 27 23:07:08 +08 2026 to Wed Oct 28 00:04:27 +08 2026 (one session)
+- Tokens: not available to this headless session
+
+## Blocker
+none
+
+## Next action
+Coordinator verifies the Codex package and starts round 5.
+
+---
+
 **Updated:** 27 Oct 2026  **Item:** 1.4.4, Codex round-3 fix round (coordinator brief, not a work-list item)  **Status:** passed locally, awaiting Codex round 4 and owner review
 
 ## What changed

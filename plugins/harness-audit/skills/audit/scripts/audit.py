@@ -30,7 +30,7 @@ import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-VERSION = "1.4.4"
+VERSION = "1.4.5"
 SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", "dist", "build", ".next", "target", "site-packages", "third_party", "vendor"}
 MAX_FILES = 60000
 MAX_FILE_BYTES = 400_000
@@ -660,9 +660,11 @@ CANONICAL_FORMS = (
      "level exactly as `from kit_guard import refuses`, and only while that file's sha256 equals the pinned "
      "KIT_GUARD_SHA256. In the module, `refuses` is never rebound, shadowed (a parameter, local, def, class, loop or "
      "except name), reassigned, deleted, declared global or nonlocal, or imported again; `kit_guard` is imported "
-     "nowhere else in the module (`import kit_guard`, an alias). No repo file changes the module, kit_guard, "
-     "`builtins`, `re`, `shlex`, `fnmatch` or `urllib` at run time (globals(), setattr, an attribute store, "
-     "sys.modules)."),
+     "nowhere else in the module (`import kit_guard`, an alias). Every kit_guard module in the tree is that file: no "
+     "kit_guard package, compiled kit_guard module or differing kit_guard.py. No repo file, test files included, "
+     "changes the module, kit_guard, `builtins`, `re`, `shlex`, `fnmatch` or `urllib` at run time (globals(), "
+     "setattr, an attribute store, `__dict__` or `sys.modules` methods, importlib.reload), and the tree has no "
+     "sitecustomize.py, usercustomize.py or .pth file."),
     ("F2 Tool refusal",
      "The tool function's first statements (after its docstring) are `if refuses(P): return <literal>` or "
      "`if refuses(P): raise <built-in exception>(<literals>)`, with no else. P is the tool function's own parameter, "
@@ -670,7 +672,10 @@ CANONICAL_FORMS = (
      "of a shell call (`subprocess.run(P, ...)`, `args=P`, `os.system(P)`), the file of `open(P, ...)`, the URL of a "
      "fetch (`requests.get(P)`, `urlopen(P)`, `url=P`). P is never aliased, reassigned, changed, sliced, "
      "field-selected, wrapped (`Path(P)`, `['sh', '-c', P]`), passed to any other function, or used as another "
-     "argument (stdin, cwd, env). The tool has no decorator except the framework's own."),
+     "argument (stdin, env). The capability call's other keyword arguments are literal options that cannot change "
+     "what runs (shell, capture_output, text, check, timeout, encoding, errors, cwd; mode, newline, buffering for "
+     "open; timeout, headers, redirects, verify for a fetch), its callee name is bound once, and no repo file "
+     "patches its module. The tool has no decorator except the framework's own."),
     ("F3 Hook contracts",
      "A framework hook earns credit only when its first statements are `if refuses(INPUT): <refusal>` in the "
      "framework's documented contract, where INPUT is exactly the framework's tool input and <refusal> is its "
