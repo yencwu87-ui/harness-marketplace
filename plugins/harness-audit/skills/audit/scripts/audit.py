@@ -732,6 +732,8 @@ def _local_aliases(mod: Module, fn) -> dict:
     for n in ast.walk(fn):
         if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name):
             local.setdefault(n.targets[0].id, n.value)
+        elif isinstance(n, (ast.For, ast.AsyncFor, ast.comprehension)) and isinstance(n.target, ast.Name):
+            local.setdefault(n.target.id, ast.Subscript(value=n.iter, slice=ast.Constant(value=0)))   # an element
         elif isinstance(n, (ast.With, ast.AsyncWith)):
             for item in n.items:
                 if isinstance(item.optional_vars, ast.Name):
@@ -751,6 +753,65 @@ def _full_name(mod: Module, aliases: dict, node, depth=0) -> str:
 
 
 FIXED_ARG = {"shell": ("args", "cmd", "command"), "open": ("file", "path"), "fetch": ("url",), "write": ()}
+# Irreversible by operation, whatever the target: deletes, and destructive words in a fixed command.
+DELETE_FUNCS = {"shutil.rmtree", "os.remove", "os.unlink", "os.rmdir", "os.removedirs"}
+DELETE_ATTRS = {"unlink", "rmdir"}
+FIXED_DESTRUCTIVE_RX = r"(^|[\s;&|(`])(rm|rmdir|shred|unlink)(\s|$)|\bgit\s+(push|reset\s+--hard|clean)\b|\bmkfs\b"
+PATH_CTORS = {"pathlib.Path", "Path", "pathlib.PurePath", "pathlib.PosixPath", "pathlib.WindowsPath"}
+PATH_SAME = {"resolve", "absolute", "expanduser"}       # the same file, another spelling
+
+
+def _path_ctor(mod, aliases, node, depth=0):
+    """The Path(...) call a receiver is built from, or None: `Path('.env')`, a name bound to one, `REPO / 'x'`,
+    `Path(p).resolve()`. Returned with the path text joined when the parts are literals."""
+    if depth > 5:
+        return None
+    if isinstance(node, ast.Call) and _full_name(mod, aliases, node.func) in PATH_CTORS:
+        return node
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in PATH_SAME:
+        return _path_ctor(mod, aliases, node.func.value, depth + 1)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+        base = _path_ctor(mod, aliases, node.left, depth + 1)
+        if base is None:
+            return None
+        head = base.args[0] if base.args and isinstance(base.args[0], ast.Constant) else \
+            ast.Constant(value="." if not base.args else "<base>")   # a base chosen at start-up, a literal tail
+        return ast.Call(func=base.func, args=[ast.BinOp(left=head,
+                                                         op=ast.Add(), right=ast.BinOp(left=ast.Constant(value="/"),
+                                                                                       op=ast.Add(), right=node.right))],
+                        keywords=[], lineno=getattr(node, "lineno", 0))
+    if isinstance(node, ast.Name) and node.id in aliases:
+        return _path_ctor(mod, aliases, aliases[node.id], depth + 1)
+    return None
+
+
+def _data_like(mod, aliases, node, tainted, depth=0) -> bool:
+    """True when a method's receiver is plain data (a literal, the tool's input, a parsed or returned value of a safe
+    or capability call, an element or field of such data), so its methods do nothing outside the process."""
+    if depth > 6 or node is None:
+        return False
+    rec = lambda n: _data_like(mod, aliases, n, tainted, depth + 1)
+    if isinstance(node, (ast.Constant, ast.JoinedStr, ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+        return True
+    if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+        return all(rec(e) for e in node.elts)
+    if isinstance(node, ast.Dict):
+        return all(rec(v) for v in node.values)
+    if isinstance(node, ast.BinOp):
+        return rec(node.left) and rec(node.right)
+    if isinstance(node, (ast.Subscript, ast.Attribute)):
+        return rec(node.value)
+    if isinstance(node, ast.Name):
+        if node.id in aliases:
+            return rec(aliases[node.id])
+        return node.id in tainted
+    if isinstance(node, ast.Call):
+        full = _full_name(mod, aliases, node.func)
+        if full in _BUILTIN_SAFE or full in SAFE_CALLS or full.split(".")[0] in SAFE_HEADS or full in SHELL_FUNCS:
+            return True
+        if isinstance(node.func, ast.Attribute):
+            return rec(node.func.value)        # a method's result on data is data (`text.splitlines()`)
+    return False
 
 
 def _fixed_text(idx, mod, call, kind):
@@ -821,13 +882,11 @@ def function_reach(idx: Index, mod: Module, fn, tainted=None, depth=0) -> Reach:
         if not any(c == cat and w == mod.where(node) for c, w, _ in reach.caps):
             reach.caps.append((cat, mod.where(node), before(node.lineno)))
 
-    for call in (n for n in ast.walk(fn) if isinstance(n, ast.Call)):
+    for call in (n for st in fn.body for n in ast.walk(st) if isinstance(n, ast.Call)):   # decorators are not the body
         args = list(call.args) + [k.value for k in call.keywords]
         hit = any(_uses(a, tainted) for a in args)
         if not isinstance(call.func, (ast.Name, ast.Attribute)):
-            if hit or _uses(call.func, tainted) or not isinstance(call.func, ast.Call) or \
-                    _dotted(call.func) in ("getattr", "__import__", "importlib.import_module", "eval"):
-                reach.unresolved.append(f"{mod.where(call)} {mod.src(call.func)[:40]}(...) is a computed call the audit cannot follow")
+            reach.unresolved.append(f"{mod.where(call)} {mod.src(call.func)[:40]}(...) is a computed call the audit cannot follow")
             continue
         full = _full_name(mod, aliases, call.func)
         head = full.split(".")[0]
@@ -836,15 +895,21 @@ def function_reach(idx: Index, mod: Module, fn, tainted=None, depth=0) -> Reach:
         if attr and isinstance(call.func.value, ast.Call) and attr not in WRITE_ATTRS | READ_ATTRS | {"open"}:
             continue     # e.g. urlopen(url).read(): the inner call is the capability
         cap = _capability(call, full, head, on_tainted)
+        target = call
+        if cap is None and not on_tainted and attr in WRITE_ATTRS | READ_ATTRS | {"open"}:
+            pc = _path_ctor(mod, aliases, call.func.value)      # Path('.env').read_text(): a read, by operation
+            if pc is not None:
+                target, hit = pc, hit or any(_uses(a, tainted) for a in pc.args)
+                cap = "read" if attr in READ_ATTRS else "open" if attr == "open" else "write"
         if cap == "computer":
             add("computer", call); continue
-        if not hit and not on_tainted:
-            if cap is None:
-                continue
-            text = _fixed_text(idx, mod, call, "open" if cap == "read" else cap)
-            if text is None:
+        if cap is not None and not hit and not on_tainted:
+            text = _fixed_text(idx, mod, target, "open" if cap == "read" or target is not call else cap)
+            if full in DELETE_FUNCS or (target is not call and attr in DELETE_ATTRS):
+                add("irreversible", call)          # a delete is irreversible whatever its target
+            elif text is None:
                 reach.unresolved.append(f"{mod.where(call)} {full}(...) acts on a target the audit cannot read")
-            elif cap in ("shell", "write") and re.search(DESTRUCTIVE_RX, text):
+            elif cap in ("shell", "write") and (re.search(DESTRUCTIVE_RX, text) or re.search(FIXED_DESTRUCTIVE_RX, text)):
                 add("irreversible", call)
             elif cap in ("shell", "open", "read") and re.search(SECRET_RX, text):
                 add("read", call)
@@ -862,22 +927,22 @@ def function_reach(idx: Index, mod: Module, fn, tainted=None, depth=0) -> Reach:
             add(cap, call)
         elif isinstance(call.func, ast.Attribute) and not on_tainted and head not in mod.alias:
             bound = aliases.get(head)
-            if bound is None and isinstance(call.func.value, (ast.Constant, ast.JoinedStr, ast.List, ast.Dict, ast.Tuple, ast.Set)):
-                continue     # a method on a literal: "".join(...)
+            if _data_like(mod, aliases, call.func.value, tainted):
+                continue     # a method on data: "".join(...), a parsed dict, a compiled regex, a process's output
             origin = "" if bound is None or _is_data(bound) else _full_name(mod, aliases, bound.func if isinstance(bound, ast.Call) else bound)
-            if bound is not None and (_is_data(bound) or origin.split(".")[0] in SAFE_HEADS or origin in _BUILTIN_SAFE
-                                      or origin in SAFE_CALLS):
-                continue     # a method on local data (a dict, a str, a compiled regex)
             if isinstance(bound, ast.Call):
                 ocap = _capability(bound, origin, origin.split(".")[0], False)
+                if ocap is None and isinstance(bound.func, ast.Attribute) and bound.func.attr == "open" and \
+                        _path_ctor(mod, aliases, bound.func.value) is not None:
+                    ocap = "open"
                 if ocap == "open":
                     continue     # a handle opened above: the open() call is the capability
                 if ocap:
                     add(ocap, call); continue
-            reach.unresolved.append(f"{mod.where(call)} {mod.src(call.func)[:40]}(...) receives the tool's input on an object the audit cannot follow")
+            reach.unresolved.append(f"{mod.where(call)} {mod.src(call.func)[:40]}(...) is a method on an object the audit cannot follow")
         elif full in SAFE_CALLS or head in SAFE_HEADS or full in _BUILTIN_SAFE or on_tainted:
             continue
-        else:
+        else:            # followed whether or not it receives the tool's input: a fixed helper can still push
             kind = idx.resolve(mod, call.func)
             if kind[0] == "def" and depth < 4:
                 callee_mod, callee = kind[1], kind[2]
@@ -889,12 +954,12 @@ def function_reach(idx: Index, mod: Module, fn, tainted=None, depth=0) -> Reach:
                 for k in call.keywords:
                     if k.arg and _uses(k.value, tainted):
                         passed.add(k.arg)
-                sub = function_reach(idx, callee_mod, callee, passed or set(params), depth + 1)
+                sub = function_reach(idx, callee_mod, callee, passed if hit else set(), depth + 1)
                 reach.merge(sub, before(call.lineno))
             elif kind[0] == "external" and kind[1].split(".")[0] in SAFE_HEADS:
                 continue
             else:
-                reach.unresolved.append(f"{mod.where(call)} {full}(...) receives the tool's input and the audit cannot follow it")
+                reach.unresolved.append(f"{mod.where(call)} {full}(...) is a call the audit cannot follow")
     return reach
 
 
