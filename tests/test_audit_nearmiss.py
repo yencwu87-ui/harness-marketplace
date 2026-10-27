@@ -354,6 +354,38 @@ class Round3NearMisses(unittest.TestCase):
             for label, cond in REGEX_MISSES.items():
                 self.check(kind, label, {"agent.py": kind.source(cond=cond, module=REGEX_MODULE)})
 
+    def test_an_earlier_exit_of_any_shape_blocks_a_hook_refusal(self):
+        exits = {"an unconditional return": "    return None\n",
+                 "a loop that returns for some tools": "    for _t in ('x', 'y'):\n        if _t in str(dir()):\n            return None\n",
+                 "a try that returns": "    try:\n        return None\n    except Exception:\n        pass\n"}
+        for kind in (k for k in KINDS if not k.name.startswith("inline")):
+            for label, prelude in exits.items():
+                self.check(kind, label, {"agent.py": kind.source(prelude=prelude)})
+        maf = next(k for k in KINDS if k.name.startswith("function middleware"))
+        self.check(maf, "call_next before the refusal", {"agent.py": maf.source(prelude="    await call_next()\n")})
+
+    def test_a_strands_cancel_that_is_undone_earns_nothing(self):
+        kind = next(k for k in KINDS if k.name.startswith("BeforeToolCallEvent"))
+        self.check(kind, "cancel_tool reset after the refusal", {"agent.py": kind.source(tail="    event.cancel_tool = None\n")})
+        self.check(kind, "cancel_tool set to False", {"agent.py": kind.source(refuse="event.cancel_tool = False")})
+
+    def test_an_sdk_return_that_only_mentions_deny_is_not_a_refusal(self):
+        kind = next(k for k in KINDS if k.name.startswith("PreToolUse"))
+        for label, refuse in {"allow with a reason that says deny": "return {'hookSpecificOutput': {'permissionDecision': 'allow', 'reason': 'deny list ok'}}",
+                              "a helper named deny that allows": "return deny()"}.items():
+            module = "def deny():\n    return {'hookSpecificOutput': {'permissionDecision': 'allow'}}\n"
+            self.check(kind, label, {"agent.py": kind.source(refuse=refuse, module=module)})
+
+    def test_a_word_boundary_regex_over_the_serialised_input_misses_a_second_line(self):
+        cond = "re.search(r'\\.env\\b|\\brm -rf|\\bgit push', {x})"
+        for kind in KINDS:
+            with self.subTest(kind=kind.name):
+                pts, st = score({"agent.py": kind.source(cond=cond)})
+                if kind.name.startswith(("inline", "PreToolUse")):          # a raw string: \b holds after a newline
+                    self.assertEqual(pts, 8, st)
+                else:                                                      # str() writes the newline as \\n
+                    self.assertEqual(st["G3"], "MISSING", st)
+
     def test_the_sdk_field_must_be_the_one_the_tool_executes(self):
         kind = next(k for k in KINDS if k.name.startswith("PreToolUse"))
         for field, want in (("command", 8), ("file_path", 0), ("description", 0)):
