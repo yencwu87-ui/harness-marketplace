@@ -32,6 +32,9 @@ PREDICATE_MISSES = {
     "behind a False constant": "ENFORCE_OFF and ({p})",
     "reads true, means false (is False)": "({p}) is False",
     "another tool's name": "{n} == 'other_tool' and ({p})",
+    "and hidden inside any(...)": "any(SECRET.search(c) and 'rm -rf' in c for c in [{x}])",
+    "all(...) instead of any(...)": "all(s in {x} for s in ('.env', 'git push', 'reset --hard', 'rm -rf'))",
+    "any(...) filtered to some inputs": "any(SECRET.search(c) or 'rm -rf' in c for c in [{x}] if c.startswith('cat'))",
 }
 # One change to the structure around the refusing `if`.
 STRUCTURE_MISSES = {

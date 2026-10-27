@@ -607,6 +607,15 @@ def _conjunct(idx, mod, e, neg, fn, tainted):
         return ("condition", text)
     if isinstance(e, (ast.Name, ast.Attribute)):
         return ("condition", f"not {text}") if neg else ("presence", _dotted(e))
+    if isinstance(e, ast.Call) and _dotted(e.func) in ("any", "all") and e.args and \
+            isinstance(e.args[0], (ast.GeneratorExp, ast.ListComp, ast.SetComp)):
+        comp = e.args[0]                   # any(test for x in ...) is an OR over x; look inside it
+        if _dotted(e.func) == "all":
+            return ("condition", f"{text} refuses only when every listed test holds")
+        if any(g.ifs for g in comp.generators):
+            return ("condition", f"{text} tests only the inputs its `if` keeps")
+        if any(len(b) > 1 for b in _dnf(comp.elt)):
+            return ("condition", f"{text} combines tests with `and`")
     cover, unresolved = _cover_text(idx, mod, e, fn)
     if unresolved:
         return ("unresolved", unresolved)
