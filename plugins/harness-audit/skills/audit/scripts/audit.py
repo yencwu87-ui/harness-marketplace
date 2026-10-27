@@ -1154,7 +1154,7 @@ def _sdk_agent(idx, mod, call):
     strs = lambda n: _str_list(idx, mod, n)
     available = strs(tools_kw) if tools_kw is not None else list(CLAUDE_BUILTINS)
     if available is None:
-        return [("tools", _unresolved_reach(f"{mod.where(call)} tools={mod.src(tools_kw)[:40]} is not a list the audit can read"), [])]
+        return [("tools", _unresolved_reach(f"{mod.where(call)} tools={mod.src(tools_kw)[:40]} is not a list the audit can read"), [])], ""
     allowed = strs(allowed_kw) if allowed_kw is not None else []
     if allowed is None:      # unknown auto-approvals: nothing can be assumed to need a person
         allowed = list(available)
@@ -1184,6 +1184,16 @@ def _sdk_agent(idx, mod, call):
                             g = Guard("refusal", g.where, g.label, unresolved=f"{mod.where(matcher)} hook matcher {mod.src(matcher)[:40]} is not readable")
                         hook_guards.append((pattern or ".*", g))
     servers, server_problem = _sdk_servers(idx, mod, call)
+    # configuration the audit cannot read is never "no tools": an unreadable map, an unreadable server, or a
+    # server-wide approval of a server whose tools it cannot list make the whole agent UNRESOLVED
+    problems = [server_problem] if server_problem else []
+    problems += [v for v in servers.values() if isinstance(v, str)]
+    for a in allowed:
+        parts = a.split("(")[0].split("__")
+        if a.startswith("mcp__") and len(parts) >= 2 and (len(parts) == 2 or parts[2] == "*") and \
+                not isinstance(servers.get(parts[1]), dict):
+            problems.append(f"{mod.where(call)} allowed_tools {a} approves every tool of MCP server {parts[1]!r}, "
+                            "whose tools the audit cannot list (it is not an in-process server in mcp_servers here)")
     mcp = {f"mcp__{key}__{n}": impl for key, entries in servers.items() if isinstance(entries, dict) for n, impl in entries.items()}
     names = list(available) + list(mcp)
     for a in allowed:                  # an allowed MCP name the audit cannot bind to an attached implementation
@@ -1233,7 +1243,7 @@ def _sdk_agent(idx, mod, call):
             if _matches(pattern, base) and (g.tools is None or base in g.tools):
                 guards.append(g)
         tools.append((base, reach, guards))
-    return tools
+    return tools, "; ".join(dict.fromkeys(problems))
 
 
 def _sdk_servers(idx, mod, call):
@@ -1300,7 +1310,8 @@ def find_agents(idx: Index, tid: str, files) -> list:
             if tid == "claude-agent-sdk":
                 if last != "ClaudeAgentOptions":
                     continue
-                agents.append((label, mod.where(call), _sdk_agent(idx, mod, call), [], ""))
+                sdk_tools, sdk_problem = _sdk_agent(idx, mod, call)
+                agents.append((label, mod.where(call), sdk_tools, [], sdk_problem))
                 continue
             tl = _kw(call, "tools")
             if tl is None and last in ("create_agent", "create_react_agent") and len(call.args) > 1:
