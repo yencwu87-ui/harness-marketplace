@@ -96,7 +96,11 @@ helper unchanged (the audit recognises it by its pinned sha256), import it as `f
 `if refuses(command): return "refused"` the tool's first statement, with `command` passed straight to the shell call.
 In a framework hook, give `refuses` the framework's tool input and refuse the documented way. Hand-written refusals
 (your own `in` tests or regexes) score UNRESOLVED, with the reason, even when they are correct. The helper's docstring
-lists exactly what it refuses (secret paths and destructive commands) and what it does not decode.
+lists exactly what it refuses (secret paths and destructive commands) and what it does not decode. From 1.4.6 it
+reads globs as supersets, so any word part with a `*` is refused (`ls *.py` included), and the capability call may
+carry only literal options from a short list (no `executable`, `env`, `preexec_fn`, stdin, positional or keyword).
+Do not put a module named like a standard-library module (`shlex.py`, `re.py`, `subprocess.py`) beside the guard or
+at the repo root: the audit then gives no credit.
 
 ## Honest expectations
 

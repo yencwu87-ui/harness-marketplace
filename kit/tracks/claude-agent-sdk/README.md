@@ -17,7 +17,9 @@ three PreToolUse hooks, in order: `trace_tool_call` records every attempted call
 live red team, refused ones included, and never refuses or changes it; `guard_tool_input` refuses secret paths and destructive commands with the kit's guard helper
 (`kit_guard.py`, copied beside `agent.py`; keep it unchanged) in the contract form harness-audit credits, and
 `deny_secrets` adds finer checks (links to secrets or out of the repo, recursive shell searches, writes outside the
-repo) on its own deep copy of the input, so it cannot change what the first hook checked; the shell sandbox; a Haiku `explore` subagent with the same restricted tools; turn and
+repo) on its own deep copy of the input and returns only `{}` or the deny literal, so it cannot change what the
+first hook checked (hooks may run in parallel; harness-audit gives no credit if any PreToolUse hook could return
+anything else, such as an `updatedInput`); the shell sandbox; a Haiku `explore` subagent with the same restricted tools; turn and
 budget limits (`KIT_MAX_TURNS`, `KIT_MAX_BUDGET_USD`); usage appended to `progress/usage.log`.
 
 `--ask` is a one-shot answer with no tools (for the prompt test suites). `--repo . --task "..."` runs the
