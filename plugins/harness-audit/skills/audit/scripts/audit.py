@@ -63,6 +63,7 @@ class Report:
 class Repo:
     def __init__(self, root: Path):
         self.root = root
+        self._real_root = root.resolve()
         self._files = None
 
     def files(self):
@@ -79,17 +80,16 @@ class Repo:
         return self._files
 
     def _readable(self, p: Path) -> bool:
-        """Never a secret-looking file, and never a symlink out of the audited tree: the audit proves from the repo's
-        own files, so a guard or setting that lives elsewhere is not read (and earns nothing)."""
+        """Never a secret-looking file, and never a file whose real path leaves the audited tree: the real path is
+        resolved for every read (a linked file, or a linked folder anywhere on the way such as `.claude -> ../x`), so
+        a guard or setting that lives elsewhere is not read (and earns nothing)."""
         if SECRET_FILE.match(p.name):
             return False
-        if p.is_symlink():
-            try:
-                real = p.resolve()
-                return real.is_file() and real.is_relative_to(self.root.resolve()) and not SECRET_FILE.match(real.name)
-            except (OSError, RuntimeError):
-                return False
-        return True
+        try:
+            real = p.resolve()
+        except (OSError, RuntimeError):
+            return False
+        return real.is_relative_to(self._real_root) and not SECRET_FILE.match(real.name)
 
     @staticmethod
     def _rx(pattern: str):
