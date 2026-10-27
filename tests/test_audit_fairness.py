@@ -24,8 +24,10 @@ from pathlib import Path
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
+HELPER = (ROOT / "kit/shared/kit_guard.py").read_text()   # the shipped guard helper, written into test repos
 AUDIT = ROOT / "plugins/harness-audit/skills/audit/scripts/audit.py"
 FIX = ROOT / "tests/fixtures/codex_r1"
+FIX_145 = ROOT / "tests/fixtures/fairness_1_4_5"   # the c fixtures whose hand-written guard is now in a helper form
 CLAUDE_TEMPLATE = ROOT / "plugins/harness-init/skills/init/templates/.claude/settings.json"
 GUARD = ("G1", "G2", "G3")
 TRACKS = ["claude-code", "claude-agent-sdk", "microsoft-agent-framework", "google-adk", "langgraph",
@@ -84,28 +86,44 @@ SHELL = ('def run_shell(command: str) -> str:\n    """Execute a shell command.""
          '    return subprocess.run(command, shell=True, capture_output=True, text=True).stdout\n')
 
 
+def matrix_fixture(track, v):
+    """Codex's round-1 fixture, or its 1.4.5 helper form where the original guard is hand-written."""
+    return FIX_145 / track / v if (FIX_145 / track / v).is_dir() else FIX / track / v
+
+
 class Matrix(unittest.TestCase):
-    """The full 8-track x a/b/c matrix from Codex's probe fixtures."""
+    """The full 8-track x a/b/c matrix from Codex's probe fixtures (c in the helper form where it was hand-written)."""
 
     def test_every_track_scores_the_same_for_the_same_guard_behaviour(self):
         got = {}
         for track in TRACKS:
             for v in "abc":
-                got[(track, v)] = points(audit(FIX / track / v))
+                got[(track, v)] = points(audit(matrix_fixture(track, v)))
         wrong = {k: p for k, p in got.items() if p != EXPECTED[k[1]]}
         self.assertEqual(wrong, {}, f"expected a=8, b=0, c=2 on every track; got {got}")
 
     def test_partly_guarded_loses_exactly_g1_and_g2(self):
         for track in TRACKS:
-            g = guards(audit(FIX / track / "c"))
+            g = guards(audit(matrix_fixture(track, "c")))
             with self.subTest(track=track):
                 self.assertEqual((g["G1"]["status"], g["G2"]["status"], g["G3"]["status"]), ("MISSING", "MISSING", "VERIFIED"))
                 self.assertRegex(g["G1"]["evidence"], r"fetch|WebFetch")      # names the ungated capability
 
+    def test_the_hand_written_originals_are_unresolved_not_missing(self):
+        """1.4.5 false negatives by design: the original c guards on these four tracks are hand-written, so their
+        shell guard is UNRESOLVED (no points) with the reason, and the unguarded fetch is still MISSING."""
+        for track in sorted(p.name for p in FIX_145.iterdir() if p.is_dir()):
+            with self.subTest(track=track):
+                g = guards(audit(FIX / track / "c"))
+                self.assertEqual(g["G3"]["status"], "UNRESOLVED", g["G3"])
+                self.assertIn("hand-written refusal", g["G3"]["evidence"])
+                self.assertNotEqual(g["G1"]["status"], "VERIFIED")
+                self.assertEqual(points(audit(FIX / track / "c")), 0)
+
     def test_every_result_has_file_and_line_or_a_fix(self):
         for track in TRACKS:
             for v in "abc":
-                for c in guards(audit(FIX / track / v)).values():
+                for c in guards(audit(matrix_fixture(track, v))).values():
                     if c["status"] == "VERIFIED":
                         self.assertRegex(c["evidence"], r":\d+", (track, v, c))
                     else:
@@ -152,26 +170,28 @@ class Attachment(unittest.TestCase):
             self.assertEqual(points(audit(d)), 8)   # a person approves every shell call: G1, G2 and G3 covered
 
     def test_strands_hook_counts_only_when_registered(self):
-        base = ("import re, subprocess\nfrom strands import Agent, tool\nfrom strands.hooks import HookProvider, BeforeToolCallEvent\n"
-                + SECRET + "class Gate(HookProvider):\n    def register_hooks(self, registry, **kw):\n"
+        base = ("import re, subprocess\nfrom kit_guard import refuses\nfrom strands import Agent, tool\n"
+                "from strands.hooks import HookProvider, BeforeToolCallEvent\n"
+                "class Gate(HookProvider):\n    def register_hooks(self, registry, **kw):\n"
                 "        registry.add_callback(BeforeToolCallEvent, self.before)\n    def before(self, event):\n"
-                "        if SECRET.search(str(event.tool_use)) or 'rm -rf' in str(event.tool_use) or 'git push' in str(event.tool_use):\n"
-                "            event.cancel_tool = 'denied'\n"
+                "        if refuses(event.tool_use):\n            event.cancel_tool = 'denied'\n"
                 "@tool\ndef run_shell(command: str) -> str:\n    return subprocess.run(command, shell=True).stdout\n")
-        with Repo({"agent.py": base + "agent = Agent(tools=[run_shell])\n"}) as d:
+        with Repo({"agent.py": base + "agent = Agent(tools=[run_shell])\n", "kit_guard.py": HELPER}) as d:
             self.assertEqual(points(audit(d)), 0)
-        with Repo({"agent.py": base + "agent = Agent(tools=[run_shell], hooks=[Gate()])\n"}) as d:
+        with Repo({"agent.py": base + "agent = Agent(tools=[run_shell], hooks=[Gate()])\n", "kit_guard.py": HELPER}) as d:
             self.assertEqual(points(audit(d)), 8)
 
     def test_sdk_deny_function_counts_only_when_attached(self):
-        base = ("import re\nfrom claude_agent_sdk import ClaudeAgentOptions, HookMatcher\n" + SECRET +
-                "async def deny(data, tool_use_id, context):\n    command = data.get('tool_input', {}).get('command', '')\n"
-                "    if SECRET.search(command) or any(x in command for x in ('git push', 'reset --hard', 'rm -rf')):\n"
-                "        return {'hookSpecificOutput': {'permissionDecision': 'deny'}}\n    return {}\n")
-        with Repo({"agent.py": base + "opts = ClaudeAgentOptions(tools=['Bash'], allowed_tools=['Bash'])\n"}) as d:
+        base = ("from kit_guard import refuses\nfrom claude_agent_sdk import ClaudeAgentOptions, HookMatcher\n"
+                "async def deny(data, tool_use_id, context):\n    if refuses(data['tool_input']):\n"
+                "        return {'hookSpecificOutput': {'hookEventName': 'PreToolUse', 'permissionDecision': 'deny'}}\n"
+                "    return {}\n")
+        with Repo({"agent.py": base + "opts = ClaudeAgentOptions(tools=['Bash'], allowed_tools=['Bash'])\n",
+                   "kit_guard.py": HELPER}) as d:
             self.assertEqual(points(audit(d)), 0)
         with Repo({"agent.py": base + "opts = ClaudeAgentOptions(tools=['Bash'], allowed_tools=['Bash'], "
-                                      "hooks={'PreToolUse': [HookMatcher(matcher='Bash', hooks=[deny])]})\n"}) as d:
+                                      "hooks={'PreToolUse': [HookMatcher(matcher='Bash', hooks=[deny])]})\n",
+                   "kit_guard.py": HELPER}) as d:
             self.assertEqual(points(audit(d)), 8)
 
     def test_unresolved_attachment_is_unresolved_never_verified(self):
@@ -235,16 +255,21 @@ class Refusals(unittest.TestCase):
     """R1-03: equal refusal behaviour, equal credit; unclear analysis is UNRESOLVED, not MISSING."""
 
     def test_inline_wrapper_refusal_earns_g2_and_g3_like_a_native_hook(self):
-        inline = audit(FIX / "inline_real_guard")
-        native = ("import re, subprocess\nfrom crewai import Agent\nfrom crewai.tools import tool\n"
-                  "from crewai.hooks import register_before_tool_call_hook\n" + SECRET +
-                  "def gate(ctx):\n    command = str(ctx.tool_input)\n"
-                  "    if SECRET.search(command) or any(x in command for x in ('git push', 'reset --hard', 'rm -rf')):\n"
-                  "        return False\n    return None\nregister_before_tool_call_hook(gate)\n"
+        """The same helper refusal earns the same points inline in the tool and in a framework hook (1.4.5 forms).
+        Codex's hand-written original (codex_r1/inline_real_guard) is a documented false negative: UNRESOLVED."""
+        inline = ("import subprocess\nfrom kit_guard import refuses\nfrom agents import Agent, function_tool\n"
+                  "@function_tool\n" + SHELL.format(guard="    if refuses(command):\n        return 'denied'\n") +
+                  "agent = Agent(name='worker', tools=[run_shell])\n")
+        native = ("import subprocess\nfrom kit_guard import refuses\nfrom crewai import Agent\nfrom crewai.tools import tool\n"
+                  "from crewai.hooks import register_before_tool_call_hook\n"
+                  "def gate(ctx):\n    if refuses(ctx.tool_input):\n        return False\n    return None\n"
+                  "register_before_tool_call_hook(gate)\n"
                   "@tool('run_shell')\n" + SHELL.format(guard="") + "agent = Agent(role='r', goal='g', backstory='b', tools=[run_shell])\n")
-        with Repo({"agent.py": native}) as d:
-            self.assertEqual(points(inline), points(audit(d)))
-        self.assertEqual(points(inline), 8, guards(inline))
+        with Repo({"agent.py": inline, "kit_guard.py": HELPER}) as a, Repo({"agent.py": native, "kit_guard.py": HELPER}) as b:
+            pa, pb = points(audit(a)), points(audit(b))
+        self.assertEqual((pa, pb), (8, 8))
+        original = guards(audit(FIX / "inline_real_guard"))
+        self.assertEqual({c["status"] for c in original.values()}, {"UNRESOLVED"}, original)
 
     def test_removing_the_early_return_loses_the_credit(self):
         src = (FIX / "inline_real_guard" / "agent.py").read_text().replace('        return "denied"\n', '        pass\n')

@@ -13,9 +13,10 @@ What it shows:
     could reach secret files the hook cannot see in advance.
   - search_code and the hook check where a symlink points, not only its name: a link to a secret or out of the
     repo is never opened
-  - a PreToolUse hook that refuses secret paths (file tools, the search tool and shell), recursive shell
-    content searches, destructive shell commands, and writes outside the repo; its first refusals are written in
-    the canonical guard forms (kit_guard on the field each tool executes), so harness-audit can prove them
+  - two PreToolUse hooks: guard_tool_input refuses secret paths and destructive commands with the kit's guard
+    helper on what each tool executes, in the contract form harness-audit credits (`audit.py --canonical-forms`);
+    deny_secrets adds finer checks (links to secrets or out of the repo, recursive shell content searches, writes
+    outside the repo) on its own copy of the input, so it can never change what the first hook checked
   - an OS-level sandbox for shell commands (Claude Code's sandbox; see README for platform support)
   - a cheap Haiku "explore" subagent for lookups, with the same restricted tools
   - bounded turns and budget, then prints usage and appends it to progress/usage.log
@@ -24,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import copy
 import json
 import os
 import re
@@ -44,7 +46,7 @@ from claude_agent_sdk import (
 )
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))   # kit_guard.py ships beside this file
-import kit_guard  # noqa: E402  the kit's guard helper; harness-audit credits it by its pinned sha256
+from kit_guard import refuses  # noqa: E402  the kit's guard helper; harness-audit credits it by its pinned sha256
 
 MODEL = os.environ.get("KIT_MODEL", "opus")          # alias or full id, e.g. claude-opus-5-5
 EFFORT = os.environ.get("KIT_EFFORT", "medium")      # low | medium | high | xhigh | max
@@ -103,23 +105,36 @@ def deny(tool_name: str, why: str) -> dict:
                                    "permissionDecisionReason": f"{tool_name}: {why} (refused by the harness)."}}
 
 
+async def guard_tool_input(input_data, tool_use_id, context):
+    """PreToolUse hook in the kit's contract form (`audit.py --canonical-forms`, F3/F4): the kit's guard helper on what
+    each tool executes (the command, the file path, the search tool's input). harness-audit credits these refusals.
+    Keep the shape: the refusals first, the deny dict returned directly, nothing else touching input_data."""
+    if input_data["tool_name"] == "Bash":
+        if refuses(input_data["tool_input"].get("command", "")):
+            return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                           "permissionDecisionReason": "secret path or destructive command (refused by the harness)."}}
+    if input_data["tool_name"] in ("Read", "Write", "Edit", "MultiEdit"):
+        if refuses(input_data["tool_input"].get("file_path", "")):
+            return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                           "permissionDecisionReason": "secret path (refused by the harness)."}}
+    if input_data["tool_name"] == SEARCH_TOOL:
+        if refuses(input_data["tool_input"]):
+            return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                           "permissionDecisionReason": "secret path (refused by the harness)."}}
+    return {}
+
+
 async def deny_secrets(input_data, tool_use_id, context):
-    """PreToolUse hook: refuse secret paths, recursive shell searches, destructive commands and writes outside the repo.
-    The first three refusals are canonical guard forms (`audit.py --canonical-forms`): the kit's guard helper on the
-    field each tool executes, at the top of this function. The checks after them are finer and stay as they are."""
-    tool_name = input_data.get("tool_name", "")
-    command = input_data.get("tool_input", {}).get("command", "")
-    file_path = input_data.get("tool_input", {}).get("file_path", "")
-    args = input_data.get("tool_input", {}) or {}
+    """PreToolUse hook: finer checks after guard_tool_input (links to secrets or out of the repo, recursive shell
+    searches, writes outside the repo), and the trace for the live red team. It works on its own deep copy of the
+    input, so it cannot change the input the first hook checked; harness-audit verifies that (F5)."""
+    data = copy.deepcopy(input_data)
+    tool_name = data.get("tool_name", "")
+    args = data.get("tool_input", {}) or {}
+    command = args.get("command", "") if isinstance(args, dict) else ""
     if os.environ.get("HARNESS_TRACE"):  # the live red team reads this trace
         with open(os.environ["HARNESS_TRACE"], "a", encoding="utf-8") as f:
             f.write(json.dumps({"ts": time.time(), "source": "agent-sdk-hook", "tool": tool_name, "input": args}) + "\n")
-    if kit_guard.refuses(command):
-        return deny(tool_name, "the command names a secret path or is destructive")
-    if kit_guard.refuses(file_path):
-        return deny(tool_name, "secret path")
-    if tool_name == SEARCH_TOOL and kit_guard.refuses(input_data.get("tool_input")):
-        return deny(tool_name, "secret path")
     if tool_name in ("Grep", "Glob"):
         return deny(tool_name, f"not offered; use {SEARCH_TOOL}, which never opens secret files")
     target = args.get("file_path") or args.get("path") or args.get("notebook_path") or ""
@@ -204,7 +219,8 @@ def options(repo: Path, tools: bool = True) -> ClaudeAgentOptions:
         mcp_servers={"kit": create_sdk_mcp_server(name="kit", version="1.0.0", tools=[search_code])},
         permission_mode="acceptEdits",
         sandbox={"enabled": True, "autoAllowBashIfSandboxed": True},
-        hooks={"PreToolUse": [HookMatcher(matcher=f"Read|Edit|Write|Bash|Grep|Glob|{SEARCH_TOOL}", hooks=[deny_secrets])]},
+        hooks={"PreToolUse": [HookMatcher(matcher=f"Read|Edit|Write|MultiEdit|Bash|Grep|Glob|{SEARCH_TOOL}",
+                                          hooks=[guard_tool_input, deny_secrets])]},
         agents={
             "explore": AgentDefinition(
                 description="Read-only lookups. Returns evidence as file:line.",

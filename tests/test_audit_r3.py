@@ -16,7 +16,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from test_audit_fairness import GUARD, Repo, audit, guards, load_audit, points, ROOT
+from test_audit_fairness import GUARD, HELPER, Repo, audit, guards, load_audit, points, ROOT
 
 FIX = ROOT / "tests/fixtures/codex_r3"
 KIT_GUARD = ROOT / "kit/shared/kit_guard.py"
@@ -31,7 +31,7 @@ def statuses(rep):
 
 
 def tool(body, header="def run(command):\n", tail=SHELL, extra=""):
-    return {"agent.py": OAI + extra + header + body + tail + WIRE}
+    return {"agent.py": OAI + "from kit_guard import refuses\n" + extra + header + body + tail + WIRE, "kit_guard.py": HELPER}
 
 
 def score(files):
@@ -66,18 +66,20 @@ class R3_01_LoopLocalRefusals(unittest.TestCase):
                 pts, st, g = score(tool(body))
                 self.assertEqual(pts, 0, (st, body))
                 self.assertNotIn("VERIFIED", st, body)
-        pts, st, g = score(tool(f"    if {COND}:\n        return 'denied'\n"))
+        pts, st, g = score(tool("    if refuses(command):\n        return 'denied'\n"))
         self.assertEqual(pts, 8, g)
+        pts, st, g = score(tool(f"    if {COND}:\n        return 'denied'\n"))     # 1.4.5: hand-written, F7
+        self.assertEqual((pts, st), (0, ("UNRESOLVED",) * 3), g)
 
     def test_a_hook_refusal_inside_a_loop_earns_nothing(self):
-        src = ("from google.adk.agents import Agent\nimport subprocess\n"
+        src = ("from google.adk.agents import Agent\nimport subprocess\nfrom kit_guard import refuses\n"
                "def gate(tool, args, tool_context):\n    for _ in []:\n"
-               "        if '.env' in str(args) or 'rm -rf' in str(args) or 'git push' in str(args):\n"
+               "        if refuses(args):\n"
                "            return {'error': 'denied'}\n    return None\n"
                "def run(command):\n" + SHELL + "agent = Agent(name='w', tools=[run], before_tool_callback=gate)\n")
-        self.assertEqual(score({"agent.py": src})[0], 0)
+        self.assertEqual(score({"agent.py": src, "kit_guard.py": HELPER})[0], 0)
         self.assertEqual(score({"agent.py": src.replace("    for _ in []:\n        if", "    if").replace(
-            "\n            return {'error'", "\n        return {'error'")})[0], 8)
+            "\n            return {'error'", "\n        return {'error'"), "kit_guard.py": HELPER})[0], 8)
 
 
 class R3_02_PredicateBindsTheExecutedInput(unittest.TestCase):
@@ -92,8 +94,8 @@ class R3_02_PredicateBindsTheExecutedInput(unittest.TestCase):
                 self.assertNotIn("VERIFIED", statuses(rep))
 
     def test_correct_versus_wrong_parameter(self):
-        right = tool(f"    if {COND}:\n        return 'denied'\n", header="def run(command, label=''):\n")
-        wrong = tool(f"    if {COND.replace('command', 'label')}:\n        return 'denied'\n", header="def run(command, label=''):\n")
+        right = tool("    if refuses(command):\n        return 'denied'\n", header="def run(command, label=''):\n")
+        wrong = tool("    if refuses(label):\n        return 'denied'\n", header="def run(command, label=''):\n")
         self.assertEqual(score(right)[0], 8)
         self.assertEqual(score(wrong)[0], 0)
 
@@ -123,10 +125,10 @@ class R3_02_PredicateBindsTheExecutedInput(unittest.TestCase):
     def test_the_kit_guard_helper_earns_credit_only_unmodified(self):
         self.assertTrue(KIT_GUARD.is_file(), "kit/shared/kit_guard.py is the kit's shipped guard helper")
         helper = KIT_GUARD.read_text()
-        src = OAI + "import kit_guard\ndef run(command):\n    if kit_guard.refuses(command):\n        return 'denied'\n" + SHELL + WIRE
-        src_from = src.replace("import kit_guard\n", "from kit_guard import refuses\n").replace("kit_guard.refuses(", "refuses(")
+        src_import = OAI + "import kit_guard\ndef run(command):\n    if kit_guard.refuses(command):\n        return 'denied'\n" + SHELL + WIRE
+        src = src_import.replace("import kit_guard\n", "from kit_guard import refuses\n").replace("kit_guard.refuses(", "refuses(")
         self.assertEqual(score({"agent.py": src, "kit_guard.py": helper})[0], 8)
-        self.assertEqual(score({"agent.py": src_from, "kit_guard.py": helper})[0], 8)
+        self.assertEqual(score({"agent.py": src_import, "kit_guard.py": helper})[0], 0)   # 1.4.5 F1: one import shape
         edited = helper.replace("return secret(value) or destructive(value)", "return False", 1)
         self.assertNotEqual(edited, helper)
         self.assertEqual(score({"agent.py": src, "kit_guard.py": edited})[0], 0)
@@ -145,9 +147,9 @@ class R3_02_PredicateBindsTheExecutedInput(unittest.TestCase):
                "compiled .match": "PATTERN.match(command)",
                "pattern from a variable": "re.search(PATTERN_TEXT, command)"}
         extra = "PATTERN = re.compile(r'\\.env|rm -rf|git push')\nPATTERN_TEXT = ''.join(['\\\\.env|rm -rf|git push'])\n"
-        for name, call in good.items():
+        for name, call in good.items():       # 1.4.5: every regex is a hand-written refusal (F7), anchored or not
             with self.subTest(good=name):
-                self.assertEqual(score(tool(refusal.format(call=call), extra=extra))[0], 8)
+                self.assertEqual(score(tool(refusal.format(call=call), extra=extra))[0], 0)
         for name, call in bad.items():
             with self.subTest(bad=name):
                 self.assertEqual(score(tool(refusal.format(call=call), extra=extra))[0], 0)

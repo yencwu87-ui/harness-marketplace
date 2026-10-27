@@ -184,8 +184,11 @@ class DenySecrets(unittest.TestCase):
 
     def decide(self, tool, inp, repo="/constructed/repo"):
         self.agent.set_repo(Path(repo))
-        out = asyncio.run(self.agent.deny_secrets({"tool_name": tool, "tool_input": inp}, None, None))
-        return (out or {}).get("hookSpecificOutput", {}).get("permissionDecision", "allow")
+        decisions = []
+        for hook in (self.agent.guard_tool_input, self.agent.deny_secrets):   # both run; a deny from either wins
+            out = asyncio.run(hook({"tool_name": tool, "tool_input": inp}, None, None))
+            decisions.append((out or {}).get("hookSpecificOutput", {}).get("permissionDecision", "allow"))
+        return "deny" if "deny" in decisions else "allow"
 
     def test_content_searches_targeting_secrets_are_denied(self):
         cases = [("Grep", {"path": "/constructed", "glob": "**/*.pem", "pattern": "TOKEN", "output_mode": "content"}),

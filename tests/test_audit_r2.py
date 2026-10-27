@@ -9,7 +9,7 @@ R2-06 (the SDK search tool and symlinks) is in test_live_safety.py, beside the o
 import json
 import unittest
 
-from test_audit_fairness import GUARD, Repo, audit, guards, points, ROOT
+from test_audit_fairness import GUARD, HELPER, Repo, audit, guards, points, ROOT
 
 FIX = ROOT / "tests/fixtures/codex_r2"
 OAI = "import re, subprocess\nfrom agents import Agent, function_tool\n"
@@ -30,15 +30,16 @@ class R2_01_RefusalMeaning(unittest.TestCase):
                 self.assertEqual(points(rep), 0, guards(rep))
                 self.assertNotIn("VERIFIED", statuses(rep))
 
-    def test_or_earns_and_and_does_not(self):
+    def test_the_helper_earns_and_and_or_or_hand_written_tests_do_not(self):
+        """1.4.5: only `if refuses(command):` earns credit; `or` and `and` of hand-written tests are both F7."""
         body = "def run(command):\n    if {cond}:\n        return 'denied'\n    return subprocess.run(command, shell=True).returncode\n" \
                "agent = Agent(name='w', tools=[run])\n"
-        either = "'.env' in command or 'rm -rf' in command"
-        both = "'.env' in command and 'rm -rf' in command"
-        with Repo({"agent.py": OAI + body.format(cond=either)}) as d:
-            self.assertEqual(points(audit(d)), 8)
-        with Repo({"agent.py": OAI + body.format(cond=both)}) as d:
-            self.assertEqual(points(audit(d)), 0)
+        for cond, want in (("refuses(command)", 8), ("'.env' in command or 'rm -rf' in command", 0),
+                           ("'.env' in command and 'rm -rf' in command", 0), ("refuses(command) and len(command) > 3", 0),
+                           ("refuses(command) or 'x' in command", 0)):
+            with self.subTest(cond=cond), Repo({"agent.py": OAI + "from kit_guard import refuses\n" + body.format(cond=cond),
+                                                 "kit_guard.py": HELPER}) as d:
+                self.assertEqual(points(audit(d)), want)
 
     def test_nested_guard_counts_only_when_its_enclosing_condition_always_holds(self):
         body = ("ENFORCE = {flag}\ndef run(command{param}):\n    if {outer}:\n"
@@ -55,33 +56,42 @@ class R2_01_RefusalMeaning(unittest.TestCase):
                 self.assertEqual(points(audit(d)), want, guards(audit(d)))
 
     def test_hook_restricted_to_another_tool_gives_nothing_and_to_this_tool_gives_credit(self):
-        src = ("from google.adk.agents import Agent\nimport subprocess, re\n"
+        src = ("from google.adk.agents import Agent\nimport subprocess\nfrom kit_guard import refuses\n"
                "def gate(tool, args, tool_context):\n    if tool.name == '{name}':\n"
-               "        if re.search(r'.env|.pem|.key', str(args)) or 'rm -rf' in str(args) or 'git push' in str(args):\n"
-               "            return {{'error': 'denied'}}\n    return None\n"
+               "        if refuses(args):\n            return {{'error': 'denied'}}\n    return None\n"
                "def unsafe(command):\n    return subprocess.run(command, shell=True).returncode\n"
                "agent = Agent(name='w', tools=[unsafe], before_tool_callback=gate)\n")
-        with Repo({"agent.py": src.format(name="safe")}) as d:
+        with Repo({"agent.py": src.format(name="safe"), "kit_guard.py": HELPER}) as d:
             self.assertEqual(points(audit(d)), 0)
-        with Repo({"agent.py": src.format(name="unsafe")}) as d:
+        with Repo({"agent.py": src.format(name="unsafe"), "kit_guard.py": HELPER}) as d:
             self.assertEqual(points(audit(d)), 8)
 
     def test_combining_hook_conditions_keeps_their_restrictions(self):
-        """One condition refuses secrets only for 'safe', another destructive commands for every tool:
-        'unsafe' is covered for G3 only."""
-        src = ("from google.adk.agents import Agent\nimport subprocess, re\n"
+        """A helper refusal scoped to 'safe' gives 'unsafe' nothing; a later unscoped one gives it both classes.
+        A hand-written condition beside them lends nothing."""
+        src = ("from google.adk.agents import Agent\nimport subprocess, re\nfrom kit_guard import refuses\n"
                "def gate(tool, args, tool_context):\n"
-               "    if tool.name == 'safe' and re.search(r'.env|.pem|.key', str(args)):\n        return {'error': 'denied'}\n"
-               "    if 'rm -rf' in str(args) or 'git push' in str(args):\n        return {'error': 'denied'}\n    return None\n"
+               "    if tool.name == 'safe':\n        if refuses(args):\n            return {'error': 'denied'}\n"
+               "{second}    return None\n"
                "def unsafe(command):\n    return subprocess.run(command, shell=True).returncode\n"
                "agent = Agent(name='w', tools=[unsafe], before_tool_callback=gate)\n")
-        with Repo({"agent.py": src}) as d:
-            g = guards(audit(d))
-            self.assertNotEqual(g["G2"]["status"], "VERIFIED", g)
-            self.assertEqual(g["G3"]["status"], "VERIFIED", g)
+        for second, want in (("", 0), ("    if refuses(args):\n        return {'error': 'denied'}\n", 8),
+                             ("    if 'rm -rf' in str(args) or 'git push' in str(args):\n        return {'error': 'denied'}\n", 0)):
+            with self.subTest(second=second), Repo({"agent.py": src.replace("{second}", second), "kit_guard.py": HELPER}) as d:
+                self.assertEqual(points(audit(d)), want, guards(audit(d)))
 
     def test_a_genuine_unconditional_refusal_keeps_its_points(self):
-        self.assertEqual(points(audit(ROOT / "tests/fixtures/codex_r1/inline_real_guard")), 8)
+        """Codex's inline_real_guard is hand-written: from 1.4.5 UNRESOLVED (a documented false negative). The same tool
+        with the helper keeps its points."""
+        fix = ROOT / "tests/fixtures/codex_r1/inline_real_guard"
+        self.assertEqual(set(statuses(audit(fix))), {"UNRESOLVED"})
+        src = (fix / "agent.py").read_text()
+        lines = src.splitlines()
+        i = next(n for n, line in enumerate(lines) if line.lstrip().startswith("if ") and "command" in line)
+        lines[i] = lines[i][:len(lines[i]) - len(lines[i].lstrip())] + "if refuses(command):"
+        helper_src = "from kit_guard import refuses\n" + "\n".join(lines) + "\n"
+        with Repo({"agent.py": helper_src, "kit_guard.py": HELPER}) as d:
+            self.assertEqual(points(audit(d)), 8, (helper_src, guards(audit(d))))
 
 
 class R2_02_CrewAITask(unittest.TestCase):
@@ -98,12 +108,13 @@ class R2_02_CrewAITask(unittest.TestCase):
             self.assertIn("human_input", guards(rep)["G1"]["evidence"])     # the reason is named
 
     def test_a_before_tool_call_hook_still_earns_credit(self):
-        src = ("import re, subprocess\nfrom crewai import Agent\nfrom crewai.hooks import register_before_tool_call_hook\n" + SECRET +
-               "def gate(ctx):\n    if SECRET.search(str(ctx.tool_input)) or 'rm -rf' in str(ctx.tool_input):\n        return False\n"
+        src = ("import subprocess\nfrom kit_guard import refuses\nfrom crewai import Agent\n"
+               "from crewai.hooks import register_before_tool_call_hook\n"
+               "def gate(ctx):\n    if refuses(ctx.tool_input):\n        return False\n"
                "    return None\nregister_before_tool_call_hook(gate)\n"
                "def run(command):\n    return subprocess.run(command, shell=True).returncode\n"
                "unsafe = Agent(role='unsafe', goal='g', backstory='b', tools=[run])\n")
-        with Repo({"agent.py": src}) as d:
+        with Repo({"agent.py": src, "kit_guard.py": HELPER}) as d:
             self.assertEqual(points(audit(d)), 8)
 
 

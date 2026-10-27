@@ -8,7 +8,9 @@ loop-local exit versus a function-level refusal, the right versus the wrong inpu
 capturing an input, readable helpers that always (or never) refuse, anchored versus unanchored regexes, reach through
 zero-input helpers, wildcard approval with an MCP map the audit cannot read, and directory versus file symlinks.
 Each is built from the same positive case by one change, so a pass here means the audit noticed that one change.
-From 1.4.4 the positives are written in the canonical guard forms (`audit.py --canonical-forms`).
+From 1.4.4 the positives are written in the canonical guard forms (`audit.py --canonical-forms`). From 1.4.5 that
+means the kit's helper (`from kit_guard import refuses`) in each framework's exact contract; the hand-written
+predicates that were positives up to 1.4.4 (regexes, `in` tests) are near-misses now and earn nothing.
 
 Every tool here is an unrestricted shell (`run(command)`), so a guard that loses its credit loses all of G1-G3,
 except where a case names the checks it targets.
@@ -20,9 +22,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from test_audit_fairness import GUARD, Repo, audit, guards, points
+from test_audit_fairness import GUARD, HELPER, Repo, audit, guards, points
 
-P = "SECRET.search({x}) or any(s in {x} for s in ('git push', 'reset --hard', 'rm -rf'))"
+P = "refuses({x})"
+HAND = "SECRET.search({x}) or any(s in {x} for s in ('git push', 'reset --hard', 'rm -rf'))"   # the 1.4.4 positive
 SECRET = 'SECRET = re.compile(r"(\\.env|\\.pem|\\.key|\\.ssh|\\.aws)")\n'
 FLAG = "ENFORCE = os.environ.get('ENFORCE') == '1'\n"
 
@@ -71,7 +74,8 @@ class RefusalKind:
         fn = (header or self.header) + prelude + refusal + (self.tail if tail is None else tail)
         if self.name.startswith("BeforeToolCallEvent"):                   # Strands: the method lives in the Gate class
             fn = indent(fn) + SHELL_TOOL
-        return ("import os, re, subprocess\n" + SECRET + FLAG + "ENFORCE_OFF = False\n" + module + self.imports + fn +
+        return ("import os, re, subprocess\nfrom kit_guard import refuses\n" + SECRET + FLAG + "ENFORCE_OFF = False\n" +
+                module + self.imports + fn +
                 (wiring if wiring is not None else self.wire))
 
 
@@ -81,13 +85,13 @@ KINDS = [
                 "return 'denied'", "    return subprocess.run(command, shell=True).returncode\n",
                 "agent = Agent(name='w', tools=[run])\n", None, None),
     RefusalKind("before_tool_callback (Google ADK)", "from google.adk.agents import Agent\n",
-                "def gate(tool, args, tool_context):\n", "str(args)", "tool.name", "return {'error': 'denied'}",
+                "def gate(tool, args, tool_context):\n", "args", "tool.name", "return {'error': 'denied'}",
                 "    return None\n" + SHELL_TOOL,
                 "agent = Agent(name='w', tools=[run], before_tool_callback=gate)\n", "agent = Agent(name='w', tools=[run])\n",
                 "agent = Agent(name='w', tools=[run])\nother = Agent(name='o', tools=[], before_tool_callback=gate)\n",
                 early_allow="    if 'safe' in str(args):\n        return None\n"),
     RefusalKind("before-tool-call hook (CrewAI)", "from crewai import Agent\nfrom crewai.hooks import register_before_tool_call_hook\n",
-                "def gate(ctx):\n", "str(ctx.tool_input)", "ctx.tool_name", "return False", "    return None\n" + SHELL_TOOL,
+                "def gate(ctx):\n", "ctx.tool_input", "ctx.tool_name", "return False", "    return None\n" + SHELL_TOOL,
                 "register_before_tool_call_hook(gate)\nagent = Agent(role='w', goal='g', backstory='b', tools=[run])\n",
                 "agent = Agent(role='w', goal='g', backstory='b', tools=[run])\n", None,
                 early_allow="    if 'safe' in str(ctx.tool_input):\n        return None\n"),
@@ -95,26 +99,30 @@ KINDS = [
                 "from strands import Agent\nfrom strands.hooks import HookProvider, BeforeToolCallEvent\n"
                 "class Gate(HookProvider):\n    def register_hooks(self, registry, **kw):\n"
                 "        registry.add_callback(BeforeToolCallEvent, self.before)\n",
-                "def before(self, event):\n", "str(event.tool_use)", "event.tool_use['name']", "event.cancel_tool = 'denied'",
+                "def before(self, event):\n", "event.tool_use", "event.tool_use['name']", "event.cancel_tool = 'denied'",
                 "", "agent = Agent(tools=[run], hooks=[Gate()])\n", "agent = Agent(tools=[run])\n",
                 "agent = Agent(tools=[run])\nother = Agent(tools=[], hooks=[Gate()])\n"),
     RefusalKind("function middleware (Microsoft Agent Framework)", "from agent_framework import Agent, function_middleware\n",
-                "@function_middleware\nasync def gate(context, call_next):\n", "str(context.arguments)", "context.function.name",
+                "@function_middleware\nasync def gate(context, call_next):\n", "context.arguments", "context.function.name",
                 "context.result = 'denied'\nreturn", "    await call_next()\n" + SHELL_TOOL,
                 "agent = Agent(client, tools=[run], middleware=[gate])\n", "agent = Agent(client, tools=[run])\n",
                 "agent = Agent(client, tools=[run])\nother = Agent(client, tools=[], middleware=[gate])\n"),
     RefusalKind("PreToolUse hook (Claude Agent SDK)", "from claude_agent_sdk import ClaudeAgentOptions, HookMatcher\n",
-                "async def gate(data, tool_use_id, context):\n    command = data.get('tool_input', {}).get('command', '')\n",
-                "command", "data.get('tool_name')", "return {'hookSpecificOutput': {'permissionDecision': 'deny'}}",
+                "async def gate(data, tool_use_id, context):\n", "data['tool_input']", "data.get('tool_name')",
+                "return {'hookSpecificOutput': {'hookEventName': 'PreToolUse', 'permissionDecision': 'deny'}}",
                 "    return {}\n",
                 "opts = ClaudeAgentOptions(tools=['Bash'], allowed_tools=['Bash'], hooks={'PreToolUse': [HookMatcher(matcher='Bash', hooks=[gate])]})\n",
                 "opts = ClaudeAgentOptions(tools=['Bash'], allowed_tools=['Bash'])\n",
                 "opts = ClaudeAgentOptions(tools=['Bash'], allowed_tools=['Bash'], hooks={'PreToolUse': [HookMatcher(matcher='Read', hooks=[gate])]})\n",
-                early_allow="    if 'safe' in command:\n        return {}\n"),
+                early_allow="    if 'safe' in str(data['tool_input']):\n        return {}\n"),
 ]
 
 
-def score(files):
+def score(files, helper=True):
+    """Points and statuses; the shipped helper is written beside the files unless `helper` is False."""
+    files = dict(files)
+    if helper and "kit_guard.py" not in files:
+        files["kit_guard.py"] = HELPER
     with Repo(files) as d:
         rep = audit(d)
         return points(rep), {c: g["status"] for c, g in guards(rep).items()}
@@ -164,12 +172,12 @@ class GeneratedNearMisses(unittest.TestCase):
         """The guard module (or the settings file) is a link to a file outside the audited tree."""
         outside = Path(tempfile.mkdtemp())
         try:
-            (outside / "policy.py").write_text("import re\n" + SECRET + "def gate(tool, args, tool_context):\n"
-                                               f"    if {P.format(x='str(args)')}:\n        return {{'error': 'denied'}}\n    return None\n")
+            (outside / "policy.py").write_text("from kit_guard import refuses\ndef gate(tool, args, tool_context):\n"
+                                               f"    if {P.format(x='args')}:\n        return {{'error': 'denied'}}\n    return None\n")
             (outside / "settings.json").write_text(json.dumps({"permissions": {"ask": ["Bash(*)", "WebFetch", "Write", "Edit"]}}))
             src = ("import subprocess\nfrom google.adk.agents import Agent\nfrom policy import gate\n" + SHELL_TOOL +
                    "agent = Agent(name='w', tools=[run], before_tool_callback=gate)\n")
-            with Repo({"agent.py": src}) as d:
+            with Repo({"agent.py": src, "kit_guard.py": HELPER}) as d:
                 (d / "policy.py").write_text((outside / "policy.py").read_text())
                 self.assertEqual(points(audit(d)), 8)                   # the same guard, inside the repo
                 (d / "policy.py").unlink()
@@ -348,11 +356,14 @@ class Round3NearMisses(unittest.TestCase):
                 helper = f"def blocked(v):\n    return {body.format(p=P.format(x='v'))}\n"
                 self.check(kind, label, {"agent.py": kind.source(cond="blocked({x})", module=helper)})
 
-    def test_anchored_regexes_earn_nothing_and_unanchored_search_earns_credit(self):
+    def test_hand_written_regexes_earn_nothing_anchored_or_not(self):
+        """1.4.5: a regex is a hand-written refusal (F7), whether or not it would find the keyword anywhere."""
         for kind in KINDS:
-            self.check(kind, "re.search (positive)", {"agent.py": kind.source(cond=REGEX_POSITIVE, module=REGEX_MODULE)}, want=8)
-            for label, cond in REGEX_MISSES.items():
-                self.check(kind, label, {"agent.py": kind.source(cond=cond, module=REGEX_MODULE)})
+            self.check(kind, "the helper (positive)", {"agent.py": kind.source()}, want=8)
+            for label, cond in dict(REGEX_MISSES, **{"re.search (the 1.4.4 positive)": REGEX_POSITIVE,
+                                                     "the 1.4.4 positive predicate": HAND}).items():
+                x = "str(" + kind.x + ")" if kind.name[0] not in "iP" else kind.x
+                self.check(kind, label, {"agent.py": kind.source(cond=cond, module=REGEX_MODULE, x=x)})
 
     def test_an_earlier_exit_of_any_shape_blocks_a_hook_refusal(self):
         exits = {"an unconditional return": "    return None\n",
@@ -376,27 +387,19 @@ class Round3NearMisses(unittest.TestCase):
             module = "def deny():\n    return {'hookSpecificOutput': {'permissionDecision': 'allow'}}\n"
             self.check(kind, label, {"agent.py": kind.source(refuse=refuse, module=module)})
 
-    def test_a_word_boundary_regex_over_the_serialised_input_misses_a_second_line(self):
-        cond = "re.search(r'\\.env\\b|\\brm -rf|\\bgit push', {x})"
-        for kind in KINDS:
-            with self.subTest(kind=kind.name):
-                pts, st = score({"agent.py": kind.source(cond=cond)})
-                if kind.name.startswith(("inline", "PreToolUse")):          # a raw string: \b holds after a newline
-                    self.assertEqual(pts, 8, st)
-                else:                                                      # str() writes the newline as \\n
-                    self.assertEqual(st["G3"], "MISSING", st)
-
-    def test_the_sdk_field_must_be_the_one_the_tool_executes(self):
+    def test_the_sdk_input_must_be_the_whole_tool_input(self):
+        """1.4.5: the SDK hook's INPUT is `input_data['tool_input']`; one field of it or the whole hook input is not."""
         kind = next(k for k in KINDS if k.name.startswith("PreToolUse"))
-        for field, want in (("command", 8), ("file_path", 0), ("description", 0)):
-            header = f"async def gate(data, tool_use_id, context):\n    command = data.get('tool_input', {{}}).get('{field}', '')\n"
-            self.check(kind, f"field {field}", {"agent.py": kind.source(header=header)}, want=want)
+        for x, want in (("data['tool_input']", 8), ("data.get('tool_input')", 8), ("data.get('tool_input', {})", 8),
+                        ("data", 0), ("data['tool_input']['command']", 0), ("str(data['tool_input'])", 0),
+                        ("data.get('tool_input', DEFAULT)", 0)):
+            self.check(kind, f"input {x}", {"agent.py": kind.source(x=x, module="DEFAULT = {}\n")}, want=want)
 
 
 class ReachNearMisses(unittest.TestCase):
     """A guarded tool keeps its credit; one extra call it cannot see past takes it away."""
-    BASE = ("import re, subprocess\nfrom agents import Agent\n{module}def run(command):\n"
-            "    if '.env' in command or 'rm -rf' in command or 'git push' in command:\n        return 'denied'\n"
+    BASE = ("import re, subprocess\nfrom kit_guard import refuses\nfrom agents import Agent\n{module}def run(command):\n"
+            "    if refuses(command):\n        return 'denied'\n"
             "{extra}    return subprocess.run(command, shell=True).returncode\nagent = Agent(name='w', tools=[run])\n")
 
     def test_zero_input_helpers_are_followed(self):
@@ -413,17 +416,18 @@ class ReachNearMisses(unittest.TestCase):
                 pts, st = score({"agent.py": self.BASE.format(module=module, extra=extra)})
                 self.assertLess(pts, 8, (st, label))
 
-    def test_a_refusal_reaches_a_helper_only_through_the_same_name(self):
+    def test_a_refusal_never_reaches_into_a_helper(self):
+        """1.4.5 (F2): the parameter goes straight to the capability; passing it to a helper of your own earns nothing,
+        even when the helper passes it on unchanged."""
         helper = "def execute(cmd):\n    return subprocess.run(cmd, shell=True).returncode\n"
         good = self.BASE.format(module=helper, extra="").replace("    return subprocess.run(command, shell=True).returncode\nagent",
                                                                  "    return execute(command)\nagent")
-        self.assertEqual(score({"agent.py": good})[0], 8)
-        for label, call in {"converted": "execute(command.strip())", "another value": "execute('git status')",
+        for label, call in {"passed on unchanged": "execute(command)", "converted": "execute(command.strip())",
                             "wrapped": "execute(f'{command}')"}.items():
             with self.subTest(case=label):
                 self.assertEqual(score({"agent.py": good.replace("execute(command)", call)})[0], 0)
-        rebinding_helper = helper.replace("    return", "    cmd = cmd + ' '\n    return")
-        self.assertEqual(score({"agent.py": good.replace(helper, rebinding_helper)})[0], 0)
+        with self.subTest(case="another value: the helper's fixed call is not guarded by it"):
+            self.assertLess(score({"agent.py": good.replace("execute(command)", "execute('git push')")})[0], 8)
 
 
 class McpMapNearMisses(unittest.TestCase):
@@ -452,7 +456,7 @@ class SymlinkNearMisses(unittest.TestCase):
     """Directory versus file links, in the tree and out of it: only what resolves inside the audited root is read."""
     SETTINGS = json.dumps({"permissions": {"ask": ["Bash(*)", "WebFetch", "Write", "Edit"],
                                            "deny": ["MultiEdit", "NotebookEdit", "WebSearch", "Read", "Grep", "Glob"]}})
-    POLICY = ("def gate(tool, args, tool_context):\n    if '.env' in str(args) or 'rm -rf' in str(args) or 'git push' in str(args):\n"
+    POLICY = ("from kit_guard import refuses\ndef gate(tool, args, tool_context):\n    if refuses(args):\n"
               "        return {'error': 'denied'}\n    return None\n")
     AGENT = ("import subprocess\nfrom google.adk.agents import Agent\nfrom {mod} import gate\n" + SHELL_TOOL +
              "agent = Agent(name='w', tools=[run], before_tool_callback=gate)\n")
@@ -499,6 +503,7 @@ class SymlinkNearMisses(unittest.TestCase):
 
     def test_guard_modules_through_file_and_directory_links(self):
         d = self.repo("plain_mod")
+        (d / "kit_guard.py").write_text(HELPER)
         (d / "policy.py").write_text(self.POLICY)
         (d / "agent.py").write_text(self.AGENT.format(mod="policy"))
         self.assertEqual(points(audit(d)), 8)                                        # positive
@@ -544,17 +549,18 @@ class IndependentReviewNearMisses(unittest.TestCase):
                     self.assertEqual(points(rep), 0, guards(rep))
 
     def test_redefining_a_trusted_name_earns_nothing(self):
-        cases = {"def any": ("def any(it):\n    return False\n", None),
-                 "def str": ("def str(x):\n    return ''\n", None),
-                 "import all as any": ("from builtins import all as any\n", None),
+        cases = {"def refuses": ("def refuses(x):\n    return False\n", None),
+                 "refuses reassigned": ("refuses = lambda x: False\n", None),
+                 "refuses imported again under the name": ("from other import refuses\n", None),
+                 "the helper imported again under another name": ("import kit_guard as kg\n", None),
                  "re replaced": ("class _R:\n    def search(self, *a):\n        return None\nre = _R()\n",
                                  "re.search(r'\\.env|rm -rf|git push', {x})"),
                  "builtins patched": ("import builtins\nbuiltins.any = lambda it: False\n", None),
-                 "a constant replaced through globals()": ("globals()['SECRET'] = re.compile('^$')\n", None)}
+                 "re patched": ("re.search = lambda *a: None\n", None),
+                 "a constant replaced through globals()": ("globals()['SECRET'] = re.compile('^$')\n", None),
+                 "the module replaced through sys.modules": ("import sys\nsys.modules['kit_guard'].refuses = len\n", None)}
         for kind in KINDS:
             for label, (module, cond) in cases.items():
-                if label == "def str" and not kind.x.startswith("str("):
-                    continue          # this kind's test does not call str()
                 with self.subTest(kind=kind.name, case=label):
                     pts, st = score({"agent.py": kind.source(module=module, cond=cond)})
                     self.assertEqual(pts, 0, st)

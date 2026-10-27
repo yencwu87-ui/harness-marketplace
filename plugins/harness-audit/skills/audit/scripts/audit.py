@@ -455,6 +455,9 @@ class Index:
                     if isinstance(target, ast.Call) and isinstance(target.func, ast.Name) and \
                             target.func.id in ("globals", "vars", "locals"):
                         self._tampered.add(m.path)
+                    elif isinstance(target, ast.Call) or (isinstance(target, ast.Name) and target.id in m.alias and
+                                                          m.alias[target.id].split(".")[0] in ("sys", "importlib", "builtins")):
+                        self._tampered.add("*")     # sys.modules[...].x = ..., import_module(...).x = ...: any module
                     elif isinstance(target, ast.Name):
                         k = self.resolve(m, target)
                         if k[0] == "module":
@@ -464,6 +467,49 @@ class Index:
                         elif k[0] == "external" and target.id in m.alias:
                             self._tampered.add(k[1].split(".")[0])
         return self._tampered
+
+    def cancel_undo(self) -> str:
+        """F5 (Strands): where some repo file sets cancel_tool to anything but a non-empty literal, deletes or
+        augments it, or calls setattr or delattr with a computed or 'cancel_tool' name; '' when nowhere."""
+        if getattr(self, "_cancel_undo", None) is None:
+            self._cancel_undo = ""
+            for rel in sorted(self.files):
+                m = self.module(self.files[rel])
+                for n in ast.walk(m.tree):
+                    bad = None
+                    if isinstance(n, ast.Attribute) and n.attr == "cancel_tool" and isinstance(n.ctx, (ast.Store, ast.Del)):
+                        a = next((x for x in ast.walk(m.tree) if isinstance(x, (ast.Assign, ast.AugAssign, ast.AnnAssign, ast.Delete))
+                                  and any(t is n for t in (x.targets if isinstance(x, (ast.Assign, ast.Delete)) else [x.target]))), None)
+                        ok = isinstance(a, ast.Assign) and isinstance(a.value, ast.Constant) and isinstance(a.value.value, str) \
+                            and a.value.value.strip()
+                        bad = None if ok else n
+                    elif isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in ("setattr", "delattr") \
+                            and len(n.args) > 1 and not (isinstance(n.args[1], ast.Constant) and n.args[1].value != "cancel_tool"):
+                        bad = n
+                    if bad is not None:
+                        self._cancel_undo = (f"{m.where(bad)} cancel_tool may be set to something other than a message "
+                                             "(or undone), so a cancel may not stand")
+                        return self._cancel_undo
+        return self._cancel_undo
+
+    def crewai_hooks(self, home) -> str:
+        """F5 (CrewAI): a before-tool-call hook registered anywhere but the top level of `home`, or ''."""
+        for rel in sorted(self.files):
+            m = self.module(self.files[rel])
+            top = set(map(id, m.tree.body)) if m is home else set()
+            for n in ast.walk(m.tree):
+                reg = isinstance(n, ast.Call) and _dotted(n.func).split(".")[-1] in ("register_before_tool_call_hook",
+                                                                                   "before_tool_call")
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    reg = any(_dotted(d.func if isinstance(d, ast.Call) else d).split(".")[-1] == "before_tool_call"
+                              for d in n.decorator_list)
+                    if reg:
+                        return f"{m.where(n)} another before-tool-call hook is registered here and may change the input"
+                    continue
+                if reg and not (m is home and any(id(st) in top and st.value is n for st in m.tree.body
+                                                  if isinstance(st, ast.Expr))):
+                    return f"{m.where(n)} another before-tool-call hook is registered here and may change the input"
+        return ""
 
     def module(self, path: Path) -> Module:
         if path not in self._mods:
@@ -556,85 +602,97 @@ def _taint(fn, tainted) -> set:
     return tainted
 
 
-# ------------------------------------------------------------------ canonical guard forms (1.4.4)
+# ------------------------------------------------------------------ canonical guard forms (1.4.5)
 # The only code refusals the audit credits. The checker below implements exactly this list, `audit.py
 # --canonical-forms` prints it, and the "Canonical guard forms" section of the audit's SKILL.md is this text (a test
-# keeps the two equal). Any other shape is UNRESOLVED with the reason: proving arbitrary Python control flow kept
-# losing to neighbouring shapes (Codex rounds 1 to 3), so the audit credits a short written list instead.
+# keeps them equal). Rounds 1 to 4 proved arbitrary Python control flow and each time the reviewer found neighbouring
+# shapes, so 1.4.5 credits code refusals only through the kit's own guard helper in one exact call shape, or a
+# framework's exact documented contract. Every other refusal is UNRESOLVED with the reason.
 CANONICAL_FORMS = (
-    ("F1 Position",
-     "The refusal is `if <predicate>: <refusal>`, a statement of the guard function's own body (its top level), "
-     "before the capability call. Not inside a loop, `with`, `try`, `match`, another `if`, a nested function or a "
-     "comprehension. In a hook, no earlier top-level statement may return, raise, await, or use the continuation "
-     "(`call_next`, even through another name) without refusing. The guard function has no decorator except the "
-     "framework's own (or staticmethod, classmethod), and no file in the repo changes its module at run time "
-     "(globals(), vars(), exec, setattr or an attribute store on its functions, classes or constants)."),
-    ("F2 Tool scope (hooks only)",
-     "A hook may limit a refusal to named tools: `if <tool name> == '<literal>' and (<predicate>):`, the same with "
-     "`in (<literals>)`, or a top-level `if <tool name> == '<literal>':` whose own body holds the refusing `if`. "
-     "The tool name is exactly the framework's own field: `tool.name` (Google ADK), `ctx.tool_name` (CrewAI), "
-     "`event.tool_use['name']` (Strands), `context.function.name` (Microsoft Agent Framework), "
-     "`input_data['tool_name']` or `.get('tool_name')` (Claude Agent SDK)."),
-    ("F3 Refusal",
-     "Inline tool and Microsoft Agent Framework middleware: `return ...` or `raise ...`. CrewAI hook: `return False`. "
-     "Google ADK before_tool_callback: `return {...}`. Strands: `event.cancel_tool = '<message>'`, and nothing else in "
-     "the hook sets cancel_tool to anything but a message. Claude Agent SDK PreToolUse hook: a return of a dict with "
-     "`permissionDecision: 'deny'` (nested in hookSpecificOutput), or of a call to a repo function whose every return "
-     "is one, with no repeated key and no `**` unpacking in those dicts. A body that uses the hook's continuation "
-     "(`call_next`) lets the call through."),
-    ("F4 Predicate",
-     "One or more tests joined only by `or`, each one of: `'<literal>' in V`; `'<literal>' not in V`; "
-     "`V == '<literal>'`; `V.startswith(<literal or tuple of literals>)`; `re.search|re.match|re.fullmatch(r'<literal>', "
-     "V[, re.I|re.M|re.S])`; `NAME.search|match|fullmatch(V)` where NAME is a module constant assigned once to "
-     "`re.compile(r'<literal>'[, flags])`; `any(x in V for x in <tuple of literals>)`; `kit_guard.refuses(V)`, the "
-     "kit's shipped helper, only while its file's sha256 equals the pinned KIT_GUARD_SHA256. A literal may be a module "
-     "constant assigned once. Any `and` (other than F2), `not`, other call, or other operand is not canonical. "
-     "`any`, `str`, `repr`, `re` and `json` must be the real ones: not defined, assigned or imported under that "
-     "name in the module, and `builtins`, `re`, `json` and `kit_guard` not changed at run time anywhere in the repo."),
-    ("F5 Value in a tool",
-     "V is a parameter of the tool function that is never rebound, reassigned, augmented, deleted or changed in place "
-     "anywhere in the function, and the capability call receives that same name as is (a bare argument, not sliced, field-selected, "
-     "wrapped or converted). A helper call counts when it receives the name as is and its own parameter is in turn "
-     "passed as is to the capability."),
-    ("F6 Value in a hook",
-     "V is the whole tool input as text: `str(...)`, `json.dumps(...)` or `repr(...)` of exactly the framework's "
-     "input: `args` (Google ADK, the second parameter), `ctx.tool_input` (CrewAI), `event.tool_use` or "
-     "`event.tool_use['input']` (Strands), `context.arguments` (Microsoft Agent Framework), `input_data` or "
-     "`input_data['tool_input']` (Claude Agent SDK, the first parameter), `data.context.tool_arguments` (OpenAI tool "
-     "input guardrail); `kit_guard.refuses` may take that input without `str`. Any other object is not the input. "
-     "In a Claude Agent SDK "
-     "PreToolUse hook V may instead be one field of `tool_input` that a built-in tool executes: `command` (covers "
-     "Bash only) or `file_path` (covers Read, Write, Edit and MultiEdit only). A local name assigned once, at the top "
-     "level of the hook, to one of these counts as it. The parameter it is read from must never be rebound or changed "
-     "in place (`ctx.tool_input = {}`, `args.clear()`)."),
-    ("F7 Coverage",
-     "A class is covered when, for at least one of its keywords, the predicate is true on every probe of the "
-     "keyword K: `K`, `K x`, `cat K`, `x;K`, `echo ok; K --flag`, `echo ok` then K on the next line, K in single "
-     "quotes, double quotes, backticks and parentheses, `a/K/b` and `a/K.local`. Secrets: .env, .pem, .key, .ssh, "
-     ".aws, id_rsa, credentials. Destructive: git push, reset --hard, rm -rf. A regex anchored with ^ or $, run "
-     "with re.match or re.fullmatch, or otherwise missing one probe does not cover the keyword. When V is the whole "
-     "input as text, each probe is first put through the same str(), repr() or json.dumps() (as the value of a dict), "
-     "which escapes a newline. `not in` and `==` tests are allowed in a predicate but never count toward coverage. "
-     "kit_guard.refuses covers both classes."),
+    ("F1 The kit helper",
+     "Code refusals earn credit only through the kit's guard helper `kit/shared/kit_guard.py`, imported at module "
+     "level exactly as `from kit_guard import refuses`, and only while that file's sha256 equals the pinned "
+     "KIT_GUARD_SHA256. In the module, `refuses` is never rebound, shadowed (a parameter, local, def, class, loop or "
+     "except name), reassigned, deleted, declared global or nonlocal, or imported again; `kit_guard` is imported "
+     "nowhere else in the module (`import kit_guard`, an alias). No repo file changes the module, kit_guard, "
+     "`builtins`, `re`, `shlex`, `fnmatch` or `urllib` at run time (globals(), setattr, an attribute store, "
+     "sys.modules)."),
+    ("F2 Tool refusal",
+     "The tool function's first statements (after its docstring) are `if refuses(P): return <literal>` or "
+     "`if refuses(P): raise <built-in exception>(<literals>)`, with no else. P is the tool function's own parameter, "
+     "and every other use of P in the function is the operation-bearing argument of a capability call: the command "
+     "of a shell call (`subprocess.run(P, ...)`, `args=P`, `os.system(P)`), the file of `open(P, ...)`, the URL of a "
+     "fetch (`requests.get(P)`, `urlopen(P)`, `url=P`). P is never aliased, reassigned, changed, sliced, "
+     "field-selected, wrapped (`Path(P)`, `['sh', '-c', P]`), passed to any other function, or used as another "
+     "argument (stdin, cwd, env). The tool has no decorator except the framework's own."),
+    ("F3 Hook contracts",
+     "A framework hook earns credit only when its first statements are `if refuses(INPUT): <refusal>` in the "
+     "framework's documented contract, where INPUT is exactly the framework's tool input and <refusal> is its "
+     "documented refusal. Google ADK before_tool_callback(tool, args, tool_context): INPUT `args`; refusal "
+     "`return {<literal dict>}` (https://google.github.io/adk-docs/callbacks/types-of-callbacks/). CrewAI before-tool-"
+     "call hook(ctx): INPUT `ctx.tool_input`; refusal `return False` (https://docs.crewai.com/en/learn/tool-hooks). "
+     "Strands BeforeToolCallEvent callback(event): INPUT `event.tool_use` or `event.tool_use['input']`; refusal "
+     "`event.cancel_tool = '<non-empty literal>'` on that same event parameter "
+     "(https://strandsagents.com/latest/documentation/docs/user-guide/concepts/agents/hooks/). Microsoft Agent "
+     "Framework function middleware(context, call_next): INPUT `context.arguments`; refusal `return`, `raise "
+     "<built-in exception>(<literals>)`, or `context.result = <literal>` then `return` "
+     "(https://learn.microsoft.com/en-us/agent-framework/user-guide/agents/agent-middleware). Claude Agent SDK "
+     "PreToolUse hook(input_data, tool_use_id, context): INPUT `input_data['tool_input']` (or `.get('tool_input')`), "
+     "or inside an F4 branch that names only tools executing it, one field: `['command']` (Bash) or `['file_path']` "
+     "(Read, Write, Edit, MultiEdit); "
+     "refusal: return, directly, the dict literal `{'hookSpecificOutput': {'hookEventName': 'PreToolUse', "
+     "'permissionDecision': 'deny'[, 'permissionDecisionReason': '<literal>']}}` and nothing else "
+     "(https://code.claude.com/docs/en/agent-sdk/hooks). Claude Agent SDK can_use_tool(tool_name, input_data, "
+     "context): INPUT `input_data`; refusal `return PermissionResultDeny(message='<literal>')` "
+     "(https://code.claude.com/docs/en/agent-sdk/permissions). OpenAI Agents SDK tool input guardrail(data): INPUT "
+     "`data.context.tool_arguments`; refusal `return ToolGuardrailFunctionOutput.reject_content(<literals>)` or "
+     "`.raise_exception(<literals>)` (https://openai.github.io/openai-agents-python/guardrails/). A refusal returned "
+     "through a helper function, nested under other keys, or set on another object is not the contract."),
+    ("F4 Tool scope (hooks only)",
+     "A hook may limit its refusal to named tools with a top-level `if NAME == '<literal>':` (or `NAME in "
+     "(<literals>)`) whose first statement is the F3 refusal. NAME is exactly the framework's field: `tool.name` "
+     "(ADK), `ctx.tool_name` (CrewAI), `event.tool_use['name']` (Strands), `context.function.name` (Microsoft Agent "
+     "Framework), `input_data['tool_name']` or `.get('tool_name')` (Claude Agent SDK hook), `tool_name` "
+     "(can_use_tool). Several refusals and scoped branches may follow each other at the top; a scoped branch with "
+     "anything after its refusal ends that run, and a refusal after any other statement earns nothing."),
+    ("F5 The input stays as checked",
+     "In the credited hook, outside the refusals and tool-name tests, and in every other hook, middleware or "
+     "callback on the same agent and event, the hook's input parameters appear only as the sole argument of "
+     "`copy.deepcopy`, `json.dumps`, `str` or `repr`, as a read (`.attr`, `['key']`, `.get('key')`) that is compared "
+     "or tested, or (Microsoft Agent Framework) as the argument of the continuation call. They are never aliased, "
+     "changed, or passed elsewhere. A Claude Agent SDK hook never returns `updatedInput` (every return is None, a dict "
+     "literal with literal keys and no `updatedInput`, or a call of a module function whose returns are), and "
+     "`can_use_tool`, when set, never passes `updated_input`. Strands: nothing in the repo sets `cancel_tool` to "
+     "anything but a non-empty literal, deletes or augments it, or calls setattr or delattr with a computed name."),
+    ("F6 Classes",
+     "A credited refusal covers the two classes the helper defines, secret and destructive (kit_guard.py's docstring "
+     "lists their members), for the calls it binds: in a tool, the capability calls whose operation argument is P "
+     "(a delete such as shutil.rmtree(P) or Path(P).unlink() binds nothing); in a hook, the tools the hook and its "
+     "scope apply to. There is no keyword rule: a hand-written test covers nothing. The helper reads text: it does "
+     "not limit where a file-write tool writes."),
+    ("F7 Everything else",
+     "Any other code-level refusal, including hand-written predicates (`'.env' in command`, a regex, your own "
+     "is_dangerous()), a helper refusal that is not first, or a refusal through another shape, is UNRESOLVED with "
+     "the reason \"hand-written refusal: use the kit guard helper to earn credit\" or the rule it breaks. It earns "
+     "no points; it does not count as missing either."),
 )
 KIT_GUARD_SHA256 = "263800b27043abba4be398b413af468308640f0be58f0186f247549f5119fc7f"   # kit/shared/kit_guard.py
-CLASS_KEYWORDS = {"secret": (".env", ".pem", ".key", ".ssh", ".aws", "id_rsa", "credentials"),
-                  "destructive": ("git push", "reset --hard", "rm -rf")}
-PROBES = ("{k}", "{k} x", "cat {k}", "x;{k}", "echo ok; {k} --flag", "echo ok\n{k} y", "'{k}'", '"{k}"', "`{k}`",
-          "({k})", "a/{k}/b", "a/{k}.local")
-RE_FUNCS = {"re.search": "search", "re.match": "match", "re.fullmatch": "fullmatch"}
-RE_FLAGS = {"re.I": re.I, "re.IGNORECASE": re.I, "re.M": re.M, "re.MULTILINE": re.M, "re.S": re.S, "re.DOTALL": re.S}
-WHOLE_INPUT_KEYS = {"tool_input", "tool_use", "arguments", "args", "input", "tool_arguments"}
+KIT_GUARD_MODULE, KIT_GUARD_NAME = "kit_guard", "refuses"
+KIT_GUARD_DEPS = ("builtins", "re", "shlex", "fnmatch", "urllib")
 SDK_FIELD_TOOLS = {"command": {"Bash"}, "file_path": {"Read", "Write", "Edit", "MultiEdit"}}
-# Per framework hook: where the whole tool input is (F6) and the tool's name (F2), as (parameter index, attribute or key
-# path), and which parameter is the continuation (F1, F3).
+HAND_WRITTEN = "hand-written refusal: use the kit guard helper to earn credit"
+PURE_WRAPS = {"copy.deepcopy", "json.dumps", "str", "repr"}
+# Per framework hook: where the tool input is and the tool's name (parameter index, attribute or key path), the
+# continuation parameter, the refusal kind, and the parameters F5 restricts.
 HOOK_SPECS = {
-    "adk-hook": {"input": [(1, ())], "name": [(0, ("name",))]},
-    "crewai-hook": {"input": [(0, ("tool_input",))], "name": [(0, ("tool_name",))]},
-    "strands-hook": {"input": [(0, ("tool_use",)), (0, ("tool_use", "input"))], "name": [(0, ("tool_use", "name"))]},
-    "maf-hook": {"input": [(0, ("arguments",))], "name": [(0, ("function", "name"))], "next": 1},
-    "sdk-hook": {"input": [(0, ()), (0, ("tool_input",))], "name": [(0, ("tool_name",))]},
-    "guardrail-hook": {"input": [(0, ("context", "tool_arguments"))], "name": []},
+    "adk-hook": {"input": [(1, ())], "name": [(0, ("name",))], "refusal": "dict"},
+    "crewai-hook": {"input": [(0, ("tool_input",))], "name": [(0, ("tool_name",))], "refusal": "false"},
+    "strands-hook": {"input": [(0, ("tool_use",)), (0, ("tool_use", "input"))], "name": [(0, ("tool_use", "name"))],
+                     "refusal": "cancel"},
+    "maf-hook": {"input": [(0, ("arguments",))], "name": [(0, ("function", "name"))], "next": 1, "refusal": "maf"},
+    "sdk-hook": {"input": [(0, ("tool_input",))], "name": [(0, ("tool_name",))], "refusal": "sdk-deny"},
+    "sdk-permission": {"input": [(1, ())], "name": [(0, ())], "refusal": "sdk-permission"},
+    "guardrail-hook": {"input": [(0, ("context", "tool_arguments"))], "name": [], "refusal": "guardrail"},
 }
 NESTED = {ast.For: "a for loop", ast.AsyncFor: "a for loop", ast.While: "a while loop", ast.With: "a with block",
           ast.AsyncWith: "a with block", ast.Try: "a try block", ast.FunctionDef: "a nested function",
@@ -642,19 +700,13 @@ NESTED = {ast.For: "a for loop", ast.AsyncFor: "a for loop", ast.While: "a while
 for _name, _what in (("TryStar", "a try block"), ("Match", "a match statement")):
     if hasattr(ast, _name):
         NESTED[getattr(ast, _name)] = _what
+BUILTIN_EXCEPTIONS = {n for n in dir(builtins) if isinstance(getattr(builtins, n), type)
+                      and issubclass(getattr(builtins, n), BaseException)}
 
 
 def canonical_forms_text() -> str:
     """The canonical forms as Markdown: what `--canonical-forms` prints and SKILL.md contains."""
     return "\n".join(f"- **{name}.** {text}" for name, text in CANONICAL_FORMS)
-
-
-def probes(keyword):
-    return [p.replace("{k}", keyword) for p in PROBES]
-
-
-def _is_name_expr(mod, e) -> bool:
-    return bool(re.search(r"(tool_name|\.name|\[[\"']name[\"']\])\s*$", mod.src(e)))
 
 
 def _binds(tree, name, skip=()):
@@ -714,63 +766,59 @@ def _lits(idx, mod, e):
     return (v,) if v is not None else None
 
 
-def _flags(mod, nodes):
-    """re flags written as re.I | re.M ...; None when anything else is passed."""
-    out = 0
-    for n in nodes:
-        parts, todo = [], [n]
-        while todo:
-            x = todo.pop()
-            if isinstance(x, ast.BinOp) and isinstance(x.op, ast.BitOr):
-                todo += [x.left, x.right]
-            else:
-                parts.append(x)
-        for p in parts:
-            f = RE_FLAGS.get(mod.full(p))
-            if f is None:
-                return None
-            out |= f
-    return out
+def _literal(node) -> bool:
+    """A Python literal (a constant, or a dict, list, tuple or set of them)."""
+    try:
+        ast.literal_eval(node)
+        return True
+    except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
+        return False
 
 
-def _compiled(mod, node):
-    """(pattern, flags) of a module constant assigned once to re.compile(<literal>[, flags]); else None."""
-    if not (isinstance(node, ast.Name) and node.id in mod.assigns and _assigned_once(mod.tree, node.id)):
-        return None
-    v = mod.assigns[node.id]
-    if not (isinstance(v, ast.Call) and mod.full(v.func) == "re.compile" and v.args and len(v.args) <= 2
-            and all(k.arg == "flags" for k in v.keywords)):
-        return None
-    pat = v.args[0].value if isinstance(v.args[0], ast.Constant) and isinstance(v.args[0].value, str) else None
-    flags = _flags(mod, v.args[1:] + [k.value for k in v.keywords])
-    return None if pat is None or flags is None else (pat, flags)
+def _helper(idx, mod):
+    """(name, '') when `mod` binds the pinned kit helper by F1, else (None, why)."""
+    if getattr(mod, "_helper", None) is None:
+        mod._helper = _helper_check(idx, mod)
+    return mod._helper
+
+
+def _helper_check(idx, mod):
+    tops = [n for n in mod.tree.body if isinstance(n, ast.ImportFrom) and n.module == KIT_GUARD_MODULE and not n.level]
+    others = [n for n in ast.walk(mod.tree) if isinstance(n, (ast.Import, ast.ImportFrom)) and n not in tops and (
+        KIT_GUARD_MODULE in (getattr(n, "module", None) or "").split(".") or any(KIT_GUARD_MODULE in a.name.split(".") for a in n.names))]
+    if not tops:
+        return None, "the module does not import the kit helper as `from kit_guard import refuses`"
+    if len(tops) > 1 or others:
+        n = (tops[1:] + others)[0]
+        return None, f"{mod.where(n)} kit_guard is imported more than once or under another name"
+    imp = tops[0]
+    if [(a.name, a.asname) for a in imp.names] != [(KIT_GUARD_NAME, None)]:
+        return None, f"{mod.where(imp)} the import is not exactly `from kit_guard import refuses`"
+    binds = _binds(mod.tree, KIT_GUARD_NAME)
+    if binds != [imp.names[0]]:
+        b = next(b for b in binds if b is not imp.names[0])
+        return None, f"`{KIT_GUARD_NAME}` is rebound or shadowed at line {getattr(b, 'lineno', imp.lineno)}"
+    target = idx.find(KIT_GUARD_MODULE, mod)
+    if target is None or target.path.name != "kit_guard.py":
+        return None, "kit_guard.py is not a file in this repo beside the module or at its root"
+    data = idx.r.data(target.path)
+    if data is None or hashlib.sha256(data).hexdigest() != KIT_GUARD_SHA256:
+        return None, f"{target.rel} is not the shipped kit helper (its sha256 differs from the pinned one)"
+    tampered = idx.tampered()
+    hit = next((t for t in (target.path, mod.path, "*") + KIT_GUARD_DEPS if t in tampered), None)
+    if hit is not None:
+        what = {target.path: target.rel, mod.path: mod.rel, "*": "a module reached through sys.modules or a call"}
+        return None, f"{what.get(hit, f'the `{hit}` module')} is changed at run time somewhere in the repo"
+    return KIT_GUARD_NAME, ""
 
 
 def _is_kit_guard(idx, mod, func) -> bool:
-    """kit_guard.refuses from the kit's shipped kit_guard.py, unmodified (sha256 pinned)."""
-    kind = idx.resolve(mod, func)
-    if kind[0] != "def" or kind[2].name != "refuses" or kind[1].path.name != "kit_guard.py":
-        return False
-    data = idx.r.data(kind[1].path)
-    return data is not None and hashlib.sha256(data).hexdigest() == KIT_GUARD_SHA256 and kind[1].path not in idx.tampered()
+    """A call of the pinned helper bound by F1 (the audit does not walk it as a capability)."""
+    return isinstance(func, ast.Name) and _helper(idx, mod)[0] == func.id
 
 
-TRUSTED = {"any": None, "str": None, "repr": None, "re": "re", "json": "json"}
 FRAMEWORK_HEADS = {"claude_agent_sdk", "agent_framework", "google", "langgraph", "langchain", "langchain_core", "agents",
                    "crewai", "strands"}
-
-
-def _untrusted(idx, mod, fn, name):
-    """Why a name a canonical test relies on (`any`, `str`, `repr`, `re`, `json`) may not be the real one, or ''."""
-    expect = TRUSTED[name]
-    for b in _binds(mod.tree, name):
-        if not (expect and isinstance(b, ast.alias) and b.name == expect and b.asname in (None, name)):
-            return f"`{name}` is rebound at line {getattr(b, 'lineno', '?')}"
-    if expect is None and name in mod.alias:
-        return f"`{name}` is imported"
-    if (expect or "builtins") in idx.tampered():
-        return f"the `{expect or 'builtins'}` module is changed at run time somewhere in the repo"
-    return ""
 
 
 def _decorated(idx, mod, fn):
@@ -784,74 +832,8 @@ def _decorated(idx, mod, fn):
     return ""
 
 
-def _atom(idx, mod, e):
-    """(kind, payload, V) for one canonical test (F4), or (None, why, None)."""
-    if isinstance(e, ast.Compare) and len(e.ops) == 1:
-        op, left, right = e.ops[0], e.left, e.comparators[0]
-        if isinstance(op, (ast.In, ast.NotIn)) and _lit(idx, mod, left) is not None:
-            return ("in" if isinstance(op, ast.In) else "notin", _lit(idx, mod, left), right)
-        if isinstance(op, ast.Eq):
-            for a, b in ((left, right), (right, left)):
-                if _lit(idx, mod, b) is not None:
-                    return ("eq", _lit(idx, mod, b), a)
-    if isinstance(e, ast.Call):
-        f, args = e.func, e.args
-        if isinstance(f, ast.Attribute) and f.attr == "startswith" and len(args) == 1 and not e.keywords \
-                and _lits(idx, mod, args[0]):
-            return ("startswith", _lits(idx, mod, args[0]), f.value)
-        if mod.full(f) in RE_FUNCS and 2 <= len(args) <= 3 and all(k.arg == "flags" for k in e.keywords):
-            pat, flags = _lit(idx, mod, args[0]), _flags(mod, args[2:] + [k.value for k in e.keywords])
-            if pat is not None and flags is not None:
-                return ("re", (RE_FUNCS[mod.full(f)], pat, flags), args[1])
-        if isinstance(f, ast.Attribute) and f.attr in ("search", "match", "fullmatch") and len(args) == 1 \
-                and not e.keywords and _compiled(mod, f.value):
-            return ("re", (f.attr, *_compiled(mod, f.value)), args[0])
-        if isinstance(f, ast.Name) and f.id == "any" and len(args) == 1 and isinstance(args[0], ast.GeneratorExp) \
-                and len(args[0].generators) == 1:
-            gen, elt = args[0].generators[0], args[0].elt
-            if not gen.ifs and not gen.is_async and isinstance(gen.target, ast.Name) and isinstance(elt, ast.Compare) \
-                    and len(elt.ops) == 1 and isinstance(elt.ops[0], ast.In) and isinstance(elt.left, ast.Name) \
-                    and elt.left.id == gen.target.id and _lits(idx, mod, gen.iter):
-                return ("anyin", _lits(idx, mod, gen.iter), elt.comparators[0])
-        if len(args) == 1 and not e.keywords and _is_kit_guard(idx, mod, f):
-            return ("kit", None, args[0])
-    return None, f"`{mod.src(e)[:60]}` is not a canonical test", None
-
-
-def _holds(atom, s) -> bool:
-    """Whether a test refuses probe s. `not in` and `==` never count toward coverage (F7)."""
-    kind, p = atom
-    if kind == "in":
-        return p in s
-    if kind == "startswith":
-        return s.startswith(p)
-    if kind == "anyin":
-        return any(x in s for x in p)
-    if kind == "re":
-        how, pat, flags = p
-        try:
-            return bool(getattr(re, how)(pat, s, flags))
-        except (re.error, RecursionError):
-            return False
-    return False
-
-
-SERIALISE = {"str": lambda p: str({"command": p}), "repr": lambda p: repr({"command": p}),
-             "json.dumps": lambda p: json.dumps({"command": p}), "": lambda p: p}
-
-
-def _covered(atoms, how="") -> set:
-    """The classes the tests cover (F7). For a whole tool input, each probe is first put through the same str(),
-    repr() or json.dumps() the guard applies to the input (which escapes a newline, for example)."""
-    if any(a[0] == "kit" for a in atoms):
-        return {"secret", "destructive"}
-    wrap = SERIALISE.get(how, SERIALISE["str"])
-    return {c for c, kws in CLASS_KEYWORDS.items()
-            if any(all(any(_holds(a, wrap(s)) for a in atoms) for s in probes(k)) for k in kws)}
-
-
 def _chain(node):
-    """(root name, [keys]) for P, P.attr, P['k'], P.get('k'[, default]) chains; None otherwise."""
+    """(root name, [keys]) for P, P.attr, P['k'], P.get('k'[, literal]) chains; None otherwise."""
     keys = []
     while True:
         if isinstance(node, ast.Attribute):
@@ -860,7 +842,7 @@ def _chain(node):
             keys.append(node.slice.value); node = node.value
         elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "get" \
                 and 1 <= len(node.args) <= 2 and not node.keywords and isinstance(node.args[0], ast.Constant) \
-                and isinstance(node.args[0].value, str):
+                and isinstance(node.args[0].value, str) and all(_literal(a) for a in node.args[1:]):
             keys.append(node.args[0].value); node = node.func.value
         elif isinstance(node, ast.Name):
             return node.id, keys[::-1]
@@ -873,9 +855,7 @@ MUTATORS = {"update", "clear", "pop", "popitem", "setdefault", "append", "extend
 
 
 def _rebound(fn, name, path=()):
-    """Where fn rebinds, deletes or declares global `name`, or changes in place the part of it at `path`
-    (`ctx.tool_input = {}` or `ctx.tool_input['command'] = ''` for path ('tool_input',), `args.clear()`), or None.
-    A store elsewhere on the object (`event.cancel_tool = ...`, the refusal itself) is not a change of the input."""
+    """Where fn rebinds, deletes or declares global `name`, or changes in place the part of it at `path`, or None."""
     def keys(node):
         out = []
         while isinstance(node, (ast.Attribute, ast.Subscript)):
@@ -903,6 +883,51 @@ def _rebound(fn, name, path=()):
     return None
 
 
+def _parents(fn) -> dict:
+    out = {}
+    for p in ast.walk(fn):
+        for c in ast.iter_child_nodes(p):
+            out[c] = p
+    return out
+
+
+def _chain_top(node, parents):
+    """The largest P.attr / P['k'] / P.get('k') expression that starts at the Name `node`."""
+    top = node
+    while True:
+        p = parents.get(top)
+        if isinstance(p, (ast.Attribute, ast.Subscript)) and p.value is top and _chain(p) is not None:
+            top = p
+        elif isinstance(p, ast.Attribute) and p.attr == "get" and isinstance(parents.get(p), ast.Call) \
+                and parents[p].func is p and _chain(parents[p]) is not None:
+            top = parents[p]
+        else:
+            return top
+
+
+def _op_arg(call, cat, full):
+    """The argument that carries the operation (F2): the command of a shell call, the file of open(), the URL of a
+    fetch; None for anything else (a path receiver such as Path(p).read_text(), a copy, a delete) or when `*`/`**`
+    unpacking could supply it."""
+    if any(isinstance(a, ast.Starred) for a in call.args) or any(k.arg is None for k in call.keywords):
+        return None
+    name = full.split(".")[-1] if full else (call.func.attr if isinstance(call.func, ast.Attribute) else "")
+    if cat == "shell":
+        pos, kws = 0, ("args",) if full.startswith(("subprocess.", "asyncio.")) else ("command", "cmd")
+    elif cat in ("read", "write", "open") and full in ("open", "io.open", "builtins.open", "codecs.open", "os.open"):
+        pos, kws = 0, {"open": ("file",), "io.open": ("file",), "builtins.open": ("file",),
+                       "codecs.open": ("filename",), "os.open": ("path",)}[full]
+    elif cat == "fetch" and name in ("get", "post", "put", "patch", "delete", "head", "options", "request", "stream",
+                                     "urlopen", "urlretrieve", "Request"):
+        pos, kws = (1 if name in ("request", "stream") else 0), ("url",)
+    else:
+        return None
+    given = [k.value for k in call.keywords if k.arg in kws]
+    if given:
+        return given[0] if len(call.args) <= pos else None
+    return call.args[pos] if len(call.args) > pos else None
+
+
 class _Canon:
     """Reads one guard function (a tool or a hook) against CANONICAL_FORMS."""
 
@@ -910,227 +935,319 @@ class _Canon:
         self.idx, self.mod, self.fn, self.kinds, self.label, self.role = idx, mod, fn, kinds, label, role
         self.params = [a.arg for a in fn.args.posonlyargs + fn.args.args + fn.args.kwonlyargs if a.arg not in ("self", "cls")]
         self.inputs = _taint(fn, set(self.params) - (TAINT_SKIP if role == "tool" else set()))
-        spec = HOOK_SPECS.get(role, {})
+        self.spec = HOOK_SPECS.get(role, {})
         at = lambda i: self.params[i] if i < len(self.params) else None
-        self.input_paths = {(at(i), tuple(k)) for i, k in spec.get("input", [])}
-        self.name_paths = {(at(i), tuple(k)) for i, k in spec.get("name", [])}
-        self.next = at(spec["next"]) if "next" in spec else None
+        self.input_paths = {(at(i), tuple(k)) for i, k in self.spec.get("input", [])}
+        self.name_paths = {(at(i), tuple(k)) for i, k in self.spec.get("name", [])}
+        self.restricted = {p for p, _ in self.input_paths | self.name_paths if p}
+        self.next = at(self.spec["next"]) if "next" in self.spec else None
+        self.helper, self.helper_why = _helper(idx, mod)
         self.blocked = _decorated(idx, mod, fn)
         if not self.blocked and mod.path in idx.tampered():
             self.blocked = f"{mod.rel} is changed at run time (globals(), setattr or an attribute store on its names)"
-        self.once = {}
-        if role != "tool":       # F6: a local assigned once at the top level of a hook stands for its value
-            for st in fn.body:
-                if isinstance(st, ast.Assign) and len(st.targets) == 1 and isinstance(st.targets[0], ast.Name) \
-                        and _assigned_once(fn, st.targets[0].id):
-                    self.once[st.targets[0].id] = st.value
+        self.parents = _parents(fn)
+        self.allowed = set()            # Name nodes of restricted parameters used by credited statements
 
-    def refusing(self, node) -> bool:
-        return isinstance(node, ast.If) and _uses(node.test, self.inputs) and self.refusal_body(node.body)
+    # -- shapes
+    def body(self):
+        b = self.fn.body
+        return b[1:] if b and isinstance(b[0], ast.Expr) and isinstance(b[0].value, ast.Constant) \
+            and isinstance(b[0].value.value, str) else b
 
-    def refusal_body(self, body, loose=False) -> bool:
-        params = set(self.params)
-        if any((isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in params) or
-               (self.next and isinstance(n, ast.Name) and n.id == self.next) for st in body for n in ast.walk(st)):
-            return False          # calls or passes on the continuation (call_next): lets the call through
-        if "deny" in self.kinds:
-            return any(isinstance(st, ast.Return) and self.denies(st.value) for st in body) or \
-                (loose and any(isinstance(s, (ast.Continue, ast.Break, ast.Return)) for s in body))
-        return _is_refusal_body(body, self.kinds) or (loose and any(isinstance(s, (ast.Continue, ast.Break)) for s in body))
+    def helper_call(self, test):
+        """The argument of `refuses(<one argument>)`, or None."""
+        if isinstance(test, ast.Call) and isinstance(test.func, ast.Name) and test.func.id == KIT_GUARD_NAME \
+                and len(test.args) == 1 and not test.keywords and not isinstance(test.args[0], ast.Starred):
+            return test.args[0]
+        return None
 
-    def denies(self, v, depth=0) -> bool:
-        """F3 (Agent SDK): the value is a dict with permissionDecision 'deny', or a call of a repo function whose
-        every return is one."""
-        if v is None or depth > 3:
+    def refusal(self, body) -> bool:
+        """F2/F3: the body is exactly the documented refusal."""
+        kind = "early" if self.role == "tool" else self.spec.get("refusal")
+        if kind in ("early", "maf"):
+            if kind == "maf" and len(body) == 2 and isinstance(body[0], ast.Assign) and len(body[0].targets) == 1:
+                t = body[0].targets[0]
+                if isinstance(t, ast.Attribute) and t.attr == "result" and isinstance(t.value, ast.Name) and \
+                        t.value.id == self.params[0] and _literal(body[0].value) and isinstance(body[1], ast.Return) \
+                        and (body[1].value is None or (isinstance(body[1].value, ast.Constant) and body[1].value.value is None)):
+                    self.allowed.add(t.value)
+                    return True
+            if len(body) != 1:
+                return False
+            st = body[0]
+            if isinstance(st, ast.Return):
+                return st.value is None or _literal(st.value)
+            if isinstance(st, ast.Raise) and st.cause is None:
+                e = st.exc
+                call = e if isinstance(e, ast.Call) else None
+                name = call.func if call else e
+                return isinstance(name, ast.Name) and name.id in BUILTIN_EXCEPTIONS and not _binds(self.mod.tree, name.id) \
+                    and (call is None or (all(_literal(a) for a in call.args) and all(k.arg and _literal(k.value) for k in call.keywords)))
             return False
-        if isinstance(v, ast.Dict):
-            consts = [k.value for k in v.keys if isinstance(k, ast.Constant)]
-            if None in v.keys or len(consts) != len(set(consts)) or len(consts) != len(v.keys):
-                return False      # `**other` or a repeated key: Python keeps the last value
-            for k, x in zip(v.keys, v.values):
-                if isinstance(k, ast.Constant) and k.value == "permissionDecision":
-                    return isinstance(x, ast.Constant) and x.value == "deny"
-                if isinstance(x, ast.Dict) and self.denies(x, depth + 1):
+        if len(body) != 1:
+            if kind == "cancel" and len(body) == 2 and isinstance(body[1], ast.Return) and body[1].value is None:
+                body = body[:1]
+            else:
+                return False
+        st = body[0]
+        if kind == "dict":
+            return isinstance(st, ast.Return) and isinstance(st.value, ast.Dict) and bool(st.value.keys) and \
+                None not in st.value.keys and _literal(st.value) and \
+                len({k.value for k in st.value.keys}) == len(st.value.keys)
+        if kind == "false":
+            return isinstance(st, ast.Return) and isinstance(st.value, ast.Constant) and st.value.value is False
+        if kind == "cancel":
+            if isinstance(st, ast.Assign) and len(st.targets) == 1 and isinstance(st.targets[0], ast.Attribute):
+                t = st.targets[0]
+                if t.attr == "cancel_tool" and isinstance(t.value, ast.Name) and self.params and t.value.id == self.params[0] \
+                        and isinstance(st.value, ast.Constant) and isinstance(st.value.value, str) and st.value.value.strip():
+                    self.allowed.add(t.value)
                     return True
             return False
-        if isinstance(v, ast.Call):
-            kind = self.idx.resolve(self.mod, v.func)
-            if kind[0] == "def":
-                rets = [n.value for n in ast.walk(kind[2]) if isinstance(n, ast.Return)]
-                return bool(rets) and all(self.denies(r, depth + 1) for r in rets)
+        if kind == "sdk-deny":
+            return isinstance(st, ast.Return) and _sdk_deny_literal(st.value)
+        if kind == "sdk-permission":
+            v = st.value if isinstance(st, ast.Return) else None
+            return isinstance(v, ast.Call) and self.mod.full(v.func) == "claude_agent_sdk.PermissionResultDeny" and \
+                not v.args and all(k.arg in ("message", "interrupt") and _literal(k.value) for k in v.keywords)
+        if kind == "guardrail":
+            v = st.value if isinstance(st, ast.Return) else None
+            return isinstance(v, ast.Call) and self.mod.full(v.func) in (
+                "agents.ToolGuardrailFunctionOutput.reject_content", "agents.ToolGuardrailFunctionOutput.raise_exception") \
+                and all(_literal(a) for a in v.args) and all(k.arg and _literal(k.value) for k in v.keywords)
         return False
 
-    def contains(self, node) -> bool:
-        return any(isinstance(n, ast.If) and _uses(n.test, self.inputs) and self.refusal_body(n.body, loose=True)
-                   for n in ast.walk(node))
-
-    def noncanonical(self, node, why, tools=None):
-        where = self.mod.where(node)
-        return (node.end_lineno or node.lineno, Guard("refusal", where, self.label, tools=tools, partial={
-            c: f"{where} {self.label}: {why} (not a canonical guard form, see --canonical-forms)" for c in CLASSES}))
-
-    def subst(self, e):
-        return self.once.get(e.id, e) if isinstance(e, ast.Name) else e
+    def input_of(self, arg, scope=None):
+        """F2/F3: the helper's argument is the tool's parameter (tool) or exactly the framework's input (hook); in
+        a Claude Agent SDK hook, inside a scope naming only tools that execute it, one field of the tool input."""
+        if self.role == "tool":
+            return isinstance(arg, ast.Name) and arg.id in self.params
+        ch = _chain(arg)
+        if not ch:
+            return False
+        if (ch[0], tuple(ch[1])) in self.input_paths:
+            return True
+        return self.role == "sdk-hook" and scope is not None and len(ch[1]) == 2 and \
+            (ch[0], (ch[1][0],)) in self.input_paths and ch[1][1] in SDK_FIELD_TOOLS and scope <= SDK_FIELD_TOOLS[ch[1][1]]
 
     def names(self, e):
-        """F2: the tool names a tool-name test selects, or None."""
+        """F4: the tool names a tool-name test selects, or None."""
         if not (isinstance(e, ast.Compare) and len(e.ops) == 1 and isinstance(e.ops[0], (ast.Eq, ast.In))):
             return None
         left, right = e.left, e.comparators[0]
         sides = [(left, right)] + ([(right, left)] if isinstance(e.ops[0], ast.Eq) else [])
         for name_side, val in sides:
-            if not _is_name_expr(self.mod, name_side):
-                continue
-            root = _chain(self.subst(name_side))
+            ch = _chain(name_side)
             vals = _lits(self.idx, self.mod, val)
-            if root and (root[0], tuple(root[1])) in self.name_paths and vals and \
-                    _rebound(self.fn, root[0], tuple(root[1])) is None:
-                return set(vals)
+            if ch and (ch[0], tuple(ch[1])) in self.name_paths and vals:
+                return name_side, set(vals)
         return None
 
-    def value(self, v, kit):
-        """F5/F6: ('param', name) | ('whole', '') | ('field', name), or (None, why)."""
-        src = self.mod.src(v)[:40]
-        if self.role == "tool":
-            if isinstance(v, ast.Name) and v.id in self.params:
-                r = _rebound(self.fn, v.id)
-                return (("param", v.id), "") if r is None else (None, f"`{v.id}` is rebound at line {r.lineno}")
-            return None, f"tests `{src}`, which is not a parameter of the tool as is"
-        v = self.subst(v)
-        inner, wrapped = v, False
-        if isinstance(v, ast.Call) and len(v.args) == 1 and not v.keywords and \
-                self.mod.full(v.func) in ("str", "repr", "json.dumps"):
-            inner, wrapped = v.args[0], True
-        ch = _chain(self.subst(inner))
-        if not ch or ch[0] not in self.params:
-            return None, f"tests `{src}`, which is not the hook's tool input"
-        keys = ch[1]
-        r = _rebound(self.fn, ch[0], keys)
-        if r is not None:
-            return None, f"`{ch[0]}` is rebound or changed at line {r.lineno}"
-        if wrapped and _untrusted(self.idx, self.mod, self.fn, self.mod.full(v.func).split(".")[0]):
-            return None, _untrusted(self.idx, self.mod, self.fn, self.mod.full(v.func).split(".")[0])
-        if (wrapped or kit) and (ch[0], tuple(keys)) in self.input_paths:
-            return ("whole", self.mod.full(v.func) if wrapped else ""), ""
-        if self.role == "sdk-hook" and len(keys) == 2 and keys[0] == "tool_input" and keys[1] in SDK_FIELD_TOOLS:
-            return ("field", keys[1]), ""
-        return None, f"tests `{src}`, which is a field or an unconverted object, not the whole tool input as text"
+    def guard_stmt(self, st):
+        """(input node, refusal ok) for `if refuses(X): <refusal>` with no else, else None."""
+        if not (isinstance(st, ast.If) and not st.orelse):
+            return None
+        arg = self.helper_call(st.test)
+        if arg is None:
+            return None
+        return arg, self.refusal(st.body)
 
-    def guard(self, node, test, tools, blocked):
-        if blocked:
-            return self.noncanonical(node, blocked, tools)
-        if isinstance(test, ast.BoolOp) and isinstance(test.op, ast.And):
-            sel = [self.names(v) for v in test.values] if self.role != "tool" else []
-            if len(test.values) != 2 or sum(s is not None for s in sel) != 1:
-                return self.noncanonical(node, f"`{self.mod.src(test)[:50]}` joins tests with `and`", tools)
-            names = next(s for s in sel if s is not None)
-            tools = names if tools is None else tools & names
-            test = test.values[sel.index(None)]
-        atoms, todo = [], [test]
-        while todo:
-            e = todo.pop(0)
-            if isinstance(e, ast.BoolOp) and isinstance(e.op, ast.Or):
-                todo = list(e.values) + todo
-            else:
-                atoms.append(e)
-        parsed, vals = [], []
-        for e in atoms:
-            kind, payload, v = _atom(self.idx, self.mod, e)
-            if kind is None:
-                return self.noncanonical(node, payload, tools)
-            heads = {"any"} if kind == "anyin" else set()
-            if kind == "re":
-                f = e.func
-                heads.add(self.mod.full(f).split(".")[0] if self.mod.full(f) in RE_FUNCS else "re")
-                if isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name) and f.value.id in self.mod.assigns:
-                    heads.add("re")     # NAME = re.compile(...): `re` must be real, and NAME is checked by _compiled
-            why = next((w for w in (_untrusted(self.idx, self.mod, self.fn, h) for h in heads if h in TRUSTED) if w), "")
-            if why:
-                return self.noncanonical(node, why, tools)
-            val, why = self.value(v, kind == "kit")
-            if val is None:
-                return self.noncanonical(node, why, tools)
-            parsed.append((kind, payload))
-            vals.append(val)
-        if len(set(vals)) > 1:
-            return self.noncanonical(node, "its tests read different values", tools)
-        if vals[0][0] == "field":
-            sel = SDK_FIELD_TOOLS[vals[0][1]]
-            tools = set(sel) if tools is None else tools & sel
-        cov = _covered(parsed, vals[0][1] if vals[0][0] == "whole" else "")
-        g = Guard("refusal", self.mod.where(node), self.label, secret="secret" in cov, destructive="destructive" in cov,
-                  tools=tools)
-        g.subject = vals[0][1] if vals[0][0] == "param" else None
-        return (node.end_lineno or node.lineno, g)
+    def credit(self, st, arg, tools):
+        g = Guard("refusal", self.mod.where(st), self.label, secret=True, destructive=True, tools=tools)
+        g.subject = arg.id if self.role == "tool" else None
+        return (st.end_lineno or st.lineno, g)
+
+    def noncanonical(self, node, why, tools=None):
+        where = self.mod.where(node)
+        return (node.end_lineno or node.lineno, Guard("refusal", where, self.label, tools=tools, partial={
+            c: f"{where} {self.label}: {why} (see --canonical-forms)" for c in CLASSES}))
 
     def refusals(self):
-        """[(last line, Guard)]: canonical refusals earn what they cover; any other refusal says why it earns nothing."""
-        out, blocked = [], self.blocked
-        for st in self.fn.body:
-            scoped = self.names(st.test) if isinstance(st, ast.If) and self.role != "tool" else None
-            if self.refusing(st):
-                out.append(self.guard(st, st.test, None, blocked))
-                out += [self.noncanonical(n, f"line {n.lineno}: the refusal is inside another if") for b in (st.body, st.orelse)
-                        for x in b for n in ast.walk(x) if self.refusing(n)]
-            elif scoped is not None and not st.orelse:                       # F2: if <tool name> == '...':
-                for x in st.body:
-                    if self.refusing(x):
-                        out.append(self.guard(x, x.test, scoped, blocked))
-                    elif self.contains(x):
-                        out.append(self.noncanonical(x, f"line {x.lineno}: the refusal is nested deeper than F2 allows", scoped))
-            elif self.contains(st):
-                what = NESTED.get(type(st), "a nested block")
-                out.append(self.noncanonical(st, f"line {st.lineno}: the refusal is inside {what}"))
-            if self.role != "tool" and not self.refusing(st) and scoped is None and self.exits(st):
-                blocked = blocked or (f"line {st.lineno}: an earlier statement returns or lets the call through without "
-                                      "refusing, so the refusal does not run on every call")
-        if "cancel" in self.kinds:   # Strands: a later or unconditional cancel_tool assignment can undo the refusal
-            sets = [n for n in ast.walk(self.fn) if isinstance(n, ast.Assign) and any(
-                isinstance(t, ast.Attribute) and t.attr == "cancel_tool" for t in n.targets)]
-            undo = [n for n in sets if not (isinstance(n.value, ast.Constant) and isinstance(n.value.value, str) and n.value.value)]
-            undo += [n for n in ast.walk(self.fn) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
-                     and n.func.id in ("setattr", "delattr")]
-            if undo:
-                out = [self.noncanonical(self.fn, f"line {undo[0].lineno}: cancel_tool is set to something other than a "
-                                                  "message, which can undo a refusal")]
+        """[(last line, Guard)]: credited refusals earn the helper's classes; any other refusal says why it earns nothing."""
+        out, credited, why_not, leading = [], [], "", True
+        seen = set()
+        for st in self.body():
+            if not leading:
+                break
+            g = self.guard_stmt(st)
+            scoped = self.names(st.test) if isinstance(st, ast.If) and not st.orelse and self.role != "tool" else None
+            if g is not None:
+                arg, ok = g
+                if not ok or not self.input_of(arg):
+                    why_not = why_not or (f"line {st.lineno}: the refusal is not the documented one for this hook"
+                                          if not ok else f"line {st.lineno}: refuses() is not given "
+                                          + ("a parameter of the tool" if self.role == "tool" else "the framework's tool input"))
+                    leading = False
+                    continue
+                seen.add(st)
+                self.allowed.update(n for n in ast.walk(arg) if isinstance(n, ast.Name))
+                credited.append((st, arg, None))
+            elif scoped is not None and st.body and self.guard_stmt(st.body[0]) is not None:
+                inner = st.body[0]
+                arg, ok = self.guard_stmt(inner)
+                if not ok or not self.input_of(arg, scoped[1]):
+                    why_not = why_not or f"line {inner.lineno}: the scoped refusal is not the documented one"
+                    leading = False
+                    continue
+                self.allowed.update(n for n in ast.walk(arg) if isinstance(n, ast.Name))
+                self.allowed.update(n for n in ast.walk(scoped[0]) if isinstance(n, ast.Name))
+                seen.update((st, inner))
+                credited.append((inner, arg, scoped[1]))
+                if len(st.body) > 1:
+                    leading = False        # anything after the scoped refusal may exit for that tool
+            else:
+                leading = False
+        if self.role == "tool":
+            for st, arg, _ in credited:
+                why = self.tool_value_why(arg.id)
+                if why:
+                    why_not = why_not or why
+        if self.blocked or (credited and not self.helper):
+            why_not = self.blocked or self.helper_why
+        if not why_not and credited:
+            why_not = self.inert_why(own=True)
+        for st, arg, tools in credited:
+            out.append(self.noncanonical(st, why_not, tools) if why_not else self.credit(st, arg, tools))
+        # every other refusal: a helper refusal out of place, or a hand-written one
+        for n in ast.walk(self.fn):
+            if n in seen or not isinstance(n, ast.If) or not self.looks_refusing(n):
+                continue
+            if self.helper_call(n.test) is not None:
+                out.append(self.noncanonical(n, f"line {n.lineno}: the helper refusal is not among the function's "
+                                                "first statements, or its shape is not F2/F3"))
+            else:
+                out.append(self.noncanonical(n, f"line {n.lineno}: {HAND_WRITTEN}"))
         return out
 
-    def exits(self, st) -> bool:
-        """A statement that may end the hook or pass the call on (return, raise, calling the continuation)."""
-        params = set(self.params)
-        todo = [st]
-        while todo:
-            n = todo.pop()
-            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)) and n is not st:
-                continue
-            if isinstance(n, (ast.Return, ast.Raise)):
-                return True
-            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in params:
-                return True
-            if isinstance(n, ast.Await) or (isinstance(n, ast.Name) and n.id == self.next and self.next):
-                return True     # an await, or any use of the continuation (`go = call_next`), may pass the call on
-            todo += list(ast.iter_child_nodes(n))
+    def looks_refusing(self, node) -> bool:
+        """A refusal of any shape: an `if` on the input whose body refuses the way this hook or tool can."""
+        if not _uses(node.test, self.inputs | self.restricted | {KIT_GUARD_NAME}):
+            return False
+        for st in node.body:
+            for n in ast.walk(st):
+                if isinstance(n, (ast.Return, ast.Raise)) and self.role in ("tool", "maf-hook", "guardrail-hook"):
+                    return True
+                if isinstance(n, ast.Return) and n.value is not None and self.role in ("adk-hook", "crewai-hook",
+                                                                                       "sdk-hook", "sdk-permission"):
+                    return True
+                if isinstance(n, ast.Attribute) and n.attr == "cancel_tool" and isinstance(n.ctx, ast.Store):
+                    return True
+                if isinstance(n, (ast.Continue, ast.Break)):
+                    return True
         return False
+
+    def tool_value_why(self, p):
+        """F2: every use of P other than the helper's argument is the operation argument of a capability call."""
+        r = _rebound(self.fn, p)
+        if r is not None:
+            return f"`{p}` is rebound or changed at line {getattr(r, 'lineno', '?')}"
+        aliases = _local_aliases(self.mod, self.fn)
+        for n in ast.walk(self.fn):
+            if not (isinstance(n, ast.Name) and n.id == p) or n in self.allowed:
+                continue
+            call = self.parents.get(n)
+            if isinstance(call, ast.keyword):
+                call = self.parents.get(call)
+            if isinstance(call, ast.Call) and isinstance(call.func, (ast.Name, ast.Attribute)):
+                full = _full_name(self.mod, aliases, call.func)
+                cap = _capability(call, full, full.split(".")[0], False)
+                if cap == "computer":
+                    cap = None
+                if cap and _op_arg(call, cap, full) is n:
+                    continue
+            return (f"line {getattr(n, 'lineno', '?')}: `{p}` is used other than as the operation argument of a "
+                    "capability call (aliased, passed on, wrapped or another argument)")
+        return ""
+
+    def inert_why(self, own=False):
+        """F5: why this hook may change the input another hook checked, or ''."""
+        if self.role in ("tool", "guardrail-hook"):
+            return ""
+        for n in ast.walk(self.fn):
+            if not (isinstance(n, ast.Name) and n.id in self.restricted) or n in self.allowed:
+                continue
+            top = _chain_top(n, self.parents)
+            p = self.parents.get(top)
+            if isinstance(p, ast.Call) and p.args == [top] and not p.keywords and \
+                    self.mod.full(p.func) in PURE_WRAPS and not self.shadowed(p.func):
+                continue                                    # copy.deepcopy(x), json.dumps(x), str(x), repr(x)
+            if isinstance(p, (ast.Compare, ast.FormattedValue)) or (isinstance(p, ast.UnaryOp) and isinstance(p.op, ast.Not)) \
+                    or (isinstance(p, (ast.If, ast.While, ast.IfExp, ast.Assert)) and p.test is top):
+                if isinstance(getattr(top, "ctx", ast.Load()), ast.Load):
+                    continue                                # a read that is compared or tested
+            if self.next and isinstance(p, ast.Call) and isinstance(p.func, ast.Name) and p.func.id == self.next \
+                    and top is n and p.args == [n] and not p.keywords:
+                continue                                    # call_next(context)
+            return (f"{self.mod.where(n)} `{n.id}` is used outside the guard (aliased, changed or passed on), so the "
+                    "input the tool runs with may not be the one checked")
+        if self.role in ("sdk-hook",):
+            for r in (x for x in ast.walk(self.fn) if isinstance(x, ast.Return)):
+                if not _sdk_safe_return(self.idx, self.mod, r.value):
+                    return (f"{self.mod.where(r)} this hook may return `updatedInput` (or a value the audit cannot "
+                            "read), which changes the input after the check")
+        return ""
+
+    def shadowed(self, func):
+        """A name the pure wrappers rely on (`str`, `copy`, `json`) that is not the real one."""
+        head = _dotted(func).split(".")[0]
+        tampered = self.idx.tampered()
+        return len(_binds(self.mod.tree, head)) != (1 if head in self.mod.alias else 0) or \
+            (head if head in self.mod.alias else "builtins") in tampered or "*" in tampered
+
+
+def _sdk_deny_literal(v) -> bool:
+    """F3: exactly {'hookSpecificOutput': {'hookEventName': 'PreToolUse', 'permissionDecision': 'deny'
+    [, 'permissionDecisionReason': '<literal>']}}."""
+    if not (isinstance(v, ast.Dict) and len(v.keys) == 1 and isinstance(v.keys[0], ast.Constant)
+            and v.keys[0].value == "hookSpecificOutput" and isinstance(v.values[0], ast.Dict)):
+        return False
+    inner = v.values[0]
+    if None in inner.keys or not all(isinstance(k, ast.Constant) for k in inner.keys):
+        return False
+    keys = [k.value for k in inner.keys]
+    vals = dict(zip(keys, inner.values))
+    return len(keys) == len(set(keys)) and set(keys) <= {"hookEventName", "permissionDecision", "permissionDecisionReason"} \
+        and all(isinstance(x, ast.Constant) and isinstance(x.value, str) for x in inner.values) \
+        and vals.get("permissionDecision") is not None and vals["permissionDecision"].value == "deny" \
+        and vals.get("hookEventName") is not None and vals["hookEventName"].value == "PreToolUse"
+
+
+def _sdk_safe_return(idx, mod, v, depth=0) -> bool:
+    """F5: a hook return that cannot carry updatedInput: None, a dict literal with literal keys (none of them
+    updatedInput, at any depth of dict literals), or a call of a module function whose every return is one."""
+    if v is None or (isinstance(v, ast.Constant) and v.value is None):
+        return True
+    if isinstance(v, ast.Dict):
+        if None in v.keys or not all(isinstance(k, ast.Constant) and isinstance(k.value, str) for k in v.keys):
+            return False
+        if any(k.value in ("updatedInput", "updated_input") for k in v.keys):
+            return False
+        return all(_sdk_safe_return(idx, mod, x, depth) if isinstance(x, ast.Dict) else
+                   not any(isinstance(y, ast.Dict) for y in ast.walk(x)) for x in v.values)
+    if isinstance(v, ast.Call) and depth < 2 and isinstance(v.func, ast.Name):
+        k = idx.resolve(mod, v.func)
+        if k[0] == "def" and not k[2].decorator_list and len(_binds(k[1].tree, k[2].name)) == 1 and \
+                k[1].path not in idx.tampered():
+            return all(_sdk_safe_return(idx, k[1], r.value, depth + 1) for r in ast.walk(k[2]) if isinstance(r, ast.Return))
+    return False
 
 
 def _canonical_refusals(idx, mod, fn, kinds, label, role):
     return _Canon(idx, mod, fn, kinds, label, role).refusals()
 
 
-def _is_refusal_body(body, kinds) -> bool:
-    for st in body:
-        for kind in kinds:
-            if kind == "early" and isinstance(st, (ast.Return, ast.Raise)):
-                return True
-            if kind == "false" and isinstance(st, ast.Return) and isinstance(st.value, ast.Constant) and st.value.value is False:
-                return True
-            if kind == "dict" and isinstance(st, ast.Return) and isinstance(st.value, ast.Dict):
-                return True
-            if kind == "cancel" and isinstance(st, ast.Assign) and any(isinstance(t, ast.Attribute) and t.attr == "cancel_tool" for t in st.targets):
-                return True
-            if kind == "deny" and isinstance(st, ast.Return) and st.value is not None and "deny" in ast.dump(st.value):
-                return True
-    return False
+def _hook_inert(idx, mod, node, role):
+    """F5 for a hook that is not the credited one: why it may change the input, or ''."""
+    kind = idx.resolve(mod, node.func if isinstance(node, ast.Call) else node)
+    if kind[0] != "def":
+        return f"{mod.where(node)} {mod.src(node)[:40]} is a hook the audit cannot read, so it may change the input"
+    c = _Canon(idx, kind[1], kind[2], (), "hook", role)
+    return c.blocked or c.inert_why()
+
+
+def _void(guards, why):
+    """Credited refusals that another hook may undo become UNRESOLVED with the reason."""
+    return [_unbound(g, why) if (g.secret or g.destructive or g.path) and g.kind == "refusal" else g for g in guards]
 
 
 def _local_aliases(mod: Module, fn) -> dict:
@@ -1282,11 +1399,6 @@ def _unbound(g, why):
     return out
 
 
-def _receives(call, name) -> bool:
-    """The call gets `name` as is: a bare positional or keyword argument (F5)."""
-    return any(isinstance(a, ast.Name) and a.id == name for a in list(call.args) + [k.value for k in call.keywords])
-
-
 def function_reach(idx: Index, mod: Module, fn, tainted=None, depth=0, carry=()) -> Reach:
     """Follow the data a tool receives into calls that run commands, write or read files, fetch or use a computer.
     A capability is never dropped silently: a call the audit cannot follow is UNRESOLVED, and a call with a fixed
@@ -1302,15 +1414,23 @@ def function_reach(idx: Index, mod: Module, fn, tainted=None, depth=0, carry=())
     def before(line):
         return [g for end, g in refusals if end < line]   # a capability inside the refusing branch is not guarded by it
 
-    def bind(gs, *calls):
-        """F5: a refusal guards a call only when the call receives the tested parameter as is."""
-        return [g if g.subject is None or any(_receives(c, g.subject) for c in calls) else
-                _unbound(g, f"{g.where} {g.label} tests `{g.subject}`, but the call at {mod.where(calls[0])} does not "
-                            f"receive `{g.subject}` as is (F5)") for g in gs]
+    def bind(gs, cat, call):
+        """F2: a helper refusal guards a call only when the call's operation argument is the tested parameter; it
+        says nothing about other calls."""
+        out = []
+        for g in gs:
+            if g.subject is None:
+                out.append(g)
+                continue
+            full = _full_name(mod, aliases, call.func) if isinstance(call.func, (ast.Name, ast.Attribute)) else ""
+            arg = _op_arg(call, cat, full)
+            if isinstance(arg, ast.Name) and arg.id == g.subject:
+                out.append(g)
+        return out
 
     def add(cat, node, target=None):
         if not any(c == cat and w == mod.where(node) for c, w, _ in reach.caps):
-            reach.caps.append((cat, mod.where(node), bind(before(node.lineno), node, *([target] if target is not None else []))))
+            reach.caps.append((cat, mod.where(node), bind(before(node.lineno), cat, node)))
 
     for call in (n for st in fn.body for n in ast.walk(st) if isinstance(n, ast.Call)):   # decorators are not the body
         args = list(call.args) + [k.value for k in call.keywords]
@@ -1395,18 +1515,10 @@ def function_reach(idx: Index, mod: Module, fn, tainted=None, depth=0, carry=())
                 for k in call.keywords:
                     if k.arg and _uses(k.value, tainted):
                         passed.add(k.arg)
-                handed = []           # F5: a refusal reaches into a helper that receives the parameter as is
+                handed = []           # what a callee inherits: unproven refusals stay unproven inside it
                 for g in before(call.lineno):
-                    p = next((params[i] for i, a in enumerate(call.args) if i < len(params) and isinstance(a, ast.Name)
-                              and a.id == g.subject), None) or next((k.arg for k in call.keywords if isinstance(k.value, ast.Name)
-                                                                    and k.value.id == g.subject and k.arg in params), None)
-                    if g.subject is None or (p and _rebound(callee, p) is None):
-                        h = Guard("refusal", g.where, g.label, g.secret, g.destructive, g.path, g.unresolved, g.tools, g.partial)
-                        h.subject = p if g.subject is not None else None
-                        handed.append(h)
-                    else:
-                        handed.append(_unbound(g, f"{g.where} {g.label} tests `{g.subject}`, but {callee.name}() at "
-                                                  f"{mod.where(call)} does not receive it as is (F5)"))
+                    if g.subject is None:     # a credited refusal never reaches into a helper (F2: P is not passed on)
+                        handed.append(g)
                 sub = function_reach(idx, callee_mod, callee, passed if hit else set(), depth + 1, carry=handed)
                 reach.merge(sub)
             elif kind[0] == "external" and kind[1].split(".")[0] in SAFE_HEADS:
@@ -1435,18 +1547,32 @@ def _decorator_guards(idx, mod, fn):
     return guards, name
 
 
-def _callable_guards(idx, mod, node, label, kinds, role="hook") -> list:
-    """A guard given as a function or object: read every refusing condition, or mark it unresolved.
-    Conditions that apply to every tool are combined into one guard (a hook that refuses secrets in one `if` and
-    destructive commands in another covers both); conditions limited to named tools stay separate guards."""
+def _callable_canon(idx, mod, node, label, kinds, role="hook"):
+    """([Guard], why it may change the input or '') for a guard given as a function or object. Conditions that apply
+    to every tool are combined into one guard; conditions limited to named tools stay separate guards."""
     kind = idx.resolve(mod, node.func if isinstance(node, ast.Call) else node)
     if kind[0] != "def":
-        return [Guard("refusal", mod.where(node), label, unresolved=f"{mod.where(node)} {mod.src(node)[:50]} is not followed by the audit")]
+        why = f"{mod.where(node)} {mod.src(node)[:50]} is not followed by the audit"
+        return [Guard("refusal", mod.where(node), label, unresolved=why)], why
     gm, fn = kind[1], kind[2]
-    found = [g for _, g in _canonical_refusals(idx, gm, fn, kinds, label, role)]
+    c = _Canon(idx, gm, fn, kinds, label, role)
+    found = [g for _, g in c.refusals()]
+    inert = c.blocked or c.inert_why()
     if not found:
-        return [Guard("refusal", gm.where(fn), label, unresolved=f"{gm.where(fn)} {fn.name} never refuses a call that the audit can see")]
-    return _combine(found, label)
+        return [Guard("refusal", gm.where(fn), label, unresolved=f"{gm.where(fn)} {fn.name} never refuses a call that the audit can see")], inert
+    return _combine(found, label), inert
+
+
+def _callable_guards(idx, mod, node, label, kinds, role="hook") -> list:
+    return _callable_canon(idx, mod, node, label, kinds, role)[0]
+
+
+def _hook_set(results):
+    """F5: the guards of several hooks on one agent and event. When any of them may change the input, every credited
+    refusal among them becomes UNRESOLVED with that reason."""
+    guards = [g for gs, _ in results for g in gs]
+    why = next((w for _, w in results if w), "")
+    return _void(guards, why) if why else guards
 
 
 def _combine(found, label):
@@ -1547,7 +1673,7 @@ def _agent_guards(idx: Index, mod: Module, call: ast.Call, track: str) -> list:
         if isinstance(ib, (ast.List, ast.Tuple)) and any(isinstance(e, ast.Constant) and e.value == "tools" for e in ib.elts):
             guards.append(Guard("approval", mod.where(ib), "interrupt_before=['tools']"))
     elif track == "strands-agents":
-        hooks = _kw(call, "hooks")
+        hooks, strands = _kw(call, "hooks"), []
         if hooks is not None:
             hmod, lst = _tool_list(idx, mod, hooks)
             for el in (lst.elts if isinstance(lst, (ast.List, ast.Tuple)) else [lst]):
@@ -1560,35 +1686,50 @@ def _agent_guards(idx: Index, mod: Module, call: ast.Call, track: str) -> list:
                         if c.args and _dotted(c.args[0]).endswith("BeforeToolCallEvent") and len(c.args) > 1:
                             mname = _dotted(c.args[1]).split(".")[-1]
                             m = methods.get(mname)
-                            if m:
+                            if m and isinstance(c.args[1], ast.Attribute) and _dotted(c.args[1]) == f"self.{mname}":
+                                canon = _Canon(idx, cm, m, ("cancel",), "BeforeToolCallEvent cancel_tool", "strands-hook")
+                                got = [g for _, g in canon.refusals()]
                                 found = True
-                                found = [g for _, g in _canonical_refusals(idx, cm, m, ("cancel",), "BeforeToolCallEvent cancel_tool",
-                                                                           "strands-hook")]
-                                guards += _combine(found, "BeforeToolCallEvent cancel_tool") if found else \
-                                    [Guard("refusal", cm.where(m), "hook", unresolved=f"{cm.where(m)} hook never cancels a call the audit can see")]
+                                strands.append(((_combine(got, "BeforeToolCallEvent cancel_tool") if got else
+                                                 [Guard("refusal", cm.where(m), "hook", unresolved=f"{cm.where(m)} hook never cancels a call the audit can see")]),
+                                                canon.blocked or canon.inert_why()))
+                            else:
+                                found = True
+                                why = f"{cm.where(c)} BeforeToolCallEvent callback {cm.src(c.args[1])[:40]} is not a method the audit can read"
+                                strands.append(([Guard("refusal", cm.where(c), "hook", unresolved=why)], why))
                     if not found:
                         guards.append(Guard("refusal", hmod.where(el), "hook provider", unresolved=f"{hmod.where(el)} hook provider registers no BeforeToolCallEvent callback the audit can read"))
                 else:
-                    guards.append(Guard("refusal", hmod.where(el), "hook", unresolved=f"{hmod.where(el)} hook {hmod.src(el)[:40]} is not followed"))
+                    why = f"{hmod.where(el)} hook {hmod.src(el)[:40]} is not followed"
+                    strands.append(([Guard("refusal", hmod.where(el), "hook", unresolved=why)], why))
+            undo = idx.cancel_undo()
+            if undo:
+                strands.append(([], undo))
+            guards += _hook_set(strands)
     elif track == "google-adk":
         cb = _kw(call, "before_tool_callback")
         if cb is not None:
-            guards += _callable_guards(idx, mod, cb, "before_tool_callback", ("dict",), role="adk-hook")
+            guards += _hook_set([_callable_canon(idx, mod, cb, "before_tool_callback", ("dict",), role="adk-hook")])
     elif track == "microsoft-agent-framework":
         mw = _kw(call, "middleware")
         if mw is not None:
             mmod, lst = _tool_list(idx, mod, mw)
+            results = []
             for el in (lst.elts if isinstance(lst, (ast.List, ast.Tuple)) else [lst]):
-                for g in _callable_guards(idx, mmod, el, "function middleware", ("early",), role="maf-hook"):
-                    if g.unresolved and "never refuses" in g.unresolved:
-                        continue   # an observing middleware (e.g. a trace) is not a guard and hides nothing
-                    guards.append(g)
+                gs, why = _callable_canon(idx, mmod, el, "function middleware", ("early",), role="maf-hook")
+                # an observing middleware (e.g. a trace) is not a guard, but it must leave the input as it is (F5)
+                results.append(([g for g in gs if not (g.unresolved and "never refuses" in g.unresolved)], why))
+            guards += _hook_set(results)
     elif track == "crewai":
+        results = []
         for n in mod.tree.body:   # hooks registered in this module apply to its agents
             if isinstance(n, ast.Expr) and isinstance(n.value, ast.Call) and _dotted(n.value.func).endswith("register_before_tool_call_hook") and n.value.args:
-                for g in _callable_guards(idx, mod, n.value.args[0], "before-tool-call hook", ("false",), role="crewai-hook"):
-                    if not (g.unresolved and "never refuses" in g.unresolved):
-                        guards.append(g)
+                gs, why = _callable_canon(idx, mod, n.value.args[0], "before-tool-call hook", ("false",), role="crewai-hook")
+                results.append(([g for g in gs if not (g.unresolved and "never refuses" in g.unresolved)], why))
+        other = idx.crewai_hooks(mod)    # CrewAI hooks are global: one registered anywhere else runs too (F5)
+        if other:
+            results.append(([], other))
+        guards += _hook_set(results)
         me = _assigned_name(mod, call)
         for n in ast.walk(mod.tree):  # Task(agent=this_agent, human_input=True): a person reviews the final answer
             if isinstance(n, ast.Call) and _dotted(n.func).split(".")[-1] == "Task":
@@ -1682,25 +1823,43 @@ def _sdk_agent(idx, mod, call):
     if deny_rules is None:   # an unreadable deny list removes nothing and refuses nothing
         deny_rules = []
     hooks_kw = _kw(call, "hooks")
-    hook_guards = []
+    hook_results, hook_guards = [], []
     if isinstance(hooks_kw, ast.Dict):
         for k, v in zip(hooks_kw.keys, hooks_kw.values):
-            if not (isinstance(k, ast.Constant) and k.value == "PreToolUse") or not isinstance(v, (ast.List, ast.Tuple)):
+            if not (isinstance(k, ast.Constant) and k.value == "PreToolUse"):
+                continue
+            if not isinstance(v, (ast.List, ast.Tuple)):
+                hook_results.append((".*", [], f"{mod.where(v)} PreToolUse hooks {mod.src(v)[:40]} are not a list the audit can read"))
                 continue
             for hm in v.elts:
-                if not isinstance(hm, ast.Call):
+                hl = _kw(hm, "hooks") if isinstance(hm, ast.Call) else None
+                if not isinstance(hl, (ast.List, ast.Tuple)):
+                    hook_results.append((".*", [], f"{mod.where(hm)} a PreToolUse matcher's hooks are not a list the audit can read"))
                     continue
                 matcher = _kw(hm, "matcher")
                 pattern = ".*" if matcher is None or (isinstance(matcher, ast.Constant) and matcher.value is None) \
                     else _const_str(idx, mod, matcher)
-                hl = _kw(hm, "hooks")
-                for h in (hl.elts if isinstance(hl, (ast.List, ast.Tuple)) else []):
-                    for g in _callable_guards(idx, mod, h, "PreToolUse deny hook", ("deny",), role="sdk-hook"):
-                        if g.unresolved and "never refuses" in g.unresolved:
-                            continue
-                        if pattern is None:
-                            g = Guard("refusal", g.where, g.label, unresolved=f"{mod.where(matcher)} hook matcher {mod.src(matcher)[:40]} is not readable")
-                        hook_guards.append((pattern or ".*", g))
+                for h in hl.elts:
+                    gs, why = _callable_canon(idx, mod, h, "PreToolUse deny hook", ("deny",), role="sdk-hook")
+                    gs = [g for g in gs if not (g.unresolved and "never refuses" in g.unresolved)]
+                    if pattern is None:
+                        gs = [Guard("refusal", g.where, g.label, unresolved=f"{mod.where(matcher)} hook matcher {mod.src(matcher)[:40]} is not readable") for g in gs]
+                    hook_results.append((pattern or ".*", gs, why))
+    elif hooks_kw is not None:
+        hook_results.append((".*", [], f"{mod.where(hooks_kw)} hooks={mod.src(hooks_kw)[:40]} is not a dict the audit can read"))
+    # can_use_tool decides, instead of a person, for every tool that is not auto-approved
+    cut = _kw(call, "can_use_tool")
+    cut_guards, cut_why = [], ""
+    if cut is not None:
+        cut_guards, _ = _callable_canon(idx, mod, cut, "can_use_tool deny", ("deny",), role="sdk-permission")
+        cut_guards = [g for g in cut_guards if not (g.unresolved and "never refuses" in g.unresolved)] or [Guard(
+            "refusal", mod.where(cut), "can_use_tool", unresolved=f"{mod.where(cut)} can_use_tool decides instead of a "
+            "person, and the audit cannot see it refuse")]
+        cut_why = _can_use_tool_changes(idx, mod, cut)
+    why = next((w for _, _, w in hook_results if w), "") or cut_why
+    for pattern, gs, _ in hook_results:
+        for g in (_void(gs, why) if why else gs):
+            hook_guards.append((pattern, g))
     servers, server_problem = _sdk_servers(idx, mod, call)
     # configuration the audit cannot read is never "no tools": an unreadable map, an unreadable server, or a
     # server-wide approval of a server whose tools it cannot list make the whole agent UNRESOLVED
@@ -1752,7 +1911,9 @@ def _sdk_agent(idx, mod, call):
         auto = base in allowed or name in allowed or any(x.split("(")[0] == base for x in allowed) or server_wide \
             or mode == "bypassPermissions" \
             or (mode == "acceptEdits" and cat == "write") or cat == "read"
-        if not auto:
+        if not auto and cut is not None:
+            guards += cut_guards
+        elif not auto:
             guards.append(Guard("approval", mod.where(call), f"{base} not in allowed_tools (a person approves)"))
         for d in deny_rules:       # the same scope standard as Claude Code settings: a scoped rule covers its scope
             if d.split("(")[0] == base and "(" in d:
@@ -1762,6 +1923,20 @@ def _sdk_agent(idx, mod, call):
                 guards.append(g)
         tools.append((base, reach, guards))
     return tools, "; ".join(dict.fromkeys(problems))
+
+
+def _can_use_tool_changes(idx, mod, node) -> str:
+    """F5: why can_use_tool may change the input after the PreToolUse hooks checked it, or ''."""
+    kind = idx.resolve(mod, node.func if isinstance(node, ast.Call) else node)
+    if kind[0] != "def":
+        return f"{mod.where(node)} can_use_tool {mod.src(node)[:40]} is not readable, so it may change the input"
+    cm, fn = kind[1], kind[2]
+    for n in ast.walk(fn):
+        if isinstance(n, ast.Return) and not (isinstance(n.value, ast.Call) and cm.full(n.value.func) in (
+                "claude_agent_sdk.PermissionResultAllow", "claude_agent_sdk.PermissionResultDeny")
+                and not n.value.args and all(k.arg and k.arg != "updated_input" for k in n.value.keywords)):
+            return f"{cm.where(n)} can_use_tool may return updated_input (or a value the audit cannot read)"
+    return ""
 
 
 def _sdk_servers(idx, mod, call):
