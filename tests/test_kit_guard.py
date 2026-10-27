@@ -63,8 +63,8 @@ WRAPS = ["{c}", "echo ok; {c}", "echo ok && {c}", "false || {c}", "echo ok | {c}
 ORDINARY = ["ls -la", "git status", "git status --short", "git log --oneline -5", "git log --grep push",
             "git diff HEAD~1", "git commit -m 'document the push workflow'", "git add src/app.py", "git fetch origin",
             "git pull --rebase", "git checkout -b feature", "git stash list", "rm build/output.txt", "rm -f old.log",
-            "rmdir empty", "python3 -m pytest -q", "python -m pytest tests/*", "npm test", "make check",
-            "grep -r TODO src", "find . -name '*.py'", "ls *.py", "cat README.md", "cat src/key_points.md",
+            "rmdir empty", "python3 -m pytest -q", "npm test", "make check",
+            "grep -r TODO src", "cat README.md", "cat src/key_points.md",
             "cat monkey.keys", "cat docs/environment.md", "echo hello", "src/app.py", "docs/README.md",
             "https://example.invalid/docs/page", "", "keyboard.txt", "pem_notes.md", "my.keynote"]
 
@@ -146,6 +146,76 @@ class HelperTable(unittest.TestCase):
         self.assertTrue(self.kg.refuses("cat '.env"))
         self.assertTrue(self.kg.refuses('git push "'))
         self.assertTrue(self.kg.refuses({"a": [b"cat .env"]}))
+
+
+def glob_spellings(name):
+    """Glob spellings of one path part that the shell (and fnmatch) expand to that part: `?`, a one-character bracket
+    and a negated bracket at each position, and `*` for every prefix, suffix and middle."""
+    out = set()
+    for i, ch in enumerate(name):
+        out.add(name[:i] + "?" + name[i + 1:])
+        out.add(name[:i] + f"[{ch}]" + name[i + 1:])
+        out.add(name[:i] + ("[!#]" if ch != "#" else "[!@]") + name[i + 1:])
+    for i in range(len(name) + 1):
+        out.add(name[:i] + "*")
+        out.add("*" + name[i:])
+        for j in range(i, len(name) + 1):
+            out.add(name[:i] + "*" + name[j:])
+    return sorted(out)
+
+
+# Glob words whose superset cannot match a secret name: no `*`, and `?`/brackets where no secret name fits.
+GLOB_CONTROLS = ["?", "??", "???", "a?c", "README.m?", "src/app.p?", "log[0-9]", "notes.t?t", "docs/[a-c]x.md",
+                 "x[!a].txt", "test_?.py", "v[0-9].[0-9]"]
+# `*` can stand for anything, and the secret families are open (`<any>.key-<any>`, `.env<any>`, `credentials.<any>`),
+# so every word part holding a `*` can match a secret name and is refused. The brief's examples are among them.
+STAR_GLOBS = ["*", "*.py", "src/*.json", "ls *.py", "find . -name '*.py'", "python -m pytest tests/*", "README*",
+              "**/*.md"]
+
+
+class GlobSpellings(unittest.TestCase):
+    """R5-01: every glob spelling of every documented secret name is refused; globs that cannot match pass."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.kg = load_kit_guard()
+
+    def test_every_glob_spelling_of_every_secret_name(self):
+        import fnmatch
+        n = 0
+        for full in SECRET_NAMES:
+            parts = full.split("/")
+            for k, part in enumerate(parts):
+                for g in glob_spellings(part):
+                    self.assertTrue(fnmatch.fnmatchcase(part, g), (part, g))   # the spelling really matches
+                    path = "/".join(parts[:k] + [g] + parts[k + 1:])
+                    for value in (f"cat {path}", f"tar czf x.tgz a/{path}", {"file_path": path}, ["cat", path]):
+                        with self.subTest(value=value):
+                            self.assertTrue(self.kg.refuses(value))
+                            self.assertTrue(self.kg.secret(value))
+                        n += 1
+        self.assertGreater(n, 10000)
+
+    def test_globs_that_cannot_match_a_secret_name_pass(self):
+        for g in GLOB_CONTROLS:
+            for value in (g, f"cat {g}", f"ls {g}"):
+                with self.subTest(value=value):
+                    self.assertFalse(self.kg.refuses(value))
+
+    def test_a_star_can_match_a_secret_name_so_it_is_refused(self):
+        for v in STAR_GLOBS:
+            with self.subTest(value=v):
+                self.assertTrue(self.kg.refuses(v))
+
+    def test_bracket_and_class_forms(self):
+        for v in ("cat .en[v]", "cat .e[[:alpha:]]v", "cat id_[a-z]sa", "cat [.]ssh/x", "cat x.p[e]m", "cat .ss[!x]/c",
+                  "cat cred[e]ntials", "cat .config/g[c]loud/x", "cat .c?nfig/gcloud", "cat .[!a]ws/config"):
+            with self.subTest(value=v):
+                self.assertTrue(self.kg.refuses(v))
+
+    def test_long_globs_are_refused_and_long_words_finish(self):
+        self.assertTrue(self.kg.refuses("cat " + "?" * 300))
+        self.assertFalse(self.kg.refuses("cat " + "x" * 100000))
 
 
 class HelperIsPinned(unittest.TestCase):
