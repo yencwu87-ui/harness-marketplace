@@ -17,7 +17,7 @@
 - Real SDK engine smoke for R5-04: UNRESOLVED (no engine or key here)
 
 ## Usage
-- Wall-clock: 28 Oct 2026, about 00:50 to 02:20 +08 (one session)
+- Wall-clock: 28 Oct 2026, about 00:50 to 01:55 +08 (one session, packaging included)
 - Tokens: not available to this headless session
 
 ## Blocker
