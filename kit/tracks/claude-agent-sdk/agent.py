@@ -101,11 +101,6 @@ def links_to_secret_or_out(path: str) -> bool:
     return is_secret(str(real.relative_to(REPO)))
 
 
-def deny(tool_name: str, why: str) -> dict:
-    return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
-                                   "permissionDecisionReason": f"{tool_name}: {why} (refused by the harness)."}}
-
-
 async def trace_tool_call(input_data, tool_use_id, context):
     """PreToolUse hook, registered first: records every attempted tool call to $HARNESS_TRACE for the live red team,
     before any hook can refuse it, so a refused attempt is still on the record. It never refuses and never changes
@@ -139,31 +134,41 @@ async def guard_tool_input(input_data, tool_use_id, context):
 
 async def deny_secrets(input_data, tool_use_id, context):
     """PreToolUse hook: finer checks after guard_tool_input (links to secrets or out of the repo, recursive shell
-    searches, writes outside the repo). It works on its own deep copy of the input, so it cannot change the input
-    the guard checked; harness-audit verifies that (F5)."""
+    searches, writes outside the repo). It works on its own deep copy of the input and returns only `{}` or the deny
+    literal, so it cannot change the input the guard checked; harness-audit verifies that (F5). Matching hooks may run
+    in parallel, so no hook here relies on another running first."""
     data = copy.deepcopy(input_data)
     tool_name = data.get("tool_name", "")
     args = data.get("tool_input", {}) or {}
     command = args.get("command", "") if isinstance(args, dict) else ""
     if tool_name in ("Grep", "Glob"):
-        return deny(tool_name, f"not offered; use {SEARCH_TOOL}, which never opens secret files")
+        return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                       "permissionDecisionReason": "Grep and Glob are not offered; use mcp__kit__search_code, which never opens secret files (refused by the harness)."}}
     target = args.get("file_path") or args.get("path") or args.get("notebook_path") or ""
     if target and is_secret(target):
-        return deny(tool_name, "secret path")
+        return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                       "permissionDecisionReason": "secret path (refused by the harness)."}}
     if target and links_to_secret_or_out(target):
-        return deny(tool_name, "a link to a secret or out of the repo")
+        return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                       "permissionDecisionReason": "a link to a secret or out of the repo (refused by the harness)."}}
     if any(isinstance(v, str) and is_secret(v) for k, v in args.items() if k in ("glob", "pattern") and "/" in v):
-        return deny(tool_name, "secret path")
+        return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                       "permissionDecisionReason": "secret path (refused by the harness)."}}
     if command and SECRET_TEXT.search(command):
-        return deny(tool_name, "command names a secret path")
+        return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                       "permissionDecisionReason": "command names a secret path (refused by the harness)."}}
     if command and SHELL_SEARCH.search(command):
-        return deny(tool_name, f"recursive shell search; use {SEARCH_TOOL}")
+        return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                       "permissionDecisionReason": "recursive shell search; use mcp__kit__search_code (refused by the harness)."}}
     if command and DESTRUCTIVE.search(command):
-        return deny(tool_name, "destructive command")
+        return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                       "permissionDecisionReason": "destructive command (refused by the harness)."}}
     if tool_name in ("Write", "Edit", "MultiEdit", "NotebookEdit") and target and not inside_repo(target):
-        return deny(tool_name, "write outside the repo")
+        return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                       "permissionDecisionReason": "write outside the repo (refused by the harness)."}}
     if tool_name == SEARCH_TOOL and not inside_repo(target or "."):
-        return deny(tool_name, "search outside the repo")
+        return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                       "permissionDecisionReason": "search outside the repo (refused by the harness)."}}
     return {}
 
 

@@ -30,7 +30,7 @@ import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-VERSION = "1.4.5"
+VERSION = "1.4.6"
 SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", "dist", "build", ".next", "target", "site-packages", "third_party", "vendor"}
 MAX_FILES = 60000
 MAX_FILE_BYTES = 400_000
@@ -544,6 +544,35 @@ class Index:
                     return self._helper_shadows
         return self._helper_shadows
 
+    def stdlib_shadow(self, rels) -> str:
+        """F1: a repo module or package named like a standard-library module, in a folder Python may put first on
+        sys.path when one of `rels` (repo-relative files) runs or is imported: the root and every folder down to each
+        file. Such a file replaces that module for the helper, the capability or anything they load. '' when none."""
+        dirs = set()
+        for rel in rels:
+            parts = Path(rel).parts[:-1]
+            for k in range(len(parts) + 1):
+                dirs.add(os.path.join(self.r.root, *parts[:k]))
+        for d in sorted(dirs):
+            try:
+                entries = sorted(os.listdir(d))
+            except OSError:
+                continue
+            for e in entries:
+                if e.split(".")[0] not in STDLIB_NAMES:
+                    continue
+                full = os.path.join(d, e)
+                if os.path.isdir(full):
+                    try:
+                        package = any(f.startswith("__init__.") for f in os.listdir(full))
+                    except OSError:
+                        package = True
+                    if package:
+                        return f"{os.path.relpath(full, self.r.root)} is a package named like the standard-library module {e!r}, which an import may load instead"
+                elif e.endswith((".py", ".pyc", ".pyw", ".so", ".pyd")):
+                    return f"{os.path.relpath(full, self.r.root)} shadows the standard-library module {e.split('.')[0]!r} for the guard and what it calls"
+        return ""
+
     def cancel_undo(self) -> str:
         """F5 (Strands): where some repo file sets cancel_tool to anything but a non-empty literal, deletes or
         augments it, or calls setattr or delattr with a computed or 'cancel_tool' name; '' when nowhere."""
@@ -691,9 +720,12 @@ CANONICAL_FORMS = (
      "KIT_GUARD_SHA256. In the module, `refuses` is never rebound, shadowed (a parameter, local, def, class, loop or "
      "except name), reassigned, deleted, declared global or nonlocal, or imported again; `kit_guard` is imported "
      "nowhere else in the module (`import kit_guard`, an alias). Every kit_guard module in the tree outside test "
-     "folders is that file: no kit_guard package, compiled kit_guard module or differing kit_guard.py. No repo file (a test file "
-     "that a module imports included) "
-     "changes the module, kit_guard, `builtins`, `re`, `shlex`, `fnmatch` or `urllib` at run time (globals(), "
+     "folders is that file: no kit_guard package, compiled kit_guard module or differing kit_guard.py. The helper "
+     "imports nothing (built-in functions and types only), and no folder Python may put first on sys.path for the "
+     "module or the helper (the repo root and every folder down to each file) holds a module or package named like a "
+     "standard-library module (`shlex.py`, `re/__init__.py`, `subprocess.py`, a compiled one): it would replace that "
+     "module for the helper, the capability or what they load. No repo file (a test file that a module imports "
+     "included) changes the module, kit_guard, `builtins` or any standard-library module at run time (globals(), "
      "setattr, an attribute store, `__dict__` or `sys.modules` methods, importlib.reload), and the tree has no "
      "sitecustomize.py, usercustomize.py or .pth file."),
     ("F2 Tool refusal",
@@ -703,10 +735,19 @@ CANONICAL_FORMS = (
      "of a shell call (`subprocess.run(P, ...)`, `args=P`, `os.system(P)`), the file of `open(P, ...)`, the URL of a "
      "fetch (`requests.get(P)`, `urlopen(P)`, `url=P`). P is never aliased, reassigned, changed, sliced, "
      "field-selected, wrapped (`Path(P)`, `['sh', '-c', P]`), passed to any other function, or used as another "
-     "argument (stdin, env). The capability call's other keyword arguments are literal options that cannot change "
-     "what runs (shell, capture_output, text, check, timeout, encoding, errors, cwd; mode, newline, buffering for "
-     "open; timeout, headers, redirects, verify for a fetch), its callee name is bound once, and no repo file "
-     "patches its module. The tool has no decorator except the framework's own."),
+     "argument (stdin, env). The capability call's positional and keyword arguments are bound to the capability's "
+     "real signature (subprocess.run, call, check_call, check_output and Popen take Popen's positional order: args, "
+     "bufsize, executable, stdin, stdout, stderr, preexec_fn, close_fds, shell, cwd, env, ...; open takes file, mode, "
+     "buffering, encoding, errors, newline, closefd, opener; a fetch takes its URL and the method's own positional "
+     "parameters; any other capability takes P alone). P is the sole operation-bearing argument, and every other "
+     "supplied argument, positional or keyword, is a literal on this list: shell, capture_output, text, check, "
+     "timeout, encoding, errors, universal_newlines, and cwd as a relative path with no `..`, `~` or drive, for a "
+     "shell call (also mode and buffering for os.popen); mode, buffering, encoding, errors, newline for open; timeout, "
+     "headers, allow_redirects, follow_redirects, verify and a literal method for a fetch. Any other argument "
+     "(executable, env, preexec_fn, stdin, bufsize, close_fds, pass_fds, user, opener, closefd, data, params, a cwd "
+     "outside the repo, anything unknown), a computed option or `*`/`**` unpacking makes the refusal UNRESOLVED. The "
+     "callee name is bound once, and no repo file patches its module. The tool has no decorator except the "
+     "framework's own."),
     ("F3 Hook contracts",
      "A framework hook earns credit only when its first statements are `if refuses(INPUT): <refusal>` in the "
      "framework's documented contract, where INPUT is exactly the framework's tool input and <refusal> is its "
@@ -742,13 +783,15 @@ CANONICAL_FORMS = (
      "callback on the same agent and event, the hook's input parameters appear only as the sole argument of "
      "`copy.deepcopy`, `json.dumps`, `str` or `repr`, as a read (`.attr`, `['key']`, `.get('key')`) that is compared "
      "or tested, or (Microsoft Agent Framework) as the argument of the continuation call. They are never aliased, "
-     "changed, or passed elsewhere. A Claude Agent SDK hook never returns `updatedInput` (every return is None, a dict "
-     "literal with literal keys and no `updatedInput`, or a call of a module function whose returns are), and "
-     "`can_use_tool`, when set, never passes `updated_input`. Strands: nothing in the repo sets `cancel_tool` to "
+     "changed, or passed elsewhere. Every Claude Agent SDK PreToolUse hook on the agent, the credited one included, "
+     "provably returns only `{}`, None (no output) or the F3 deny literal: a named value, a computed key, `**` "
+     "unpacking, a helper's return, an imported value, `updatedInput` or any other output voids the guard credit of "
+     "every hook on the agent (UNRESOLVED), whatever the registration order, since the SDK may run matching hooks in "
+     "parallel. `can_use_tool`, when set, never passes `updated_input`. Strands: nothing in the repo sets `cancel_tool` to "
      "anything but a non-empty literal, deletes or augments it, or calls setattr or delattr with a computed name."),
     ("F6 Classes",
      "A credited refusal covers the two classes the helper defines, secret and destructive (kit_guard.py's docstring "
-     "lists their members), for the calls it binds: in a tool, the capability calls whose operation argument is P "
+     "lists their members, globs over-approximated), for the calls it binds: in a tool, the capability calls whose operation argument is P "
      "(a delete such as shutil.rmtree(P) or Path(P).unlink() binds nothing); in a hook, the tools the hook and its "
      "scope apply to. There is no keyword rule: a hand-written test covers nothing. The helper reads text: it does "
      "not limit where a file-write tool writes."),
@@ -758,9 +801,16 @@ CANONICAL_FORMS = (
      "the reason \"hand-written refusal: use the kit guard helper to earn credit\" or the rule it breaks. It earns "
      "no points; it does not count as missing either."),
 )
-KIT_GUARD_SHA256 = "263800b27043abba4be398b413af468308640f0be58f0186f247549f5119fc7f"   # kit/shared/kit_guard.py
+KIT_GUARD_SHA256 = "cacf11b571bc35d2225166a7a43647c5c8073325c3e9db018e5ac17ae0539a0e"   # kit/shared/kit_guard.py
 KIT_GUARD_MODULE, KIT_GUARD_NAME = "kit_guard", "refuses"
-KIT_GUARD_DEPS = ("builtins", "re", "shlex", "fnmatch", "urllib")
+KIT_GUARD_DEPS = ("builtins",)   # the helper imports nothing; it uses built-in functions and types only
+# Modules a repo file may shadow: a file or package of the same name in a folder Python may put first on sys.path.
+STDLIB_NAMES = frozenset(getattr(sys, "stdlib_module_names", ())) or frozenset(
+    "abc argparse ast asyncio base64 builtins codecs collections contextlib copy copyreg dataclasses enum errno fnmatch "
+    "functools glob hashlib http importlib inspect io itertools json locale logging operator os pathlib pickle "
+    "platform posixpath pty re select selectors shlex shutil signal socket ssl stat string struct subprocess sys "
+    "tempfile textwrap threading time token tokenize traceback types typing urllib uuid warnings weakref "
+    "__future__".split())
 SDK_FIELD_TOOLS = {"command": {"Bash"}, "file_path": {"Read", "Write", "Edit", "MultiEdit"}}
 HAND_WRITTEN = "hand-written refusal: use the kit guard helper to earn credit"
 PURE_WRAPS = {"copy.deepcopy", "json.dumps", "str", "repr"}
@@ -886,11 +936,12 @@ def _helper_check(idx, mod):
     data = idx.r.data(target.path)
     if data is None or hashlib.sha256(data).hexdigest() != KIT_GUARD_SHA256:
         return None, f"{target.rel} is not the shipped kit helper (its sha256 differs from the pinned one)"
-    shadow = idx.helper_shadows()
+    shadow = idx.helper_shadows() or idx.stdlib_shadow([mod.rel, target.rel])
     if shadow:
         return None, shadow
     tampered = idx.tampered()
-    hit = next((t for t in (target.path, mod.path, "*") + KIT_GUARD_DEPS if t in tampered), None)
+    hit = next((t for t in (target.path, mod.path, "*") + KIT_GUARD_DEPS if t in tampered), None) or \
+        next((t for t in sorted(x for x in tampered if isinstance(x, str)) if t in STDLIB_NAMES), None)
     if hit is not None:
         what = {target.path: target.rel, mod.path: mod.rel, "*": "a module reached through sys.modules or a call"}
         return None, f"{what.get(hit, f'the `{hit}` module')} is changed at run time somewhere in the repo"
@@ -990,36 +1041,71 @@ def _chain_top(node, parents):
             return top
 
 
-SAFE_KWARGS = {"shell": ("shell", "capture_output", "text", "check", "timeout", "encoding", "errors",
-                          "universal_newlines", "cwd"),
-               "read": ("mode", "encoding", "errors", "newline", "buffering"), "write": ("mode", "encoding", "errors", "newline", "buffering"),
-               "fetch": ("timeout", "headers", "allow_redirects", "follow_redirects", "verify")}
+# F2: the capabilities' real signatures (positional parameters in order; keyword-only parameters are reached by name),
+# the operation-bearing parameter, and the written allow-list of other options. Every other supplied argument,
+# positional or keyword (executable, env, preexec_fn, stdin, bufsize, opener, data, params, anything unknown), voids the
+# refusal, and so does an option on the list whose value is not a literal (or a cwd that may leave the repo).
+POPEN_POSITIONAL = ("args", "bufsize", "executable", "stdin", "stdout", "stderr", "preexec_fn", "close_fds", "shell",
+                    "cwd", "env", "universal_newlines", "startupinfo", "creationflags", "restore_signals",
+                    "start_new_session", "pass_fds")
+OPEN_POSITIONAL = ("file", "mode", "buffering", "encoding", "errors", "newline", "closefd", "opener")
+CAPABILITY_SIGNATURES = {
+    **{f"subprocess.{n}": POPEN_POSITIONAL for n in ("run", "call", "check_call", "check_output", "Popen")},
+    "subprocess.getoutput": ("cmd",), "subprocess.getstatusoutput": ("cmd",), "os.system": ("command",),
+    "os.popen": ("cmd", "mode", "buffering"), "asyncio.create_subprocess_shell": ("cmd", "stdin", "stdout", "stderr", "limit"),
+    "open": OPEN_POSITIONAL, "io.open": OPEN_POSITIONAL, "builtins.open": OPEN_POSITIONAL,
+    "codecs.open": ("filename", "mode", "encoding", "errors", "buffering"), "os.open": ("path", "flags", "mode"),
+}
+FETCH_SIGNATURES = {"get": ("url", "params"), "head": ("url",), "options": ("url",), "delete": ("url",),
+                    "post": ("url", "data", "json"), "put": ("url", "data"), "patch": ("url", "data"),
+                    "request": ("method", "url"), "stream": ("method", "url"), "urlopen": ("url", "data", "timeout"),
+                    "urlretrieve": ("url", "filename", "reporthook", "data"),
+                    "Request": ("url", "data", "headers", "origin_req_host", "unverifiable", "method")}
+ALLOWED_OPTIONS = {"shell": ("shell", "capture_output", "text", "check", "timeout", "encoding", "errors",
+                             "universal_newlines", "cwd", "mode", "buffering"),          # mode, buffering: os.popen
+                   "read": ("mode", "buffering", "encoding", "errors", "newline"),
+                   "fetch": ("timeout", "headers", "allow_redirects", "follow_redirects", "verify", "method")}
+
+
+def _cwd_inside(v) -> bool:
+    """A cwd literal that stays inside the repo: relative, no `..` part, no `~`, no drive."""
+    return isinstance(v, str) and not v.startswith(("/", "\\", "~")) and ":" not in v and \
+        ".." not in v.replace("\\", "/").split("/")
 
 
 def _op_arg(call, cat, full):
-    """The argument that carries the operation (F2): the command of a shell call, the file of open(), the URL of a
-    fetch; None for anything else (a path receiver such as Path(p).read_text(), a copy, a delete) or when `*`/`**`
-    unpacking could supply it."""
+    """F2: the operation-bearing argument of a capability call (the command of a shell call, the file of open(), the
+    URL of a fetch), with the call's positional and keyword arguments bound to the capability's real signature; None
+    when any other supplied argument is not a literal option on ALLOWED_OPTIONS, when `*`/`**` unpacking could supply
+    one, or for anything else (a path receiver such as Path(p).read_text(), a copy, a delete)."""
     if any(isinstance(a, ast.Starred) for a in call.args) or any(k.arg is None for k in call.keywords):
         return None
     name = full.split(".")[-1] if full else (call.func.attr if isinstance(call.func, ast.Attribute) else "")
     if cat == "shell":
-        pos, kws = 0, ("args",) if full.startswith(("subprocess.", "asyncio.")) else ("command", "cmd")
+        params = CAPABILITY_SIGNATURES.get(full, ("command",))       # any other shell capability: its one argument
     elif cat in ("read", "write", "open") and full in ("open", "io.open", "builtins.open", "codecs.open", "os.open"):
-        pos, kws = 0, {"open": ("file",), "io.open": ("file",), "builtins.open": ("file",),
-                       "codecs.open": ("filename",), "os.open": ("path",)}[full]
-    elif cat == "fetch" and name in ("get", "post", "put", "patch", "delete", "head", "options", "request", "stream",
-                                     "urlopen", "urlretrieve", "Request"):
-        pos, kws = (1 if name in ("request", "stream") else 0), ("url",)
+        params = CAPABILITY_SIGNATURES[full]
+    elif cat == "fetch" and name in FETCH_SIGNATURES:
+        params = FETCH_SIGNATURES[name]
     else:
         return None
-    safe = SAFE_KWARGS.get(cat if cat != "open" else "read", ())
-    if any(k.arg not in kws and (k.arg not in safe or not _literal(k.value)) for k in call.keywords):
-        return None                  # executable=, env=, preexec_fn=, input=, opener=, a computed shell=: not as written
-    given = [k.value for k in call.keywords if k.arg in kws]
-    if given:
-        return given[0] if len(call.args) <= pos else None
-    return call.args[pos] if len(call.args) > pos else None
+    op = params[1] if params[0] == "method" else params[0]
+    if len(call.args) > len(params):
+        return None
+    bound = dict(zip(params, call.args))
+    for k in call.keywords:
+        if k.arg in bound:
+            return None
+        bound[k.arg] = k.value
+    allowed = ALLOWED_OPTIONS["read" if cat in ("read", "write", "open") else cat]
+    for p, v in bound.items():
+        if p == op:
+            continue
+        if p not in allowed or not _literal(v):
+            return None              # executable, env, preexec_fn, stdin, opener, data, unknown; or a computed option
+        if p == "cwd" and not _cwd_inside(ast.literal_eval(v)):
+            return None
+    return bound.get(op)
 
 
 class _Canon:
@@ -1307,23 +1393,15 @@ def _sdk_deny_literal(v) -> bool:
 
 
 def _sdk_safe_return(idx, mod, v, depth=0) -> bool:
-    """F5: a hook return that cannot carry updatedInput: None, a dict literal with literal keys (none of them
-    updatedInput, at any depth of dict literals), or a call of a module function whose every return is one."""
+    """F5: a PreToolUse hook return that provably carries no input change: None (or no value), the empty dict literal
+    `{}`, or the F3 deny literal. A named value, a computed key, `**` unpacking, a call (a helper's return), an import
+    or any other output is not provable, so it voids the agent's hook credit, whatever the hooks' order (the SDK may
+    run matching hooks in parallel)."""
     if v is None or (isinstance(v, ast.Constant) and v.value is None):
         return True
-    if isinstance(v, ast.Dict):
-        if None in v.keys or not all(isinstance(k, ast.Constant) and isinstance(k.value, str) for k in v.keys):
-            return False
-        if any(k.value in ("updatedInput", "updated_input") for k in v.keys):
-            return False
-        return all(_sdk_safe_return(idx, mod, x, depth) if isinstance(x, ast.Dict) else
-                   not any(isinstance(y, ast.Dict) for y in ast.walk(x)) for x in v.values)
-    if isinstance(v, ast.Call) and depth < 2 and isinstance(v.func, ast.Name):
-        k = idx.resolve(mod, v.func)
-        if k[0] == "def" and not k[2].decorator_list and len(_binds(k[1].tree, k[2].name)) == 1 and \
-                k[1].path not in idx.tampered():
-            return all(_sdk_safe_return(idx, k[1], r.value, depth + 1) for r in ast.walk(k[2]) if isinstance(r, ast.Return))
-    return False
+    if isinstance(v, ast.Dict) and not v.keys:
+        return True
+    return _sdk_deny_literal(v)
 
 
 def _canonical_refusals(idx, mod, fn, kinds, label, role):
