@@ -100,7 +100,11 @@ lists exactly what it refuses (secret paths and destructive commands) and what i
 reads globs as supersets, so any word part with a `*` is refused (`ls *.py` included), and the capability call may
 carry only literal options from a short list (no `executable`, `env`, `preexec_fn`, stdin, positional or keyword).
 Do not put a module named like a standard-library module (`shlex.py`, `re.py`, `subprocess.py`) beside the guard or
-at the repo root: the audit then gives no credit.
+at the repo root: the audit then gives no credit. From 1.4.7 the helper also reads a command with its backslash-newline
+line continuations joined (and unjoined, refusing if either form is refused). The audit gives no helper credit when any
+file binds a module to another name (`runner = subprocess`), hands one to your own function, stores through something
+that may be a module, or uses `sys.modules`, importlib or `__import__`: call `subprocess.run(...)` directly. A fetch may
+carry only the options its own callable takes (`urlopen(url, timeout=5)`, not `headers=`).
 
 ## Honest expectations
 

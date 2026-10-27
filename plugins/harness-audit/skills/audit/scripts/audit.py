@@ -1869,7 +1869,8 @@ def _void(guards, why):
 
 def _local_aliases(mod: Module, fn) -> dict:
     """Names bound in fn (or at module level) to a module, function or object the audit can name:
-    `runner = subprocess`, `go = subprocess.run`, `client = httpx.Client()`, `with open(p) as f`."""
+    `runner = subprocess`, `go = subprocess.run`, `client = httpx.Client()`, `with open(p) as f`. Reach still follows a
+    module bound to another name; F1 (module objects) withholds helper credit for it."""
     out = {}
     for name, value in mod.assigns.items():
         if isinstance(value, (ast.Name, ast.Attribute, ast.Call)):
