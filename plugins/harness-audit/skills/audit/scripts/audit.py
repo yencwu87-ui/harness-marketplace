@@ -549,17 +549,20 @@ CANONICAL_FORMS = (
      "kit's shipped helper, only while its file's sha256 equals the pinned KIT_GUARD_SHA256. A literal may be a module "
      "constant assigned once. Any `and` (other than F2), `not`, other call, or other operand is not canonical."),
     ("F5 Value in a tool",
-     "V is a parameter of the tool function that is never rebound, reassigned, augmented or deleted anywhere in the "
-     "function, and the capability call receives that same name as is (a bare argument, not sliced, field-selected, "
+     "V is a parameter of the tool function that is never rebound, reassigned, augmented, deleted or changed in place "
+     "anywhere in the function, and the capability call receives that same name as is (a bare argument, not sliced, field-selected, "
      "wrapped or converted). A helper call counts when it receives the name as is and its own parameter is in turn "
      "passed as is to the capability."),
     ("F6 Value in a hook",
-     "V is the whole tool input as text: `str(...)`, `json.dumps(...)` or `repr(...)` of the hook's input parameter "
-     "or of its tool-input attribute (`args`, `ctx.tool_input`, `event.tool_use`, `context.arguments`, "
-     "`input_data['tool_input']`); `kit_guard.refuses` may take that input without `str`. In a Claude Agent SDK "
+     "V is the whole tool input as text: `str(...)`, `json.dumps(...)` or `repr(...)` of the parameter that is the "
+     "input (`args` of a Google ADK before_tool_callback, `input_data` of a Claude Agent SDK PreToolUse hook) or of "
+     "a tool-input attribute of a parameter (`ctx.tool_input`, `event.tool_use`, `context.arguments`, "
+     "`input_data['tool_input']`, `data.context.tool_arguments`); `kit_guard.refuses` may take that input without "
+     "`str`. `str()` of any other object (`ctx`, `tool_context`) is not the input. In a Claude Agent SDK "
      "PreToolUse hook V may instead be one field of `tool_input` that a built-in tool executes: `command` (covers "
      "Bash only) or `file_path` (covers Read, Write, Edit and MultiEdit only). A local name assigned once, at the top "
-     "level of the hook, to one of these counts as it. The input parameter itself must never be rebound."),
+     "level of the hook, to one of these counts as it. The parameter it is read from must never be rebound or changed "
+     "in place (`ctx.tool_input = {}`, `args.clear()`)."),
     ("F7 Coverage",
      "A class is covered when, for at least one of its keywords, the predicate is true on every probe of the "
      "keyword K: `K`, `K x`, `cat K`, `x;K`, `echo ok; K --flag`, `echo ok` then K on the next line, K in single "
@@ -749,12 +752,33 @@ def _chain(node):
             return None
 
 
-def _rebound(fn, name):
-    """Where fn rebinds, deletes or declares `name` global, or None."""
+MUTATORS = {"update", "clear", "pop", "popitem", "setdefault", "append", "extend", "insert", "remove", "sort",
+            "reverse", "__setitem__", "__delitem__", "__setattr__"}
+
+
+def _rebound(fn, name, path=()):
+    """Where fn rebinds, deletes or declares global `name`, or changes in place the part of it at `path`
+    (`ctx.tool_input = {}` or `ctx.tool_input['command'] = ''` for path ('tool_input',), `args.clear()`), or None.
+    A store elsewhere on the object (`event.cancel_tool = ...`, the refusal itself) is not a change of the input."""
+    def keys(node):
+        out = []
+        while isinstance(node, (ast.Attribute, ast.Subscript)):
+            out.append(node.attr if isinstance(node, ast.Attribute) else
+                       node.slice.value if isinstance(node.slice, ast.Constant) and isinstance(node.slice.value, str) else "*")
+            node = node.value
+        return (out[::-1] if isinstance(node, ast.Name) and node.id == name else None)
+
+    def overlaps(ks):
+        return ks is not None and all(a == b or "*" in (a, b) for a, b in zip(ks, path))
+
     for n in ast.walk(fn):
         if isinstance(n, ast.Name) and n.id == name and isinstance(n.ctx, (ast.Store, ast.Del)):
             return n
         if isinstance(n, (ast.Global, ast.Nonlocal)) and name in n.names:
+            return n
+        if isinstance(n, (ast.Attribute, ast.Subscript)) and isinstance(n.ctx, (ast.Store, ast.Del)) and overlaps(keys(n)):
+            return n
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr in MUTATORS and overlaps(keys(n.func.value)):
             return n
     return None
 
@@ -766,6 +790,9 @@ class _Canon:
         self.idx, self.mod, self.fn, self.kinds, self.label, self.role = idx, mod, fn, kinds, label, role
         self.params = [a.arg for a in fn.args.posonlyargs + fn.args.args + fn.args.kwonlyargs if a.arg not in ("self", "cls")]
         self.inputs = _taint(fn, set(self.params) - (TAINT_SKIP if role == "tool" else set()))
+        # the parameter that is the tool input itself: the SDK hook's input_data, the ADK callback's args
+        self.input_param = ((self.params[:1] if role == "sdk-hook" else self.params[1:2] if role == "adk-hook" else [])
+                            or [None])[0]
         self.once = {}
         if role != "tool":       # F6: a local assigned once at the top level of a hook stands for its value
             for st in fn.body:
@@ -826,11 +853,11 @@ class _Canon:
         ch = _chain(self.subst(inner))
         if not ch or ch[0] not in self.params:
             return None, f"tests `{src}`, which is not the hook's tool input"
-        r = _rebound(self.fn, ch[0])
-        if r is not None:
-            return None, f"`{ch[0]}` is rebound at line {r.lineno}"
         keys = ch[1]
-        if (wrapped or kit) and (not keys or keys[-1] in WHOLE_INPUT_KEYS):
+        r = _rebound(self.fn, ch[0], keys)
+        if r is not None:
+            return None, f"`{ch[0]}` is rebound or changed at line {r.lineno}"
+        if (wrapped or kit) and ((not keys and ch[0] == self.input_param) or (keys and keys[-1] in WHOLE_INPUT_KEYS)):
             return ("whole", ""), ""
         if self.role == "sdk-hook" and len(keys) == 2 and keys[0] == "tool_input" and keys[1] in SDK_FIELD_TOOLS:
             return ("field", keys[1]), ""
@@ -1345,7 +1372,7 @@ def _agent_guards(idx: Index, mod: Module, call: ast.Call, track: str) -> list:
     elif track == "google-adk":
         cb = _kw(call, "before_tool_callback")
         if cb is not None:
-            guards += _callable_guards(idx, mod, cb, "before_tool_callback", ("dict",))
+            guards += _callable_guards(idx, mod, cb, "before_tool_callback", ("dict",), role="adk-hook")
     elif track == "microsoft-agent-framework":
         mw = _kw(call, "middleware")
         if mw is not None:
