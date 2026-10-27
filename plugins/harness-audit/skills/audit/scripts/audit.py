@@ -2146,6 +2146,10 @@ def claude_results(r: "Repo", settings) -> dict:
                 escapes.append(f"{r.rel(p)} sandbox.excludedCommands {sb['excludedCommands']!r} run outside the sandbox")
             if sb.get("allowUnsandboxedCommands", True) is not False:
                 escapes.append(f"{r.rel(p)} sandbox.allowUnsandboxedCommands is not false, so a command may leave the sandbox")
+            fs = sb.get("filesystem", {})
+            if not isinstance(fs, dict) or fs.get("disabled", False) is not False:
+                escapes.append(f"{r.rel(p)} sandbox.filesystem.disabled is set (or sandbox.filesystem is not readable), so "
+                               "the sandbox applies no filesystem rules to commands")
         for i, line in enumerate(r.text(p).splitlines(), 1):
             lines.setdefault(line.strip().strip(",").strip('"'), f"{r.rel(p)}:{i}")
 
