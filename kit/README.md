@@ -90,10 +90,13 @@ Then:
 | Container (`run-sandboxed.sh`) | Everything outside the mounted repo, for every process | What's inside the repo itself, and any key you pass in |
 | Red team (promptfoo, DeepTeam) | Finds weaknesses before users do | Nothing at run time; it's a test |
 
-Guards the audit can prove: `make audit` credits a code refusal (in a tool or a framework hook) only in the
-canonical forms its `--canonical-forms` flag prints: a top-level `if <test>: <refuse>` on the tool's own input, tests
-joined only by `or`. `shared/kit_guard.py` is the kit's guard helper: `if kit_guard.refuses(command): return "refused"`.
-Copy it unchanged; the audit recognises it by its pinned sha256. Any other shape scores UNRESOLVED, with the reason.
+Guards the audit can prove: from 1.4.5, `make audit` credits a code refusal (in a tool or a framework hook) only
+through the kit's guard helper, `shared/kit_guard.py`, in the shapes its `--canonical-forms` flag prints. Copy the
+helper unchanged (the audit recognises it by its pinned sha256), import it as `from kit_guard import refuses`, and make
+`if refuses(command): return "refused"` the tool's first statement, with `command` passed straight to the shell call.
+In a framework hook, give `refuses` the framework's tool input and refuse the documented way. Hand-written refusals
+(your own `in` tests or regexes) score UNRESOLVED, with the reason, even when they are correct. The helper's docstring
+lists exactly what it refuses (secret paths and destructive commands) and what it does not decode.
 
 ## Honest expectations
 
