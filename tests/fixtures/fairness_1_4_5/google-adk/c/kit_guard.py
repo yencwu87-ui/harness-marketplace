@@ -23,7 +23,8 @@ The classes, as this helper defines them (harness-audit credits exactly these):
                .bak); .netrc; .pgpass; credentials or credentials.<anything>; or inside .ssh, .aws, .gnupg, .azure,
                .kube, .docker or .config/gcloud. Upper and lower case are the same. Read after shell quotes and
                backslashes are removed (or read as Windows separators), %-escapes decoded (up to three times, so
-               %252e is a dot), simple braces expanded, and `.` and `..` path parts resolved.
+               %252e is a dot), simple braces expanded (`{a,b}` and sequences `{a..e}`, `{1..9}`; a word with more
+               than four brace groups or more than 64 expansions is refused), and `.` and `..` path parts resolved.
   globs        a path part holding `*`, `?` or `[` is read as a superset of what the shell could expand it to: a
                bracket expression (POSIX classes included) is any one character, `?` is one character and `*` is any
                run of characters, a leading dot included. The part is secret when that superset can match a secret
@@ -34,9 +35,9 @@ The classes, as this helper defines them (harness-audit credits exactly these):
   destructive  in a shell command, after quotes are removed, wherever the program appears (after sudo, env, xargs,
                bash -c "...", inside $(...) or backticks): git push and git clean, whatever git options come first
                (-C dir, -c k=v, --git-dir=...); git reset with --hard, options in any order, abbreviations such as
-               --ha included (and `reset --hard` after any program); git -c alias.*=... (an alias can run anything);
-               rm with a recursive option in any position (-r, -R, -rf, -fr, -r -f, --recursive and its
-               abbreviations, rm x -rf).
+               --ha included (and `reset --hard` after any program); git -c alias.*=... or --config-env alias.*=...
+               (an alias can run anything); rm with a recursive option in any position (-r, -R, -rf, -fr, -r -f,
+               --recursive and its abbreviations, rm x -rf).
 Not decoded (bound your claim accordingly): shell variables and parameter expansion ($X, ${X}), command output used
 as a word, ANSI-C quoting ($'\\x2e'), encodings (base64), git aliases defined in config files, programs that delete
 without these words (find -delete, a script file).
@@ -199,28 +200,52 @@ def _secret_part(part):
     return any(_meet(g, p) for p in _SECRET_PATTERNS)
 
 
+def _sequence(inner):
+    """The items of a brace sequence `a..e` or `1..3` (a step is ignored: a superset), or None."""
+    parts = inner.split("..")
+    if len(parts) not in (2, 3):
+        return None
+    a, b = parts[0], parts[1]
+    if len(a) == 1 and len(b) == 1 and not (a + b).lstrip("-").isdigit():
+        lo, hi = sorted((ord(a), ord(b)))
+        return [chr(c) for c in range(lo, hi + 1)] if hi - lo < 256 else None
+    try:
+        lo, hi = sorted((int(a), int(b)))
+    except ValueError:
+        return None
+    return [str(i) for i in range(lo, hi + 1)] if hi - lo < 256 else None
+
+
 def _expand_braces(word, depth=0):
-    """a{b,c}d -> [abd, acd] (simple, non-nested braces; at most 64 results)."""
+    """a{b,c}d -> [abd, acd], and a{1..3} -> [a1, a2, a3] (non-nested braces); None when the word holds more than
+    four brace groups or expands to more than 64 words, which the caller refuses (fail closed)."""
     if depth > 4:
-        return [word]
+        return None
     start = end = -1
+    items = None
     i = word.find("{")
     while i >= 0:
         j = i + 1
         while j < len(word) and word[j] not in "{}":
             j += 1
-        if j < len(word) and word[j] == "}" and "," in word[i + 1:j]:
-            start, end = i, j
-            break
+        if j < len(word) and word[j] == "}":
+            inner = word[i + 1:j]
+            items = inner.split(",") if "," in inner else _sequence(inner)
+            if items is not None:
+                start, end = i, j
+                break
         i = word.find("{", i + 1)
     if start < 0:
         return [word]
     out = []
-    for part in word[start + 1:end].split(","):
-        out += _expand_braces(word[:start] + part + word[end + 1:], depth + 1)
+    for part in items:
+        more = _expand_braces(word[:start] + part + word[end + 1:], depth + 1)
+        if more is None:
+            return None
+        out += more
         if len(out) > 64:
-            break
-    return out[:64]
+            return None
+    return out
 
 
 def _drop(s, chars):
@@ -280,7 +305,10 @@ def _secret_word(word):
     for _ in range(3):                                  # %252e -> %2e -> .
         forms |= {_percent_decoded(f) for f in forms}
     forms |= {_brackets_as_any(f) for f in forms if "[" in f}
-    for w in (x for f in forms for x in _expand_braces(f)):
+    expanded = [_expand_braces(f) for f in forms]
+    if None in expanded:
+        return True                                     # too many brace groups or words to read: refused
+    for w in (x for e in expanded for x in e):
         parts = [p.lower() for p in _split_parts(w)]
         if any(_secret_part(p) for p in parts):
             return True
@@ -396,7 +424,7 @@ def _destructive_argv(words):
             while j < len(rest):
                 a = rest[j]
                 if a in _GIT_OPTS_WITH_VALUE:
-                    if a == "-c" and j + 1 < len(rest) and rest[j + 1].lower().startswith("alias."):
+                    if a in ("-c", "--config-env") and j + 1 < len(rest) and rest[j + 1].lower().startswith("alias."):
                         return True
                     j += 2
                     continue

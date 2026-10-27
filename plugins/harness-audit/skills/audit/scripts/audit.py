@@ -787,8 +787,8 @@ CANONICAL_FORMS = (
      "to a module, its `__dict__` or `sys.modules`; `__dict__` or `sys.modules` methods; exec, eval or compile; "
      "importlib.reload; an `os.environ[...]` store is not a module change), and the tree has no sitecustomize or "
      "usercustomize module in any form (.py, compiled, a package) and no .pth file. Module objects (1.4.7): in any "
-     "file the audit reads (the same files), a module may only be read (`m.attr`, `m[...]`) and called "
-     "(`m.f(...)`). A module is a name bound by `import`, a name imported with `from` that is a repo module or comes "
+     "file the audit reads (the same files), a module may only be read (`m.attr`, `m[...]`, `getattr(m, '<name>')`, "
+     "a loop over `m.attr`; an item read such as `sys.argv[0]` is a value) and called (`m.f(...)`). A module is a name bound by `import`, a name imported with `from` that is a repo module or comes "
      "from outside the repo and is not capitalised (a capitalised one is taken to be a class), or an attribute of "
      "either (an attribute of an outside module may be a module). Any of these makes the guard UNRESOLVED, naming the "
      "file and line, for every helper-credited tool and hook in the tree: binding a module to another name in any "
@@ -803,8 +803,9 @@ CANONICAL_FORMS = (
      "parameter, a name bound only to a literal, a display or a call of a repo class or function or of dict, list, "
      "set, tuple, object, frozenset, bytearray, str, int or float, an exception name, a function or a class; a call's "
      "result, a for or with target and an outside call's result may be a module); an item store or a mutating "
-     "method (update, append, insert, pop, clear, ...) on an object held by a module (os.environ excepted, and "
-     "`sys.path.insert(0, <this file's folder>)`, a folder the shadow check reads); any import of importlib, imp, "
+     "method (update, append, insert, pop, clear, add, discard, the set and deque updates, ...) on an object held "
+     "by a module, also through getattr (os.environ excepted, and `sys.path.insert(0, <this file's folder>)`, "
+     "inline or through a name bound once to it, a folder the shadow check reads); any import of importlib, imp, "
      "gc, ctypes, inspect, unittest.mock or mock; sys.modules, sys._getframe, sys.meta_path, sys.path_hooks, "
      "sys.path_importer_cache, sys.settrace or sys.setprofile (also through getattr or `from sys import`); "
      "`__import__`, `__builtins__`, `__loader__`, `__spec__`, `__annotations__`, globals() or locals(); vars() "
@@ -884,14 +885,16 @@ CANONICAL_FORMS = (
      "unpacking, a helper's return, an imported value, a `yield`, `updatedInput` or any other output voids the guard "
      "credit of every hook on the agent (UNRESOLVED), whatever the registration order, since the SDK may run matching "
      "hooks in parallel. The hooks dict has only literal, distinct keys (no `**`). The options are passed whole to "
-     "the SDK (ClaudeSDKClient, query), returned, or bound to one name by a plain or annotated assignment (1.4.7: "
+     "the SDK (ClaudeSDKClient, query), returned from a named function every use of which is a call passed whole "
+     "to the SDK, or bound to one name by a plain or annotated assignment (1.4.7: "
      "any other binding form, such as a walrus, for or with target, unpacking, a chained assignment, an attribute or "
      "item target, a display, a default or another call, is UNRESOLVED). A bound name is bound once in the module, "
      "counting every binding form (plain, annotated or augmented assignment, a bare annotation, walrus, for, with, "
      "except, match, import, global, nonlocal, del, def, class, comprehension), and is only passed whole to the "
-     "SDK or returned: an attribute read such as `opts.hooks[...].append(...)` or another call such as "
+     "SDK or returned (as above): an attribute read such as `opts.hooks[...].append(...)` or another call such as "
      "`dataclasses.replace(opts, ...)` voids it too, and so does another file importing the name (or *) from the "
-     "module or reading it through the module, or any `.options` or `._options` attribute in the tree (a client "
+     "module or reading it through the module (getattr and vars included), or any `.options` or `._options` "
+     "attribute in the tree, or `'options'`/`'_options'` given to a call (a client "
      "keeps its options there until it connects). `can_use_tool`, when set, never passes `updated_input`. Strands: nothing in the repo sets `cancel_tool` to "
      "anything but a non-empty literal, deletes or augments it, or calls setattr or delattr with a computed name."),
     ("F6 Classes",
@@ -906,7 +909,7 @@ CANONICAL_FORMS = (
      "the reason \"hand-written refusal: use the kit guard helper to earn credit\" or the rule it breaks. It earns "
      "no points; it does not count as missing either."),
 )
-KIT_GUARD_SHA256 = "2fc756dc5e007a6318c3c37b7aaff5ac1fa2e1de10e3714d7eb0ea2e311e60fb"   # kit/shared/kit_guard.py
+KIT_GUARD_SHA256 = "2c56e596b8b2de7779bbd1aabb872b178de6f69469d7e6ac088a209117189701"   # kit/shared/kit_guard.py
 KIT_GUARD_MODULE, KIT_GUARD_NAME = "kit_guard", "refuses"
 STARTUP_MODULES = ("sitecustomize", "usercustomize")   # run at interpreter start, in any form (.py, .pyc, package)
 DUNDER_SETTERS = {"__setattr__", "__delattr__", "__setitem__", "__delitem__"}
@@ -1110,7 +1113,8 @@ def _chain(node):
 
 
 MUTATORS = {"update", "clear", "pop", "popitem", "setdefault", "append", "extend", "insert", "remove", "sort",
-            "reverse", "__setitem__", "__delitem__", "__setattr__"}
+            "reverse", "__setitem__", "__delitem__", "__setattr__", "add", "discard", "difference_update",
+            "intersection_update", "symmetric_difference_update", "appendleft", "extendleft", "popleft", "rotate"}
 
 
 def _rebound(fn, name, path=()):
@@ -1613,9 +1617,14 @@ class _ModuleUses:
     def kind(self, e):
         """'module' when e is, or may be, a module (an imported module, an attribute of one, a lower-case name
         imported with `from` from outside the repo), 'class' for a capitalised such name, None otherwise."""
+        if isinstance(e, ast.Call) and isinstance(e.func, ast.Name) and e.func.id == "getattr" and e.args and \
+                e.func.id not in self.m.funcs:
+            return "module" if self.kind(e.args[0]) else None     # getattr(sys, 'path') is sys.path
         root = e
-        while isinstance(root, (ast.Attribute, ast.Subscript)):
-            root = root.value
+        while isinstance(root, (ast.Attribute, ast.Subscript)) or (isinstance(root, ast.Call) and
+                                                                    isinstance(root.func, ast.Name) and
+                                                                    root.func.id == "getattr" and root.args):
+            root = root.args[0] if isinstance(root, ast.Call) else root.value
         if not isinstance(root, ast.Name) or root.id not in self.kinds:
             return None
         if e is not root:
@@ -1710,6 +1719,8 @@ class _ModuleUses:
         if self.m.full(call.func) not in ("sys.path.insert", "sys.path.append") or call.keywords:
             return False
         arg = call.args[-1] if call.args else None
+        if isinstance(arg, ast.Name) and arg.id in self.m.assigns and len(_binds(self.m.tree, arg.id)) == 1:
+            arg = self.m.assigns[arg.id]        # HERE = os.path.dirname(os.path.abspath(__file__)), bound once
         if isinstance(arg, ast.Call) and isinstance(arg.func, ast.Name) and arg.func.id == "str" and len(arg.args) == 1:
             arg = arg.args[0]
         own = {"Path(__file__).resolve().parent", "Path(__file__).parent", "Path(__file__).absolute().parent",
@@ -1787,10 +1798,13 @@ class _ModuleUses:
                 continue
             break
         kind = self.kind(cur)
-        if kind is None or self.environ(cur):
-            return ""
+        if kind is None or self.environ(cur) or isinstance(cur, ast.Subscript):
+            return ""                           # an item read (sys.argv[0]) is a value, not a module
         p = self.parents.get(cur)
         text = self.m.src(cur)[:40]
+        if isinstance(p, (ast.For, ast.AsyncFor, ast.comprehension)) and p.iter is cur and \
+                isinstance(cur, ast.Attribute):
+            return ""                           # for p in sys.path: the target is an element
         if isinstance(p, ast.Call) and p.func is cur:
             return ""
         if isinstance(p, (ast.Attribute, ast.Subscript)):           # a store or a read on it, judged elsewhere
@@ -2452,7 +2466,9 @@ def _sdk_options_changed(idx, mod, call) -> str:
     p = parents.get(call)
     if isinstance(p, ast.keyword):
         p = parents.get(p)
-    if isinstance(p, ast.Return) or (_sdk_call(mod, p) and call is not p.func):
+    if isinstance(p, ast.Return):
+        return _returned_whole(idx, mod, p, parents) or _client_options_read(idx, mod)
+    if _sdk_call(mod, p) and call is not p.func:
         return _client_options_read(idx, mod)
     named = (isinstance(p, ast.Assign) and len(p.targets) == 1 and isinstance(p.targets[0], ast.Name)) or \
         (isinstance(p, ast.AnnAssign) and isinstance(p.target, ast.Name) and p.value is call)
@@ -2470,13 +2486,41 @@ def _sdk_options_changed(idx, mod, call) -> str:
         up = parents.get(n)
         if isinstance(up, ast.keyword):
             up = parents.get(up)
-        if isinstance(n.ctx, ast.Load) and (isinstance(up, ast.Return) or (_sdk_call(mod, up) and n is not up.func)):
+        if isinstance(n.ctx, ast.Load) and isinstance(up, ast.Return):
+            why = _returned_whole(idx, mod, up, parents)
+            if why:
+                return why
+            continue
+        if isinstance(n.ctx, ast.Load) and _sdk_call(mod, up) and n is not up.func:
             continue
         return f"{mod.where(n)} `{name}` is used after it is built ({mod.src(up)[:40]}), so its hooks may change"
     elsewhere = _imported_elsewhere(idx, mod, name)
     if elsewhere:
         return elsewhere
     return _client_options_read(idx, mod)
+
+
+def _returned_whole(idx, mod, ret, parents) -> str:
+    """F5: options returned by a function count only when every use of that function, here and in other files, is a
+    call whose result is passed whole to the SDK; '' when so."""
+    fn = parents.get(ret)
+    while fn is not None and not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+        fn = parents.get(fn)
+    if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return f"{mod.where(ret)} the options are returned from something that is not a named function"
+    if len(_binds(mod.tree, fn.name)) != 1:
+        return f"{mod.where(fn)} `{fn.name}`, which returns the options, is bound more than once"
+    for n in ast.walk(mod.tree):
+        if not (isinstance(n, ast.Name) and n.id == fn.name and isinstance(n.ctx, ast.Load)):
+            continue
+        call = parents.get(n)
+        up = parents.get(call)
+        if isinstance(up, ast.keyword):
+            up = parents.get(up)
+        if not (isinstance(call, ast.Call) and call.func is n and _sdk_call(mod, up) and call is not up.func):
+            return (f"{mod.where(n)} the options `{fn.name}` returns are used other than passed whole to the SDK "
+                    f"({mod.src(up if up is not None else n)[:40]}), so their hooks may change")
+    return _imported_elsewhere(idx, mod, fn.name)
 
 
 def _imported_elsewhere(idx, mod, name) -> str:
@@ -2491,7 +2535,17 @@ def _imported_elsewhere(idx, mod, name) -> str:
                     return f"{m.where(n)} imports `{name}` from {mod.rel}, so its hooks may change"
             elif isinstance(n, ast.Attribute) and n.attr == name and idx.resolve(m, n.value)[:2] == ("module", mod):
                 return f"{m.where(n)} reads `{name}` through {mod.rel}, so its hooks may change"
+            elif isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in ("getattr", "setattr",
+                                                                                         "delattr", "vars") \
+                    and n.args and idx.resolve(m, n.args[0])[:2] == ("module", mod):
+                return f"{m.where(n)} reads names of {mod.rel} with {n.func.id}(), so its hooks may change"
     return ""
+
+
+def _parents_of(m) -> dict:
+    if getattr(m, "_parents", None) is None:
+        m._parents = _parents(m.tree)
+    return m._parents
 
 
 def _client_options_read(idx, mod) -> str:
@@ -2502,6 +2556,10 @@ def _client_options_read(idx, mod) -> str:
         for n in ast.walk(m.tree):
             if isinstance(n, ast.Attribute) and n.attr in ("options", "_options"):
                 return f"{m.where(n)} reads or sets .{n.attr}, so a client's options may change before it connects"
+            if isinstance(n, ast.Constant) and n.value in ("options", "_options") and \
+                    isinstance(_parents_of(m).get(n), ast.Call):
+                return (f"{m.where(n)} names the attribute {n.value!r} in a call, so a client's options may change "
+                        "before it connects")
     return ""
 
 
