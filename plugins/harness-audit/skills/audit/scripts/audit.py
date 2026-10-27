@@ -437,8 +437,12 @@ class Index:
         exec or eval in the module itself), and the external modules patched the same way (`builtins`, `re`, ...)."""
         if getattr(self, "_tampered", None) is None:
             self._tampered = set()
-            for rel in list(self.files):
-                m = self.module(self.files[rel])
+            for dp, dns, fns in os.walk(self.r.root):          # every folder, skipped ones too: names only
+                for fn in fns:
+                    if fn in ("sitecustomize.py", "usercustomize.py") or fn.endswith(".pth"):
+                        self._tampered.add("*")             # runs at interpreter start, before any guard
+            for rel in list(self.files) + list(self.test_files()):
+                m = self.module(self.files.get(rel) or self._test_files[rel])
                 for n in ast.walk(m.tree):
                     target = None
                     if isinstance(n, (ast.Attribute, ast.Subscript)) and isinstance(n.ctx, (ast.Store, ast.Del)):
@@ -450,6 +454,12 @@ class Index:
                             self._tampered.add(m.path)
                     elif isinstance(n, ast.Name) and n.id == "__builtins__":
                         self._tampered.add("builtins")
+                    if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute):
+                        recv = ast.dump(n.func.value)
+                        if n.func.attr in MUTATORS and ("'__dict__'" in recv or "'modules'" in recv):
+                            self._tampered.add("*")          # x.__dict__.update(...), sys.modules.pop(...)
+                        elif m.full(n.func) in ("importlib.reload", "imp.reload"):
+                            self._tampered.add("*")
                     while isinstance(target, (ast.Attribute, ast.Subscript)):
                         target = target.value
                     if isinstance(target, ast.Call) and isinstance(target.func, ast.Name) and \
@@ -467,6 +477,42 @@ class Index:
                         elif k[0] == "external" and target.id in m.alias:
                             self._tampered.add(k[1].split(".")[0])
         return self._tampered
+
+    def test_files(self) -> dict:
+        """Test-named Python files: never scored as agents, but they can still change modules at run time."""
+        if getattr(self, "_test_files", None) is None:
+            self._test_files = {}
+            for f in self.r.files():
+                rel = self.r.rel(f).replace(os.sep, "/")
+                if f.suffix == ".py" and _is_test_path(rel):
+                    self._test_files[rel] = f
+        return self._test_files
+
+    def helper_shadows(self) -> str:
+        """F1: why `import kit_guard` may not load the pinned file: a kit_guard package or compiled module anywhere
+        in the tree (they win over a .py beside them), or a kit_guard.py whose bytes differ; '' when none."""
+        if getattr(self, "_helper_shadows", None) is None:
+            self._helper_shadows = ""
+            for dp, dns, fns in os.walk(self.r.root):
+                if os.path.basename(dp) == "__pycache__":
+                    continue
+                rel = os.path.relpath(dp, self.r.root)
+                for d in dns:
+                    if d == KIT_GUARD_MODULE or d.startswith(KIT_GUARD_MODULE + "."):
+                        self._helper_shadows = f"{os.path.join(rel, d)} is a kit_guard package that an import may load instead"
+                for fn in fns:
+                    if fn.split(".")[0] != KIT_GUARD_MODULE or fn.startswith(KIT_GUARD_MODULE + "_"):
+                        continue
+                    path = Path(dp) / fn
+                    if fn != "kit_guard.py":
+                        self._helper_shadows = f"{os.path.join(rel, fn)} is a compiled or other kit_guard module an import may load"
+                    else:
+                        data = self.r.data(path)
+                        if data is None or hashlib.sha256(data).hexdigest() != KIT_GUARD_SHA256:
+                            self._helper_shadows = f"{os.path.join(rel, fn)} is a kit_guard.py that is not the pinned helper"
+                if self._helper_shadows:
+                    return self._helper_shadows
+        return self._helper_shadows
 
     def cancel_undo(self) -> str:
         """F5 (Strands): where some repo file sets cancel_tool to anything but a non-empty literal, deletes or
@@ -804,6 +850,9 @@ def _helper_check(idx, mod):
     data = idx.r.data(target.path)
     if data is None or hashlib.sha256(data).hexdigest() != KIT_GUARD_SHA256:
         return None, f"{target.rel} is not the shipped kit helper (its sha256 differs from the pinned one)"
+    shadow = idx.helper_shadows()
+    if shadow:
+        return None, shadow
     tampered = idx.tampered()
     hit = next((t for t in (target.path, mod.path, "*") + KIT_GUARD_DEPS if t in tampered), None)
     if hit is not None:
@@ -905,6 +954,12 @@ def _chain_top(node, parents):
             return top
 
 
+SAFE_KWARGS = {"shell": ("shell", "capture_output", "text", "check", "timeout", "encoding", "errors",
+                          "universal_newlines", "cwd"),
+               "read": ("mode", "encoding", "errors", "newline", "buffering"), "write": ("mode", "encoding", "errors", "newline", "buffering"),
+               "fetch": ("timeout", "headers", "allow_redirects", "follow_redirects", "verify")}
+
+
 def _op_arg(call, cat, full):
     """The argument that carries the operation (F2): the command of a shell call, the file of open(), the URL of a
     fetch; None for anything else (a path receiver such as Path(p).read_text(), a copy, a delete) or when `*`/`**`
@@ -922,6 +977,9 @@ def _op_arg(call, cat, full):
         pos, kws = (1 if name in ("request", "stream") else 0), ("url",)
     else:
         return None
+    safe = SAFE_KWARGS.get(cat if cat != "open" else "read", ())
+    if any(k.arg not in kws and (k.arg not in safe or not _literal(k.value)) for k in call.keywords):
+        return None                  # executable=, env=, preexec_fn=, input=, opener=, a computed shell=: not as written
     given = [k.value for k in call.keywords if k.arg in kws]
     if given:
         return given[0] if len(call.args) <= pos else None
@@ -1268,6 +1326,10 @@ def _local_aliases(mod: Module, fn) -> dict:
                 if isinstance(item.optional_vars, ast.Name):
                     local.setdefault(item.optional_vars.id, item.context_expr)
     out.update(local)
+    for name in list(out):         # a callee alias bound more than once may be any of its values when it runs
+        if isinstance(out[name], (ast.Name, ast.Attribute)) and \
+                (len(_binds(fn, name)) > 1 or (name not in local and len(_binds(mod.tree, name)) > 1)):
+            out[name] = ast.Name(id="<rebound>")
     return out
 
 
@@ -1424,7 +1486,11 @@ def function_reach(idx: Index, mod: Module, fn, tainted=None, depth=0, carry=())
                 continue
             full = _full_name(mod, aliases, call.func) if isinstance(call.func, (ast.Name, ast.Attribute)) else ""
             arg = _op_arg(call, cat, full)
-            if isinstance(arg, ast.Name) and arg.id == g.subject:
+            tampered = idx.tampered()
+            head = _dotted(call.func).split(".")[0]
+            rebound = head in aliases and (len(_binds(fn, head)) > 1 or len(_binds(mod.tree, head)) > 1)
+            if isinstance(arg, ast.Name) and arg.id == g.subject and not rebound and \
+                    full.split(".")[0] not in tampered and "*" not in tampered and "builtins" not in tampered:
                 out.append(g)
         return out
 
