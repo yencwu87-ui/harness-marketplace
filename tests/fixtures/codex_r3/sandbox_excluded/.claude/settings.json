@@ -1,0 +1,28 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(*)"
+    ],
+    "deny": [
+      "Write",
+      "Edit",
+      "MultiEdit",
+      "NotebookEdit",
+      "WebFetch",
+      "WebSearch",
+      "Read",
+      "Grep",
+      "Glob",
+      "Read(**/.env*)",
+      "Bash(git push *)",
+      "Bash(rm -rf *)"
+    ],
+    "ask": []
+  },
+  "sandbox": {
+    "enabled": true,
+    "excludedCommands": [
+      "python *"
+    ]
+  }
+}
