@@ -110,6 +110,10 @@ From 1.4.8 a module may only be used as `m.attr` or `m.attr(...)` (or tested, co
 `check_output` takes no `check` or `capture_output`, option values must be ones the call accepts (`timeout=5`, not
 `'5'`), and SDK options must be built at module level or inside a function, not in a class body. The helper also
 expands braces in commands, so `git {push,status}` is refused.
+From 1.4.9 any mention of `exec`, `eval`, `compile` or `__import__` (also `builtins.exec`, `from builtins import
+...`), any use of the `builtins` module and any import of `pkgutil` withhold credit; so does a function of yours that
+stores on, or appends to, one of its parameters (`self` in an ordinary class is fine). The helper refuses a command
+nested more than four shells deep, whatever it does.
 
 ## Honest expectations
 
