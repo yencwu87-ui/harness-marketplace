@@ -71,6 +71,7 @@ class Repo:
         self._real_root = root.resolve()
         self._files = None
         self.truncated = ""     # B1: set when the walk stops at MAX_FILES
+        self.unread_py = []     # B3: Python files and linked folders the walk does not read
 
     def files(self):
         """Walk the tree once (skipping vendored and build folders); every pattern match reuses this list."""
@@ -78,6 +79,13 @@ class Repo:
             out = []
             for dp, dns, fns in os.walk(self.root):
                 dns[:] = [d for d in dns if d not in SKIP_DIRS and not d.startswith(".") or d in (".claude", ".github", ".devcontainer")]
+                for d in dns:                          # 1.4.10: a linked folder is not walked: its modules are unread
+                    if (Path(dp) / d).is_symlink():
+                        self.unread_py.append(f"{self.rel(Path(dp) / d)} is a linked folder the audit does not walk")
+                for f in fns:
+                    if f.endswith(".py") and not self._readable(Path(dp) / f):
+                        self.unread_py.append(f"{self.rel(Path(dp) / f)} is a Python file the audit may not read "
+                                              "(it links out of the tree, or is named like a secret)")
                 out += [Path(dp) / f for f in fns if self._readable(Path(dp) / f)]
                 if len(out) > MAX_FILES:
                     self.truncated = f"the tree holds more than {MAX_FILES} files; the audit read the first ones"
@@ -293,7 +301,9 @@ WRITE_FUNCS = {"shutil.copy", "shutil.copyfile", "shutil.copy2", "shutil.move", 
                "os.rename", "os.replace", "os.rmdir", "os.removedirs", "os.makedirs", "os.mkdir"}
 FETCH_HEADS = {"requests", "httpx", "aiohttp", "urllib3", "http", "socket", "ftplib", "smtplib"}
 COMPUTER_HEADS = {"pyautogui", "pynput", "pywinauto", "playwright", "selenium"}
-WRITE_ATTRS = {"write_text", "write_bytes", "unlink", "rmdir", "touch", "rename", "replace", "mkdir", "chmod"}
+WRITE_ATTRS = {"write_text", "write_bytes", "unlink", "rmdir", "touch", "rename", "replace", "mkdir", "chmod",
+               "symlink_to", "hardlink_to", "link_to", "lchmod"}
+PATH_WRITE_ATTRS = {"copy", "copy_into", "move", "move_into"}    # writes only on a Path (a dict also has copy)
 READ_ATTRS = {"read_text", "read_bytes"}
 SAFE_HEADS = {"json", "re", "math", "datetime", "time", "logging", "typing", "textwrap", "shlex", "hashlib", "base64",
               "itertools", "collections", "functools", "string", "uuid", "random", "statistics", "decimal", "fractions",
@@ -442,6 +452,8 @@ class Index:
         self.bounds_hit = []    # 1.4.10: every analysis bound reached; any one withholds G1-G3 credit (fail closed)
         if r.files() is not None and r.truncated:
             self.bound(r.truncated)
+        for why in r.unread_py:
+            self.bound(why)
         self.files = {}
         for f in r.files():
             rel = r.rel(f).replace(os.sep, "/")
@@ -566,12 +578,15 @@ class Index:
                 elif isinstance(n, ast.ClassDef):
                     for b in _bindings(n, name):
                         how, value = _binding_source(b, uses.parents)
+                        if isinstance(b, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and b.decorator_list:
+                            return False                   # a property or decorated def: what it gives is not read
                         if isinstance(b, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.ExceptHandler)):
                             seen = True                    # a function, class or exception object, not a module
                             continue
-                        if how == "none" and not (isinstance(_context(b, uses.parents), ast.AnnAssign) and
-                                                  n.decorator_list):
-                            continue                       # a deletion; a bare annotation of an undecorated class
+                        if isinstance(_context(b, uses.parents), ast.AnnAssign) and (n.decorator_list or n.bases):
+                            return False                   # a field: a decorator or a base may bind it from a call
+                        if how == "none":
+                            continue                       # a deletion; a bare annotation of a plain class
                         if how != "value" or value is None or not uses.safe_value(value):
                             return False
                         seen = True
@@ -972,7 +987,12 @@ CANONICAL_FORMS = (
      "clear, add, discard, the set and deque updates, ...) on an object held by a module, or by what an outside call returns "
      "(`pkgutil.resolve_name('sys').path.insert(...)`; 1.4.10: also through a local bound to it, at any alias depth, "
      "`p = vendorlib.load(); p.handlers.clear()`, while an item of it, `d = json.loads(s); d['a'].append(1)`, stays "
-     "allowed as before), or by a parameter that is not exempt (os.environ excepted, and "
+     "allowed as before), or by a parameter that is not exempt; 1.4.10: a change in place counts the same when it is "
+     "an augmented assignment to a name bound to an attribute or item of such an object (`p = m.handlers; p += x`; "
+     "a bare parameter or number is not judged, its type being unknown), an unbound container method (`dict.update(x, "
+     "...)`, `list.append(x, ...)`) or a standard function that changes its first argument (bisect.insort, heapq, "
+     "random.shuffle, the operator in-place functions); an operator's result (`x + 0`, `-x`, `x == y`) is a safe "
+     "value only when its operands are (os.environ excepted, and "
      "`sys.path.insert(0, <this file's folder>)`, inline or through a name bound once to it, a folder the shadow "
      "check reads); any import of importlib, imp, gc, ctypes, inspect, unittest.mock, mock or pkgutil; any import of a module that runs "
      "code strings, code files or serialized calls, the same as exec (timeit, runpy, cProfile, profile, pdb, bdb, "
@@ -1026,7 +1046,9 @@ CANONICAL_FORMS = (
      "setattr(x, 'a', v), and (1.4.10) a binding of `a` anywhere in a class's namespace, through every compound "
      "statement and in any form; a form that gives no value the audit reads, such as a for or with target, "
      "unpacking, an import, a match capture or an augmented assignment, counts as a module; a method's local is "
-     "not a class attribute) gives a value that is not a module and one exists (`self.items = "
+     "not a class attribute, and a comprehension's target is not one either; a decorated def such as a property, and "
+     "an annotated field of a class with a decorator or a base, which a constructor may set, count as a module) gives "
+     "a value that is not a module and one exists (`self.items = "
      "[]` then `self.items.append(v)` is fine; `self.m = m` then `self.m.run = ...` is not); `cls()` in an exempt "
      "classmethod is an instance; and a framework-supplied parameter in its documented contract position, written only where the "
      "contract writes: a Strands callback's only argument `event.cancel_tool = ...`, a Microsoft Agent Framework "
@@ -1141,8 +1163,9 @@ CANONICAL_FORMS = (
      "scope apply to. There is no keyword rule: a hand-written test covers nothing. The helper reads text: it does "
      "not limit where a file-write tool writes. A tool class is followed through its run method (_run, _arun, run, "
      "__call__, forward or invoke) only when its namespace binds that name once, as a def (1.4.10); a Strands hook "
-     "provider's callback likewise. A pathlib method that reads or writes (read_text, write_text, open, unlink, "
-     "...) on a Path chain the audit does not model (joinpath, parent, with_name, Path.cwd(), or more than five "
+     "provider's callback likewise; a tool class that binds two entry points, itself or through a repo base (`run` "
+     "and `__call__`), is UNRESOLVED. A pathlib method that reads or writes (read_text, write_text, open, unlink, "
+     "symlink_to, hardlink_to, copy, move, ...; a write by operation) on a Path chain the audit does not model (joinpath, parent, with_name, Path.cwd(), or more than five "
      ".resolve(), `/` or alias steps back to Path(...)) is UNRESOLVED (1.4.10; before, it was read as no "
      "capability)."),
     ("F7 Everything else",
@@ -1151,7 +1174,8 @@ CANONICAL_FORMS = (
      "the reason \"hand-written refusal: use the kit guard helper to earn credit\" or the rule it breaks. It earns "
      "no points; it does not count as missing either. Bounds (1.4.10): every bound the code analysis has fails "
      "closed. When the audit stops at one (more than 60000 files in the tree, a Python file over 400000 bytes or "
-     "one this Python cannot parse, a name re-exported through more than 6 resolve steps, a recursion limit), "
+     "one this Python cannot parse or may not read (it links out of the tree, or is named like a secret), a "
+     "linked folder, a name re-exported through more than 3 re-export hops (6 resolve steps), a recursion limit), "
      "every code-guard check that would be VERIFIED is UNRESOLVED, naming the bound; past the bounds that belong "
      "to one call (4 helper calls deep, 3 tool-list indirections, 4 nested string constants, 4 local alias steps "
      "to a callee's name, 5 Path steps, 64 parameter alias steps) that call is UNRESOLVED or its target held. "
@@ -1379,8 +1403,8 @@ def _rebound(fn, name, path=()):
 # a direct parent lookup or a loop over a class body anywhere else). A namespace is the module, a class body, a
 # function or a lambda. if, try/except/except*/else/finally, for, while, with and match make none, whatever their
 # depth. A def's decorators, defaults and annotations, and a class's bases and keywords, are read in the namespace
-# around it. A comprehension is read as part of the namespace around it, so its targets count as bindings there (a
-# superset of what Python binds: a rule that needs every binding sees too many, never too few).
+# around it. A comprehension's targets bind only inside it (_lookup reads them there, and a class namespace is not
+# seen from inside one); a walrus inside it binds in the namespace around it.
 NAMESPACES = (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
 FUNCTIONS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
 
@@ -1475,6 +1499,8 @@ def _own_nodes(ns):
                 more = list(n.decorator_list) + more + ([n.returns] if n.returns is not None else [])
         elif isinstance(n, ast.ClassDef):
             more = list(n.decorator_list) + list(n.bases) + list(n.keywords)
+        elif isinstance(n, ast.comprehension):
+            more = [n.iter] + list(n.ifs)              # its target binds in the comprehension, not here
         else:
             more = list(ast.iter_child_nodes(n))
         todo.extend(reversed(more))
@@ -1519,13 +1545,28 @@ def _declared(scope, name, kind, parents) -> list:
     return out
 
 
+COMPREHENSIONS = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+
+
 def _lookup(node, name, parents):
-    """(namespace, bindings): where Python reads `name` at node, and every binding that may give it its value. The
-    innermost namespace around node that binds it, passing class namespaces other than the first (a method does not
-    see its class's names); else the module, with no bindings when nothing binds it. A `global` declaration sends the
-    name to the module, a `nonlocal` one to the enclosing function; the declaring namespace's own bindings are then
-    bindings of that name, and so are those of every other namespace that declares it so (a superset)."""
-    ns, first, extra = _namespace(node, parents), True, []
+    """(namespace, bindings): where Python reads `name` at node, and every binding that may give it its value. A
+    comprehension around node that binds the name as a target comes first (its first iterable is read outside it).
+    Then the innermost namespace around node that binds it, passing class namespaces other than the first (a method
+    or a comprehension does not see its class's names); a class body's own bindings are joined by those around it,
+    since a class-body name not yet bound, or deleted, is read from outside. Else the module, with no bindings when
+    nothing binds it. A `global` declaration sends the name to the module, a `nonlocal` one to the enclosing function;
+    the declaring namespace's own bindings are then bindings of that name, and so are those of every other namespace
+    that declares it so (a superset)."""
+    ns = _namespace(node, parents)
+    below, child, p, first = None, node, parents.get(node), True
+    while p is not None and p is not ns:
+        if isinstance(p, COMPREHENSIONS) and not (child is p.generators[0] and below is p.generators[0].iter):
+            first = False
+            found = [t for g in p.generators for t in ast.walk(g.target) if isinstance(t, ast.Name) and t.id == name]
+            if found:
+                return p, found
+        below, child, p = child, p, parents.get(p)
+    extra = []
     while ns is not None:
         if isinstance(ns, ast.Module):
             return ns, _bindings(ns, name) + _declared(ns, name, ast.Global, parents) + extra
@@ -1536,10 +1577,12 @@ def _lookup(node, name, parents):
                 while _namespace(top, parents) is not None:
                     top = _namespace(top, parents)
                 if isinstance(top, ast.Module):
-                    return top, _bindings(top, name) + _declared(top, name, ast.Global, parents)
-                return None, found
+                    return top, _bindings(top, name) + _declared(top, name, ast.Global, parents) + extra
+                return None, found + extra
             if any(isinstance(b, ast.Nonlocal) for b in found):
                 extra += [b for b in found if not isinstance(b, ast.Nonlocal)]
+            elif found and isinstance(ns, ast.ClassDef):
+                extra += found                         # the class body may also read the name around it
             elif found:
                 if isinstance(ns, FUNCTIONS):
                     found = found + _declared(ns, name, ast.Nonlocal, parents)
@@ -2268,6 +2311,12 @@ FRESH_CALLS = SAFE_BASE_CALLS | {"sorted", "len", "repr", "bool", "range", "abs"
                                  "oct", "bytes", "complex", "print"}   # builtins that return a new value
 PASS_THROUGH = {"getattr", "next", "iter", "reversed", "enumerate", "zip", "filter", "map", "min", "max", "vars",
                 "type", "super", "memoryview"}           # builtins that may return what they are given
+CONTAINER_TYPES = {"dict", "list", "set", "bytearray", "deque", "OrderedDict", "defaultdict", "Counter"}
+IN_PLACE_FUNCS = {"bisect.insort", "bisect.insort_left", "bisect.insort_right", "heapq.heappush", "heapq.heappop",
+                  "heapq.heapify", "heapq.heapreplace", "heapq.heappushpop", "random.shuffle",
+                  "collections.deque.append", "collections.deque.extend"} | {
+    f"operator.{f}" for f in ("iadd", "iand", "iconcat", "ifloordiv", "ilshift", "imod", "imul", "imatmul", "ior",
+                              "ipow", "irshift", "isub", "itruediv", "ixor", "setitem", "delitem")}
 MAX_ALIAS_STEPS = 64          # R9-02: alias links the parameter analysis follows; past them the target counts as held
 
 
@@ -2353,8 +2402,12 @@ class _ModuleUses:
         """A value that is not a module: a literal or display, or a call of a repo class or function or a builtin
         constructor (a repo function that returned a module is caught where it returns it)."""
         if isinstance(v, (ast.Constant, ast.JoinedStr, ast.List, ast.Tuple, ast.Set, ast.Dict, ast.ListComp,
-                          ast.SetComp, ast.DictComp, ast.GeneratorExp, ast.BinOp, ast.UnaryOp, ast.Compare)):
+                          ast.SetComp, ast.DictComp, ast.GeneratorExp)):
             return True
+        if isinstance(v, (ast.BinOp, ast.UnaryOp, ast.Compare)):     # 1.4.10: an operand's __add__ may return anything
+            return all(self.safe_value(x) for x in ((v.left, v.right) if isinstance(v, ast.BinOp) else
+                                                    (v.operand,) if isinstance(v, ast.UnaryOp) else
+                                                    [v.left] + v.comparators))
         if isinstance(v, ast.Call) and isinstance(v.func, (ast.Name, ast.Attribute)):
             if isinstance(v.func, ast.Name) and v.func.id in SAFE_BASE_CALLS and v.func.id not in self.kinds:
                 return True
@@ -2470,9 +2523,13 @@ class _ModuleUses:
             return _strongest(*[rec(v) for v in e.values])
         if isinstance(e, (ast.NamedExpr, ast.Starred, ast.Await)):
             return rec(e.value)
+        if isinstance(e, (ast.BinOp, ast.UnaryOp, ast.Compare)):
+            ops = (e.left, e.right) if isinstance(e, ast.BinOp) else (e.operand,) if isinstance(e, ast.UnaryOp) \
+                else [e.left] + e.comparators
+            st = _strongest(*[rec(x) for x in ops])
+            return "module" if st in ("held", "module") else None   # anything, but not what an operand holds
         if isinstance(e, (ast.Constant, ast.JoinedStr, ast.List, ast.Tuple, ast.Set, ast.Dict, ast.ListComp,
-                          ast.SetComp, ast.DictComp, ast.GeneratorExp, ast.BinOp, ast.UnaryOp, ast.Compare,
-                          ast.Lambda)):
+                          ast.SetComp, ast.DictComp, ast.GeneratorExp, ast.Lambda)):
             return None
         return "held"                                      # yield, anything else: unknown
 
@@ -2704,9 +2761,38 @@ class _ModuleUses:
                 self.held(n.func.value, n):
             return (f"calls a mutating method on a parameter, or something it holds ({m.src(n.func)[:40]}), which may "
                     "be a module or an object a module holds")
+        if isinstance(n, ast.AugAssign) and isinstance(n.target, ast.Name) and self.aug_held(n.target, n):
+            return (f"changes in place ({m.src(n)[:40]}) an object a module or a parameter may hold (1.4.10)")
+        if isinstance(n, ast.Call) and n.args and self.in_place(n):
+            a = n.args[0]
+            if (self.kind(a) or self.call_held(a) or self.held(a, n)) and not self.environ(a):
+                return (f"changes its first argument in place ({m.src(n)[:40]}), an object a module or a parameter "
+                        "may hold (1.4.10)")
         if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load) and n.id in self.kinds:
             return self.escape(n)
         return ""
+
+    def aug_held(self, target, node):
+        """`p += x` changes p's object in place when it is mutable: p was bound to an attribute or item of something
+        a module or a non-exempt parameter holds, or of what an outside call returned (`p = m.handlers`). A bare
+        parameter or a number is not judged here (its type is unknown: a stated limit)."""
+        _, found = self.scope_binds(node, target.id)
+        for b in found:
+            how, src = _binding_source(b, self.parents) if not isinstance(b, ast.arg) else ("other", None)
+            if how in ("value", "part") and isinstance(src, (ast.Attribute, ast.Subscript)) and \
+                    (self.kind(src) or self.call_held(src) or self.held(src, b)) and not self.environ(src):
+                return True
+        return False
+
+    def in_place(self, call):
+        """call changes its first argument in place: an unbound container method (`dict.update(x, ...)`,
+        `list.append(x, ...)`) or a standard function that does (bisect.insort, heapq, random.shuffle, the
+        operator in-place functions)."""
+        f = call.func
+        if isinstance(f, ast.Attribute) and f.attr in MUTATORS and isinstance(f.value, ast.Name) and \
+                f.value.id in CONTAINER_TYPES and f.value.id not in self.m.funcs and f.value.id not in self.m.classes:
+            return True
+        return isinstance(f, (ast.Name, ast.Attribute)) and self.m.full(f) in IN_PLACE_FUNCS
 
     def escape(self, name):
         """F1 (R7-01): why the module value starting at `name` is used other than as `m.attr`, `m.attr(...)`, an item
@@ -2888,6 +2974,22 @@ def _path_ctor(mod, aliases, node, depth=0):
     return None
 
 
+def _pathish(mod, aliases, node, depth=0) -> bool:
+    """node is built from a Path: a Path(...) call anywhere in it, or a local bound to one (past MAX_PATH_STEPS
+    aliases, assumed so)."""
+    if depth > MAX_PATH_STEPS:
+        return True
+    for n in ast.walk(node):
+        if isinstance(n, ast.Call) and isinstance(n.func, (ast.Name, ast.Attribute)) and \
+                _full_name(mod, aliases, n.func) in PATH_CTORS | {"pathlib.Path.cwd", "pathlib.Path.home", "Path.cwd",
+                                                                  "Path.home"}:
+            return True
+        if isinstance(n, ast.Name) and n.id in aliases and aliases[n.id] is not node and \
+                _pathish(mod, aliases, aliases[n.id], depth + 1):
+            return True
+    return False
+
+
 def _data_like(mod, aliases, node, tainted, depth=0) -> bool:
     """True when a method's receiver is plain data (a literal, the tool's input, a parsed or returned value of a safe
     or capability call, an element or field of such data), so its methods do nothing outside the process."""
@@ -3020,7 +3122,8 @@ def function_reach(idx: Index, mod: Module, fn, tainted=None, depth=0, carry=())
         head = full.split(".")[0]
         on_tainted = isinstance(call.func, ast.Attribute) and _uses(call.func.value, tainted)
         attr = call.func.attr if isinstance(call.func, ast.Attribute) else ""
-        if attr and isinstance(call.func.value, ast.Call) and attr not in WRITE_ATTRS | READ_ATTRS | {"open"}:
+        if attr and isinstance(call.func.value, ast.Call) and attr not in WRITE_ATTRS | READ_ATTRS | {"open"} and \
+                not (attr in PATH_WRITE_ATTRS and _pathish(mod, aliases, call.func.value)):
             if hit and not _data_like(mod, aliases, call.func.value, tainted):
                 inner = call.func.value       # requests.Session().get(url): the input goes to the client built inline
                 ifull = _full_name(mod, aliases, inner.func)
@@ -3032,13 +3135,16 @@ def function_reach(idx: Index, mod: Module, fn, tainted=None, depth=0, carry=())
                                             "object the audit cannot follow")
             continue     # e.g. urlopen(url).read(): the inner call is the capability
         cap = _capability(call, full, head, on_tainted)
+        if cap is None and attr in PATH_WRITE_ATTRS and _pathish(mod, aliases, call.func.value):
+            cap = "write"                                   # Path(x).copy(...), .move(...): 1.4.10
         target = call
         if cap is None and not on_tainted and attr in WRITE_ATTRS | READ_ATTRS | {"open"}:
             pc = _path_ctor(mod, aliases, call.func.value)      # Path('.env').read_text(): a read, by operation
             if pc is not None:
                 target, hit = pc, hit or any(_uses(a, tainted) for a in pc.args)
                 cap = "read" if attr in READ_ATTRS else "open" if attr == "open" else "write"
-            elif full.split(".")[0] == "pathlib" or full.startswith(("Path.", "PurePath.")):
+            elif full.split(".")[0] == "pathlib" or full.startswith(("Path.", "PurePath.")) or \
+                    _pathish(mod, aliases, call.func.value):
                 reach.unresolved.append(f"{mod.where(call)} {mod.src(call.func)[:40]}(...) reads or writes a path the "
                                         "audit cannot read (a Path chain it does not model, or past MAX_PATH_STEPS)")
                 continue                                        # 1.4.10: never the safe pathlib head (fail closed)
@@ -3217,7 +3323,7 @@ def tool_reach(idx: Index, mod: Module, el):
         return name, reach, guards
     if kind[0] == "class":
         cmod, cls = kind[1], kind[2]
-        meth, twice = _single_method(cls, ("_run", "_arun", "run", "__call__", "forward", "invoke"))
+        cmod, meth, twice = _entry_method(idx, cmod, cls)
         if twice:
             reach.unresolved.append(f"{cmod.where(twice)} the tool class `{cls.name}` binds its run method more than "
                                     "once or not as a def, so the audit cannot tell which one runs")
@@ -3227,6 +3333,35 @@ def tool_reach(idx: Index, mod: Module, el):
             return cls.name, reach, []
     reach.unresolved.append(f"{mod.where(el)} {label} ({kind[1] if len(kind) == 2 else kind[0]}) is not followed by the audit")
     return label, reach, []
+
+
+TOOL_ENTRIES = ("_run", "_arun", "run", "__call__", "forward", "invoke")
+
+
+def _entry_method(idx, mod, cls, depth=0):
+    """(module, the def, None) when the class and its repo bases bind exactly one of TOOL_ENTRIES, once and as a
+    def; (module, None, the node) when they bind more than one, or one more than once or otherwise (UNRESOLVED);
+    (module, None, None) when none. A base the audit cannot resolve within MAX_RESOLVE_DEPTH counts as binding one."""
+    found = [(mod, b) for nm in TOOL_ENTRIES for b in _bindings(cls, nm)]
+    for base in cls.bases:
+        k = idx.resolve(mod, base) if isinstance(base, (ast.Name, ast.Attribute)) else ("unknown",)
+        if k[0] == "class" and depth < MAX_RESOLVE_DEPTH:
+            bm, bdef, bwhy = _entry_method(idx, k[1], k[2], depth + 1)
+            if bwhy is not None:
+                return mod, None, bwhy
+            if bdef is not None:
+                found.append((bm, bdef))
+        elif k[0] == "class":
+            return mod, None, base
+    names = {b.name if isinstance(b, (ast.FunctionDef, ast.AsyncFunctionDef)) else id(b) for _, b in found}
+    if not found:
+        return mod, None, None
+    if len(found) == 1 and isinstance(found[0][1], (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return found[0][0], found[0][1], None
+    if len(names) == 1 and all(isinstance(b, (ast.FunctionDef, ast.AsyncFunctionDef)) for _, b in found) and \
+            found[0][1] in _bindings(cls, found[0][1].name) and len(_bindings(cls, found[0][1].name)) == 1:
+        return found[0][0], found[0][1], None        # the class's own def overrides a base's of the same name
+    return mod, None, found[-1][1]
 
 
 def _single_method(cls, names):
@@ -3360,6 +3495,13 @@ def _assigned_name(mod, call):
     return None
 
 
+def _bound_once(mod, name, home) -> bool:
+    """1.4.10: a module constant counts only when its name is bound once in the file that holds it (a function's
+    `global` rebinding included), and once where it is read."""
+    real = name if home is mod else mod.alias.get(name, name).split(".")[-1]
+    return len(_binds(home.tree, real)) == 1 and (home is mod or len(_binds(mod.tree, name)) <= 1)
+
+
 def _const_str(idx, mod, n, depth=0):
     """A string the audit can read: a literal, a module constant, or an f-string of those. None otherwise."""
     if depth > 4 or n is None:
@@ -3368,7 +3510,7 @@ def _const_str(idx, mod, n, depth=0):
         return n.value
     if isinstance(n, ast.Name):
         k = idx.resolve(mod, n)
-        return _const_str(idx, k[1], k[2], depth + 1) if k[0] == "value" else None
+        return _const_str(idx, k[1], k[2], depth + 1) if k[0] == "value" and _bound_once(mod, n.id, k[1]) else None
     if isinstance(n, ast.JoinedStr):
         parts = [_const_str(idx, mod, v.value if isinstance(v, ast.FormattedValue) else v, depth + 1) for v in n.values]
         return None if None in parts else "".join(parts)
@@ -3398,7 +3540,7 @@ def _str_list(idx, mod, n, depth=0):
         return out
     if isinstance(n, ast.Name):
         k = idx.resolve(mod, n)
-        return _str_list(idx, k[1], k[2], depth + 1) if k[0] == "value" else None
+        return _str_list(idx, k[1], k[2], depth + 1) if k[0] == "value" and _bound_once(mod, n.id, k[1]) else None
     if isinstance(n, ast.BinOp) and isinstance(n.op, ast.Add):
         a, b = _str_list(idx, mod, n.left, depth + 1), _str_list(idx, mod, n.right, depth + 1)
         return None if a is None or b is None else a + b
@@ -4149,7 +4291,7 @@ def audit(root: Path) -> Report:
             surfaces.append((tid, declared_results(r, tid)))
     if idx.bounds_hit:          # 1.4.10: an analysis that stopped at a bound proves nothing (fail closed)
         why = "the audit stopped at a bound: " + "; ".join(idx.bounds_hit[:3])
-        surfaces = [(tid, {cid: (("UNRESOLVED", f"{why}; {ev}" if ev else why, fx) if st == "VERIFIED" else (st, ev, fx))
+        surfaces = [(tid, {cid: ("UNRESOLVED" if st == "VERIFIED" else st, f"{why}; {ev}" if ev else why, fx)
                            for cid, (st, ev, fx) in g.items()}) if tid in tracks else (tid, g) for tid, g in surfaces]
     titles = {"G1": ("Permission deny rules exist", 3), "G2": ("Secrets are denied to the agent (.env, keys, credential folders)", 3),
               "G3": ("Destructive commands are denied or gated (push, reset --hard, rm -rf)", 2)}

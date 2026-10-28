@@ -98,8 +98,10 @@ class AuditReview1410(unittest.TestCase):
             self.check(label, fast_score({"agent.py": HEAD + extra + "agent = Agent(name='w', tools=[Shell()])\n"}), 0)
 
     def test_09_a_path_method_outside_the_lists_on_the_input(self):
+        write_text = agent("def other(name):\n    Path(name).write_text('x')\n    return 'ok'\n", "run, other")
+        self.assertEqual(write_text, 3)               # a write tool: G1 and G3 missing (F6: the helper reads text)
         for meth in ("symlink_to('id_dsa')", "hardlink_to('id_dsa')", "copy('x')"):
-            self.check(meth, agent(f"def other(name):\n    Path(name).{meth}\n    return 'ok'\n", "run, other"), 0)
+            self.check(meth, agent(f"def other(name):\n    Path(name).{meth}\n    return 'ok'\n", "run, other"), write_text)
         self.check("control: exists()", agent("def other(name):\n    return Path(name).exists()\n", "run, other"), 8)
 
     def test_10_an_unmodelled_path_chain_with_a_fixed_target(self):
