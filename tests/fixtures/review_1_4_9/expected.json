@@ -1,0 +1,282 @@
+{
+ "c_json_local": {
+  "finding": "control",
+  "want": 8
+ },
+ "c_property_decorator": {
+  "finding": "control",
+  "want": 8
+ },
+ "c_self_list_append": {
+  "finding": "control",
+  "want": 8
+ },
+ "c_type_compare": {
+  "finding": "control",
+  "want": 8
+ },
+ "c_type_name": {
+  "finding": "control",
+  "want": 8
+ },
+ "d1_binding_00": {
+  "finding": "D1",
+  "want": 0
+ },
+ "d1_binding_01": {
+  "finding": "D1",
+  "want": 0
+ },
+ "d1_binding_02": {
+  "finding": "D1",
+  "want": 0
+ },
+ "d1_binding_03": {
+  "finding": "D1",
+  "want": 0
+ },
+ "d1_binding_04": {
+  "finding": "D1",
+  "want": 0
+ },
+ "d1_binding_05": {
+  "finding": "D1",
+  "want": 0
+ },
+ "d1_binding_06": {
+  "finding": "D1",
+  "want": 0
+ },
+ "d1_binding_07": {
+  "finding": "D1",
+  "want": 0
+ },
+ "d1_binding_08": {
+  "finding": "D1",
+  "want": 0
+ },
+ "d1_binding_09": {
+  "finding": "D1",
+  "want": 0
+ },
+ "d1_binding_10": {
+  "finding": "D1",
+  "want": 0
+ },
+ "d1_binding_11": {
+  "finding": "D1",
+  "want": 0
+ },
+ "d1_binding_12": {
+  "finding": "D1",
+  "want": 0
+ },
+ "d1_binding_13": {
+  "finding": "D1",
+  "want": 0
+ },
+ "d2_future_builtins": {
+  "finding": "D2",
+  "want": 0
+ },
+ "d2_import_dotted_builtins": {
+  "finding": "D2",
+  "want": 0
+ },
+ "d2_pydoc_builtins": {
+  "finding": "D2",
+  "want": 0
+ },
+ "d2_six_moves_builtins": {
+  "finding": "D2",
+  "want": 0
+ },
+ "d2_six_moves_builtins_as": {
+  "finding": "D2",
+  "want": 0
+ },
+ "d3_star_logging_config": {
+  "finding": "D3",
+  "want": 0
+ },
+ "d3_star_typing": {
+  "finding": "D3",
+  "want": 0
+ },
+ "d4_self_attr_item": {
+  "finding": "D4",
+  "want": 0
+ },
+ "d4_self_attr_mutator": {
+  "finding": "D4",
+  "want": 0
+ },
+ "d4_self_attr_set_outside": {
+  "finding": "D4",
+  "want": 0
+ },
+ "d4_self_attr_setattr": {
+  "finding": "D4",
+  "want": 0
+ },
+ "d4_self_attr_store": {
+  "finding": "D4",
+  "want": 0
+ },
+ "d5_local_alias_item": {
+  "finding": "D5",
+  "want": 0
+ },
+ "d5_local_alias_mutator": {
+  "finding": "D5",
+  "want": 0
+ },
+ "d6_class_via_dunder_bound": {
+  "finding": "D6",
+  "want": 0
+ },
+ "d6_class_via_type_bound": {
+  "finding": "D6",
+  "want": 0
+ },
+ "d6_self_class_bound": {
+  "finding": "D6",
+  "want": 0
+ },
+ "d6_type_self_bound": {
+  "finding": "D6",
+  "want": 0
+ },
+ "d7_import_alias_other_file": {
+  "finding": "D7",
+  "want": 0
+ },
+ "d8_encoding_undefined": {
+  "finding": "D8",
+  "want": 0
+ },
+ "d8_errors_namereplace": {
+  "finding": "D8",
+  "want": 0
+ },
+ "d8_errors_xmlcharrefreplace": {
+  "finding": "D8",
+  "want": 0
+ },
+ "d8_headers_newline": {
+  "finding": "D8",
+  "want": 0
+ },
+ "d8_method_space": {
+  "finding": "D8",
+  "want": 0
+ },
+ "g_audit_hook": {
+  "finding": "grey",
+  "want": 0
+ },
+ "g_breakpoint_bare": {
+  "finding": "grey",
+  "want": 0
+ },
+ "g_breakpoint_env": {
+  "finding": "grey",
+  "want": 0
+ },
+ "g_code_type": {
+  "finding": "grey",
+  "want": 0
+ },
+ "g_codecs_register": {
+  "finding": "grey",
+  "want": 0
+ },
+ "g_function_type": {
+  "finding": "grey",
+  "want": 0
+ },
+ "g_idlelib": {
+  "finding": "grey",
+  "want": 0
+ },
+ "g_mp_managers": {
+  "finding": "grey",
+  "want": 0
+ },
+ "g_pydoc_locate": {
+  "finding": "grey",
+  "want": 0
+ },
+ "g_pydoc_locate_from": {
+  "finding": "grey",
+  "want": 0
+ },
+ "g_singledispatch": {
+  "finding": "grey",
+  "want": 0
+ },
+ "g_site_addsitedir": {
+  "finding": "grey",
+  "want": 0
+ },
+ "g_sys_monitoring": {
+  "finding": "grey",
+  "want": 0
+ },
+ "g_threading_settrace": {
+  "finding": "grey",
+  "want": 0
+ },
+ "g_typing_extensions_hints": {
+  "finding": "grey",
+  "want": 0
+ },
+ "g_xmlrpc_server": {
+  "finding": "grey",
+  "want": 0
+ },
+ "g_zipimport": {
+  "finding": "grey",
+  "want": 0
+ },
+ "o1_hooks_in_a_name_dict": {
+  "finding": "O1",
+  "want": "UNRESOLVED"
+ },
+ "o1_hooks_in_a_name_list": {
+  "finding": "O1",
+  "want": "UNRESOLVED"
+ },
+ "o1_hooks_in_a_name_matcher": {
+  "finding": "O1",
+  "want": "UNRESOLVED"
+ },
+ "o2_classmethod_factory": {
+  "finding": "O2",
+  "want": 8
+ },
+ "r1_staticmethod_of_method": {
+  "finding": "R1",
+  "want": 0
+ },
+ "r2_class_body_alias": {
+  "finding": "R2",
+  "want": 0
+ },
+ "r3_class_body_dict": {
+  "finding": "R3",
+  "want": 0
+ },
+ "r3_class_body_tuple": {
+  "finding": "R3",
+  "want": 0
+ },
+ "r4_super_in_classmethod": {
+  "finding": "R4",
+  "want": 0
+ },
+ "r5_property_call": {
+  "finding": "R5",
+  "want": 0
+ }
+}

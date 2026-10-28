@@ -1,0 +1,3 @@
+match {}:
+    case {**eval}:
+        pass

@@ -1,0 +1,1 @@
+from idlelib import run

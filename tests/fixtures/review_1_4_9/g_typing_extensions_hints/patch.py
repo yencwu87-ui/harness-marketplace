@@ -1,0 +1,2 @@
+import typing_extensions
+typing_extensions.get_type_hints(print)
