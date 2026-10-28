@@ -30,7 +30,7 @@ class HelperReview1410(unittest.TestCase):
 
     def test_3_env_split_string_underscore_separator(self):
         for v in ("env -S'git\\_push'", "env -S 'git\\_push'", 'env -S"git\\_push"', "env -S'rm\\_-rf\\_x'",
-                  "env -S'cat\\_.env'", "env --split-string=git\\_push"):
+                  "env -S'cat\\_.env'", "env --split-string='git\\_push'"):
             with self.subTest(v=v):
                 self.assertTrue(KG.refuses(v))
 

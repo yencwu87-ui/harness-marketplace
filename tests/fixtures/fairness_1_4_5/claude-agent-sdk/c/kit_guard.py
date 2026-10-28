@@ -10,8 +10,8 @@
 
 refuses(value) is True when value names a secret path or is a destructive command. value may be a string (a command,
 a path or a URL) or a tool's whole input (a dict or a list): every string inside it is checked on its own, keys
-included, and a list of strings is also checked as one argument vector (`['rm', '-rf', 'x']`). A value nested more
-than 20 containers deep is refused.
+included, and a list of strings is also checked as one argument vector (`['rm', '-rf', 'x']`). A string inside more
+than 20 containers (dicts and lists) is refused.
 
 Before any other step, every string is also read with each backslash-newline pair removed, as the shell removes a
 line continuation (outside single quotes, inside double quotes too), and with every such pair removed wherever it is;
@@ -22,7 +22,8 @@ The classes, as this helper defines them (harness-audit credits exactly these):
                .p12 or .pfx, or holding one of those followed by `.`, `_`, `~` or `-` and anything (server.key.bak);
                id_rsa, id_dsa, id_ecdsa or id_ed25519, alone or followed by `.`, `_`, `~` or `-` and anything (.pub,
                .bak); .netrc; .pgpass; credentials or credentials.<anything>; or inside .ssh, .aws, .gnupg, .azure,
-               .kube, .docker or .config/gcloud. Upper and lower case are the same. Read after shell quotes and
+               .kube, .docker or .config/gcloud, also attached to a short option (`-f.env`, `-iid_rsa`). Upper and
+               lower case are the same. Read after shell quotes and
                backslashes are removed (or read as Windows separators), %-escapes decoded (up to three times, so
                %252e is a dot; a value still encoded after the third time is refused), simple braces expanded (`{a,b}` and sequences `{a..e}`, `{1..9}`; a word with more
                than four brace groups, more than 64 expansions or a sequence of more than 256 items is refused),
@@ -44,8 +45,10 @@ The classes, as this helper defines them (harness-audit credits exactly these):
                one of its expansions, or as all of them in a row, gives a destructive command; more than four
                braced words, a group past the limits above, or more than 256 readings is refused, and so is a word
                holding an unquoted `{` and a quoted or escaped `{` or `}` (`git pu{sh,'}'}`). Each reading's words
-               are also read as nested shells (`bash -c {'git push',x}`), and so is the string `env -S` or
-               `--split-string=` carries. Nested shells are read four levels deep: a word holding anything but
+               are also read as nested shells (`bash -c {'git push',x}`), and so is the string `env -S` carries
+               (also in a cluster such as `-vS`, after `--split-string=` or any abbreviation of it, and with env's
+               `\\_` read as a space); an argument vector's items start one level down (`['sh', '-c', ...]`). A
+               program word holding a glob is read as git, rm or reset when it could expand to one (`/usr/bin/gi?`). Nested shells are read four levels deep: a word holding anything but
                letters, digits and ._/:=@%+,-~^ (a space, a TAB, a newline, one of ;&|()<>, a quote, a brace, `$`
                or a backtick) is read again as a command; a command nested deeper is not read, so it is refused,
                benign or not, and counts as secret too (`sh -c` five times around anything with a space).
@@ -75,7 +78,7 @@ _PART_BREAKS = "/\\=:,;@|&<>()"
 _LETTERS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
 _HEX = "0123456789abcdefABCDEF"
 _GIT_OPTS_WITH_VALUE = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--super-prefix",
-                        "--config-env", "--list-cmds"}
+                        "--config-env", "--list-cmds", "--attr-source", "--shallow-file"}
 _MAX_GLOB = 256
 _MAX_SEQUENCE = 256          # items one brace sequence ({1..9}) may stand for; a longer one is refused
 _PERCENT_ROUNDS = 3          # %-decodings read; a value still encoded after them is refused
@@ -335,8 +338,11 @@ def _normalised(parts):
     return out
 
 
-def _secret_word(word):
-    forms = {_unquoted(word), _drop(word, "\"'`").replace("\\", "/")}
+def _secret_word(word, whole=False):
+    """word names a secret. `whole` is the value read as one word: its brace limits are each word's, so past them
+    it is read with the braces dropped (each word is also read on its own, with them)."""
+    forms = {_unquoted(w) for w in {word, word.replace("\\_", " ")}} | {_drop(word, "\"'`").replace("\\", "/")}
+    forms |= {f[2:] for f in forms if f[:1] == "-" and f[1:2] not in ("-", "") and len(f) > 2}   # -f.env, -iid_rsa
     last = set(forms)
     for _ in range(_PERCENT_ROUNDS):                    # %252e -> %2e -> .
         last = {_percent_decoded(f) for f in last}
@@ -346,7 +352,9 @@ def _secret_word(word):
     forms |= {_brackets_as_any(f) for f in forms if "[" in f}
     expanded = [_expand_braces(f) for f in forms]
     if None in expanded:
-        return True                                     # too many brace groups or words to read: refused
+        if not whole:
+            return True                                 # too many brace groups or words to read: refused
+        expanded = [[_drop(f, "{}")] for f in forms]
     for w in (x for e in expanded for x in e):
         parts = [p.lower() for p in _split_parts(w)]
         if any(_secret_part(p) for p in parts):
@@ -453,6 +461,8 @@ def _destructive_argv(words):
     words = [_unquoted(w).strip("`") for w in words]
     for i, w in enumerate(words):
         prog = _program(w)
+        if _glob(prog) is not None:                     # /usr/bin/gi? : the shell may expand it to git
+            prog = next((n for n in ("git", "rm", "reset") if _could_be(prog, n)), prog)
         rest = words[i + 1:]
         if prog == "rm":
             for a in rest:
@@ -470,6 +480,8 @@ def _destructive_argv(words):
                 if a.startswith("-"):
                     if a.lower().startswith(("-calias.", "--config-env=alias.")):
                         return True
+                    if a.startswith("--") and "=" not in a and j + 2 < len(rest) and rest[j + 2].lower() in ("push", "clean"):
+                        return True                       # an unknown long option may take the next word as its value
                     j += 1
                     continue
                 sub = a.lower()
@@ -569,6 +581,20 @@ class _Unread(Exception):
     """A nested command past a bound the helper reads to: refused as destructive and secret-bearing (fail closed)."""
 
 
+def _carried(w):
+    """The texts a word may hand a nested shell: the word itself; what `env -S` carries, also inside a cluster of
+    short options (`-vS'...'`) and after --split-string= or any abbreviation of it (`--split=`); each also with env's
+    `\\_` read as a space."""
+    out = [w]
+    if w[:1] == "-" and w[1:2] != "-":
+        i = w.find("S")
+        if i > 0 and all(c in _LETTERS for c in w[1:i]):
+            out.append(w[i + 1:])
+    elif w.startswith("--s") and "=" in w and "--split-string".startswith(w.split("=", 1)[0]):
+        out.append(w.split("=", 1)[1])
+    return out + [t.replace("\\_", " ") for t in out if "\\_" in t]
+
+
 def _destructive_text(s, depth=0):
     """A nested shell (bash -c '...') joins its own continued lines, so each level reads every continuation form.
     A nested command past _MAX_NESTING is not read: it raises _Unread, and the value is refused."""
@@ -592,8 +618,7 @@ def _destructive_form(s, depth):
             if _destructive_argv(words):
                 return True
             for w in words:                                # bash -c "...", sh -c '...', eval "...", env -S'...'
-                for text in (w, w[2:] if w.startswith("-S") else "", w.split("=", 1)[-1]
-                             if w.startswith("--split-string=") else ""):
+                for text in _carried(w):
                     if text and text != s and any(c not in _PLAIN_WORD for c in text) and \
                             _destructive_text(text, depth + 1):     # a word equal to s is s, already read
                         return True
@@ -656,10 +681,10 @@ def _forms(value):
 def _strings(value, depth=0):
     """Every string inside value (dict keys and values, list items), each on its own; a list of strings is also
     yielded as one argument vector (a tuple)."""
+    if depth > _MAX_CONTAINERS:
+        raise _Unread                                   # nested past the bound: refused
     if isinstance(value, str):
         yield value
-    elif depth > _MAX_CONTAINERS:
-        raise _Unread                                   # nested past the bound: refused
     elif isinstance(value, dict):
         for k, v in value.items():
             yield from _strings(k, depth + 1)
@@ -678,8 +703,8 @@ def _strings(value, depth=0):
 
 def _secret(value):
     for s in _forms(value):
-        words = list(s) if isinstance(s, tuple) else (_tokens(s) or []) + [s]
-        if any(_secret_word(w) for w in words):
+        words = list(s) if isinstance(s, tuple) else _tokens(s) or []
+        if any(_secret_word(w) for w in words) or (not isinstance(s, tuple) and _secret_word(s, whole=True)):
             return True
     return False
 
@@ -688,6 +713,8 @@ def _destructive(value):
     for s in _forms(value):
         if _destructive_braced(list(s)) if isinstance(s, tuple) else _destructive_text(s):
             return True
+        if isinstance(s, tuple) and any(_destructive_text(x, 1) for x in s[1:]):
+            return True                                 # ['sh', '-c', <nested>]: <nested> is one level down
     return False
 
 

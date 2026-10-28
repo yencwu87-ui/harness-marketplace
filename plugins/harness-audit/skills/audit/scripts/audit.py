@@ -1157,7 +1157,7 @@ CANONICAL_FORMS = (
      "to a callee's name, 5 Path steps, 64 parameter alias steps) that call is UNRESOLVED or its target held. "
      "The table, with the helper's bounds, is in DECISIONS.md."),
 )
-KIT_GUARD_SHA256 = "f07c81b8145053308c9a26bf4561a6e8d78b675bc8921dccdfc9f079feab9143"   # kit/shared/kit_guard.py
+KIT_GUARD_SHA256 = "d6982ec66f9bc43e574858a12217203611cfe683563b9c9327d561dfd22edfa2"   # kit/shared/kit_guard.py
 KIT_GUARD_MODULE, KIT_GUARD_NAME = "kit_guard", "refuses"
 STARTUP_MODULES = ("sitecustomize", "usercustomize")   # run at interpreter start, in any form (.py, .pyc, package)
 DUNDER_SETTERS = {"__setattr__", "__delattr__", "__setitem__", "__delitem__"}

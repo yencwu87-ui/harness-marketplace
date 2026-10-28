@@ -265,10 +265,10 @@ class HelperBounds(unittest.TestCase):
                 v = [v]
             return v
         b = KG._MAX_CONTAINERS
+        self.assertFalse(KG.refuses(nested(b - 1)))
         self.assertFalse(KG.refuses(nested(b)))
-        self.assertFalse(KG.refuses(nested(b + 1)))
-        self.assertTrue(KG.refuses(nested(b + 2)))
-        self.assertTrue(KG.refuses({"a": nested(b + 2)}))
+        self.assertTrue(KG.refuses(nested(b + 1)))
+        self.assertTrue(KG.refuses({"a": nested(b)}))                  # the dict is one more container
 
     def test_recursion_error_is_refused(self):
         deep = "x"
