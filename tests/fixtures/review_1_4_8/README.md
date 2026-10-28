@@ -1,0 +1,11 @@
+# Independent review of 1.4.8 (before packaging)
+
+Cases a conformance reviewer agent built against the written CANONICAL_FORMS of 1.4.8 (db5144d), reduced to
+constructed, inert inputs (the payload strings are `X = 1`; nothing here changes a module when run). The shipped
+helper is written into a throwaway copy of each by `tests/test_audit_review_1_4_8.py`.
+
+| Fixture | Expected | Why |
+|---|---|---|
+| c1_* | 0 | modules that run code strings or files (timeit, runpy, cProfile, profile, pdb, code, pickle) are the same as exec under F1's run-time change rule |
+| c2_* | 0 | a mutating method or store on an object reached through an outside call's result (`pkgutil.resolve_name('sys').path`) may change a module |
+| control_outside_call_result | 8 | a mutating method on a repo-built value (a name bound to `json.loads(...)` or `sorted(...)`) stays allowed |
