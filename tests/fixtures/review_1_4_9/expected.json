@@ -165,11 +165,11 @@
  },
  "d8_headers_newline": {
   "finding": "D8",
-  "want": 0
+  "want": 2
  },
  "d8_method_space": {
   "finding": "D8",
-  "want": 0
+  "want": 2
  },
  "g_audit_hook": {
   "finding": "grey",
