@@ -519,6 +519,53 @@ class Index:
         cache[key] = why = self._class_open(mod, fn)
         return why
 
+    def attr_safe(self, name) -> bool:
+        """1.4.9: every binding of an attribute called `name` anywhere in the files the audit reads gives it a value
+        that is not a module, and there is one."""
+        cache = self.__dict__.setdefault("_attr_safe_cache", {})
+        if name in cache:
+            return cache[name]
+        cache[name] = False
+        seen = False
+        for rel in sorted(self.files) + sorted(self.test_files()):
+            m = self.module(self.files.get(rel) or self._test_files[rel])
+            uses = _module_uses_of(self, m)
+            for n in ast.walk(m.tree):
+                value, bound = None, False
+                if isinstance(n, ast.Attribute) and n.attr == name and isinstance(n.ctx, (ast.Store, ast.Del)):
+                    p = uses.parents.get(n)
+                    bound = True
+                    if isinstance(p, ast.Assign) and p.targets == [n]:
+                        value = p.value
+                    elif isinstance(p, ast.AnnAssign) and p.value is not None:
+                        value = p.value
+                    elif isinstance(p, ast.AugAssign) or isinstance(n.ctx, ast.Del):
+                        continue
+                elif isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "setattr" and \
+                        len(n.args) == 3 and isinstance(n.args[1], ast.Constant) and n.args[1].value == name:
+                    bound, value = True, n.args[2]
+                elif isinstance(n, ast.ClassDef):
+                    for st in n.body:
+                        if isinstance(st, ast.Assign) and any(isinstance(t, ast.Name) and t.id == name for t in st.targets):
+                            bound, value = True, st.value
+                        elif isinstance(st, ast.AnnAssign) and isinstance(st.target, ast.Name) and st.target.id == name:
+                            if st.value is None and not n.decorator_list:
+                                continue
+                            bound, value = True, st.value
+                        else:
+                            continue
+                        if value is None or not uses.safe_value(value):
+                            return False
+                        seen = True
+                    continue
+                if not bound:
+                    continue
+                if value is None or not uses.safe_value(value):
+                    return False
+                seen = True
+        cache[name] = seen
+        return seen
+
     def _class_open(self, mod, fn) -> str:
         parents = _parents_of(mod)
         cls = _namespace(fn, parents)
@@ -532,6 +579,15 @@ class Index:
             return why
         methods = _plain_methods(cls, parents)
         names = _subclass_names(self, cls.name)
+        for n in ast.walk(cls):        # 1.4.9: a method named in the class body (staticmethod(m), alias = m, (m,))
+            if isinstance(n, ast.Name) and n.id in methods and isinstance(n.ctx, ast.Load) and \
+                    _namespace(n, parents) is cls:
+                up = parents.get(n)
+                if isinstance(up, ast.Attribute) and up.attr in ("setter", "getter", "deleter") and \
+                        any(up is d or (isinstance(d, ast.Call) and d.func is up) for x in ast.walk(cls)
+                            if isinstance(x, (ast.FunctionDef, ast.AsyncFunctionDef)) for d in x.decorator_list):
+                    continue
+                return f"{mod.where(n)} the class body names its method `{n.id}`, which hands it on unbound"
         for rel in sorted(self.files) + sorted(self.test_files()):
             m = self.module(self.files.get(rel) or self._test_files[rel])
             mp = _parents_of(m)
@@ -545,6 +601,23 @@ class Index:
                          n.value.func.id == "type") or
                         (isinstance(n.value, ast.Attribute) and n.value.attr == "__class__")):
                     return f"{m.where(n)} reaches the method `{n.attr}` through a class object ({m.src(n)[:40]})"
+                elif (isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "type" and
+                      len(n.args) == 1) or (isinstance(n, ast.Attribute) and n.attr == "__class__"):
+                    pass                                   # 1.4.9: a class object from type(o) or o.__class__
+                elif isinstance(n, ast.Attribute) and n.attr in methods and isinstance(n.value, ast.Call) and \
+                        isinstance(n.value.func, ast.Name) and n.value.func.id == "super":
+                    fn2 = mp.get(n)
+                    while fn2 is not None and not isinstance(fn2, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                        fn2 = mp.get(fn2)
+                    first = (fn2.args.posonlyargs + fn2.args.args)[:1] if isinstance(
+                        fn2, (ast.FunctionDef, ast.AsyncFunctionDef)) else []
+                    decs = {_dotted(d.func if isinstance(d, ast.Call) else d) for d in fn2.decorator_list} \
+                        if isinstance(fn2, (ast.FunctionDef, ast.AsyncFunctionDef)) else {"?"}
+                    if n.value.args or not first or first[0].arg != "self" or decs & {"classmethod", "staticmethod"} \
+                            or fn2.name in ("__new__", "__init_subclass__", "__class_getitem__"):
+                        return (f"{m.where(n)} reaches the method `{n.attr}` through super() where it is not bound "
+                                "to an instance")
+                    continue
                 elif isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in ("getattr", "vars") \
                         and n.args and not (n.func.id == "getattr" and len(n.args) >= 2 and
                                             isinstance(n.args[1], ast.Constant) and n.args[1].value not in methods):
@@ -890,17 +963,25 @@ CANONICAL_FORMS = (
      "traceback attribute (f_globals, f_locals, f_back, tb_frame, gi_frame, ...) or such a name as a string, "
      "alone or as a part of a string with no spaces (`'f.__globals__'`, `'{0.__dict__}'`, 1.4.9); "
      "getattr, setattr, delattr or hasattr with a computed name. The exec family (1.4.9, by identity, not by "
-     "spelling): any reference anywhere to the names exec, eval, compile or __import__ (a call, a binding, an "
-     "argument, a container, a default, a parameter or import alias of that name, whatever it is bound to); any "
+     "spelling): any reference anywhere to the names exec, eval, compile, __import__ or breakpoint (a call, an "
+     "argument, a container, a default, and a binding of that name in any form: assignment, parameter, import "
+     "alias, def, class, except, match capture, global, nonlocal, type parameter; whatever it is bound to); any "
      "attribute of the builtins module other than the plain constants Ellipsis and NotImplemented "
      "(`builtins.exec`, `b.eval` after `import builtins as b`, `builtins.print`); `from builtins import` anything "
-     "but those constants (`from builtins import exec as execute`); any `.builtins` attribute (`pydoc.builtins`); "
+     "but those constants (`from builtins import exec as execute`); any `.builtins` attribute (`pydoc.builtins`) "
+     "and any import that binds or names a builtins module (`from six.moves import builtins`, `import "
+     "six.moves.builtins`); a star import from a module holding a listed callable (`from typing import *`); "
      "`__builtins__` in any form; getattr of a module value (above, so `getattr(builtins, 'exec')`); and these "
      "callables that run or import code from text, imported or reached by attribute: typing.get_type_hints, "
-     "typing.ForwardRef, typing._eval_type, typing.evaluate_forward_ref, annotationlib, logging.config, "
-     "six.exec_, future.utils.exec_, past.builtins (a list, not a proof that no other exists). Parameters (1.4.9): "
-     "a repo function that stores an attribute or item on one of its parameters (or on something it holds), "
-     "setattr's or delattr's it, or calls a mutating method on it, makes the guard UNRESOLVED, because an outside "
+     "typing.ForwardRef, typing._eval_type, typing.evaluate_forward_ref, their typing_extensions twins, "
+     "annotationlib, logging.config, six.exec_, future.utils.exec_, past.builtins, pydoc.locate, "
+     "types.FunctionType, types.CodeType, types.LambdaType, functools.singledispatch and singledispatchmethod, "
+     "site, zipimport, codecs.register, sys.addaudithook, sys.monitoring, sys.breakpointhook, threading.settrace "
+     "and setprofile (and their _all_threads forms), idlelib, xmlrpc.server, multiprocessing.managers (a list, "
+     "not a proof that no other exists); pkgutil and pydoc count as module sources. Parameters (1.4.9): "
+     "a repo function that stores an attribute or item on one of its parameters (or on something it holds, also "
+     "through a local bound to it: `p = m.path; p.insert(...)`), setattr's or delattr's it, or calls a mutating "
+     "method on it, makes the guard UNRESOLVED, because an outside "
      "call's result (`pkgutil.resolve_name('subprocess')`, `vendorlib.load(...)`) may be a module handed to it. "
      "Exempt are only: the first parameter, named self or cls, of a function in a class namespace (found through "
      "if, try, for, while, with and match) that is undecorated or a property, setter, getter, deleter, "
@@ -909,8 +990,15 @@ CANONICAL_FORMS = (
      "bases without __init_subclass__, whose name, its subclasses' names and every `cls`, in every file the audit "
      "reads, are only called, subclassed, compared, tested, annotated, given to isinstance, issubclass or except, "
      "or read for an attribute that is not one of its plain methods (`Base.m(self, ...)` from a method whose own "
-     "self is exempt is allowed), with no `type(o).m`, `o.__class__.m`, getattr naming a plain method or vars of "
-     "the class; and a framework-supplied parameter in its documented contract position, written only where the "
+     "self is exempt is allowed; an import alias of the name counts as the name), with no `type(o).m`, "
+     "`o.__class__.m`, `type(o)` or `o.__class__` used other than called, compared or read for an attribute that "
+     "is not a plain method, getattr naming a plain method, vars of the class, a plain method named in the class "
+     "body (`staticmethod(m)`, `alias = m`, `(m,)`, `property(None, m)`; `@m.setter` excepted) or a plain "
+     "method read through super() outside an instance method; exempt covers self or cls itself, and what it "
+     "holds only when every binding of that attribute name in the files the audit reads (`x.a = v`, "
+     "setattr(x, 'a', v), a class-body `a = v`) gives a value that is not a module and one exists (`self.items = "
+     "[]` then `self.items.append(v)` is fine; `self.m = m` then `self.m.run = ...` is not); `cls()` in an exempt "
+     "classmethod is an instance; and a framework-supplied parameter in its documented contract position, written only where the "
      "contract writes: a Strands callback's only argument `event.cancel_tool = ...`, a Microsoft Agent Framework "
      "async middleware's first of two arguments `context.result = ...`. Arguments a framework passes to a hook or "
      "tool are otherwise taken to be its documented objects for reading. Not modelled (UNRESOLVED is not claimed "
@@ -939,14 +1027,16 @@ CANONICAL_FORMS = (
      "buffering, encoding, errors, newline for open (codecs.open: no newline); each value a literal the callable "
      "takes without raising, alone and with the others: True or False for shell, capture_output, text, check, "
      "universal_newlines, allow_redirects, follow_redirects and verify; a number from 1 to 31,536,000 (one year) or None "
-     "for timeout; a text encoding Python knows for encoding (not hex, base64, rot13, zlib, ...); a standard error "
-     "handler for errors; a non-empty cwd with no NUL; a valid mode for the callable (os.popen: r or w; codecs.open: "
+     "for timeout; a text encoding Python knows and can round-trip text with for encoding (not hex, base64, rot13, "
+     "zlib, undefined, ...); a standard error handler that can decode for errors (not xmlcharrefreplace or "
+     "namereplace); a non-empty cwd with no NUL; a valid mode for the callable (os.popen: r or w; codecs.open: "
      "no t); an int buffering from -1 to 2**30, 0 only for a binary stream (open() in a b mode, codecs.open with an "
      "encoding); newline None, '', \\n, \\r or "
      "\\r\\n; no encoding, errors or newline with a binary open(); never both text and universal_newlines; a "
      "value of another type (a list, dict, set, tuple, bytes, number or None where a string is expected, 1.4.9) "
      "is not on the list, so the option is UNRESOLVED and the audit still returns its report; "
-     "string headers; for a fetch, each callable's own "
+     "string headers whose names are tokens and whose values hold no line break or NUL; a "
+     "method among GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS; for a fetch, each callable's own "
      "list, taken from its signature (1.4.7): requests.get, head, options, delete, post, put, patch and "
      "requests.Session().<same>: timeout, headers, allow_redirects, verify (request: also a literal method); "
      "httpx.get, head, options, delete, post, put, patch: timeout, headers, follow_redirects, verify (request and "
@@ -998,7 +1088,8 @@ CANONICAL_FORMS = (
      "provably returns only `{}`, None (no output) or the F3 deny literal: a named value, a computed key, `**` "
      "unpacking, a helper's return, an imported value, a `yield`, `updatedInput` or any other output voids the guard "
      "credit of every hook on the agent (UNRESOLVED), whatever the registration order, since the SDK may run matching "
-     "hooks in parallel. The hooks dict has only literal, distinct keys (no `**`). The options are passed whole to "
+     "hooks in parallel. The hooks dict has only literal, distinct keys (no `**`); a hooks dict, matcher list or "
+     "hook list the audit cannot read (held in a name, built by a call) makes the hooks UNRESOLVED, not missing. The options are passed whole to "
      "the SDK (ClaudeSDKClient, query), returned from a named, undecorated function every use of which is a call passed whole "
      "to the SDK, or bound to one name by a plain or annotated assignment at module level or as a function local "
      "(1.4.8: a binding in a class namespace, nested classes included, an instance or class attribute, a default, "
@@ -1341,8 +1432,8 @@ ALLOWED_OPTIONS = {
 
 BOOL_OPTIONS = {"shell", "capture_output", "text", "check", "universal_newlines", "allow_redirects",
                 "follow_redirects", "verify"}
-ERROR_HANDLERS = {"strict", "ignore", "replace", "backslashreplace", "surrogateescape", "xmlcharrefreplace",
-                  "namereplace", "surrogatepass"}
+ERROR_HANDLERS = {"strict", "ignore", "replace", "backslashreplace", "surrogateescape",
+                  "surrogatepass"}   # 1.4.9: not xmlcharrefreplace or namereplace, which cannot decode
 NEWLINES = (None, "", "\n", "\r", "\r\n")
 MAX_TIMEOUT = 86400 * 365          # seconds; larger values overflow the clock arithmetic
 MAX_BUFFERING = 2 ** 30
@@ -1375,8 +1466,9 @@ def _option_value_ok_(full, name, v, values) -> bool:
         return v is None or (isinstance(v, (int, float)) and not isinstance(v, bool) and 1 <= v <= MAX_TIMEOUT)
     if name == "encoding":
         try:
-            return isinstance(v, str) and codecs.lookup(v)._is_text_encoding
-        except (LookupError, ValueError, TypeError):
+            ok = isinstance(v, str) and codecs.lookup(v)._is_text_encoding
+            return bool(ok) and "a".encode(v).decode(v) == "a"          # 'undefined' is a text codec that raises
+        except (LookupError, ValueError, TypeError, UnicodeError):
             return False
     if name == "errors":
         return isinstance(v, str) and v in ERROR_HANDLERS
@@ -1398,10 +1490,13 @@ def _option_value_ok_(full, name, v, values) -> bool:
         return (full in OPEN_MODES and "b" in str(mode)) or (full == "codecs.open" and "encoding" in values)
     if name == "newline":
         return v in NEWLINES
-    if name == "headers":
-        return isinstance(v, dict) and all(isinstance(k, str) and isinstance(x, str) for k, x in v.items())
+    if name == "headers":           # a header token name and a value with no line break or NUL (requests checks both)
+        return isinstance(v, dict) and all(isinstance(k, str) and isinstance(x, str) and
+                                           re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+", k) and
+                                           not set(x) & set("\r\n\x00") and x == x.lstrip()
+                                           for k, x in v.items())
     if name == "method":
-        return isinstance(v, str)
+        return v in ("GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")
     return False
 
 
@@ -1783,6 +1878,10 @@ def _subclass_names(idx, name) -> set:
                         any(_dotted(b).split(".")[-1] in names for b in n.bases if _dotted(b)):
                     names.add(n.name)
                     grew = True
+                elif isinstance(n, ast.alias) and n.asname and n.name.split(".")[-1] in names and \
+                        n.asname not in names:
+                    names.add(n.asname)                    # 1.4.9: from patch import K as Q
+                    grew = True
     return names
 
 
@@ -1859,6 +1958,13 @@ def _class_use(idx, m, parents, node, methods) -> str:
     return f"hands on the class object ({m.src(node)[:40]})"
 
 
+def _module_uses_of(idx, m):
+    cache = idx.__dict__.setdefault("_module_uses_cache", {})
+    if m.path not in cache:
+        cache[m.path] = _ModuleUses(idx, m)
+    return cache[m.path]
+
+
 def _module_handles(m) -> set:
     """Names in m bound to a module object or a module namespace: `b = builtins`, `d = subprocess.__dict__`,
     `mods = sys.modules`. A store or mutation through one changes a module."""
@@ -1886,14 +1992,20 @@ def _is_environ(m, node) -> bool:
 # F1 (R6-02): module objects. A module may be read (`m.attr`) and called (`m.f(...)`), and nothing else: binding it
 # to another name, handing it on, or storing through anything that is or may be a module withholds helper credit.
 MODULE_SOURCES = ("importlib", "imp", "gc", "ctypes", "inspect", "unittest.mock", "mock",
-                  "pkgutil")   # hand out modules or namespaces (pkgutil.resolve_name('builtins:exec'), 1.4.9)
+                  "pkgutil", "pydoc")   # hand out modules or objects by name (pkgutil.resolve_name, pydoc.locate)
 # R8-01: the exec family, by identity. A reference to one of these names anywhere (a call, a binding, an argument, an
 # import alias, a parameter), any attribute of the builtins module other than a plain constant, any `.builtins`
 # attribute, and these callables that run or import code from text, withhold helper credit.
-EXEC_FAMILY = ("exec", "eval", "compile", "__import__")
+EXEC_FAMILY = ("exec", "eval", "compile", "__import__", "breakpoint")   # breakpoint: imports $PYTHONBREAKPOINT
 BUILTINS_CONSTANTS = ("Ellipsis", "NotImplemented")
 CODE_FROM_TEXT = ("typing.get_type_hints", "typing.ForwardRef", "typing._eval_type", "typing.evaluate_forward_ref",
-                  "annotationlib", "logging.config", "six.exec_", "future.utils.exec_", "past.builtins")
+                  "typing_extensions.get_type_hints", "typing_extensions.ForwardRef",
+                  "typing_extensions.evaluate_forward_ref", "annotationlib", "logging.config", "six.exec_",
+                  "future.utils.exec_", "past.builtins", "pydoc.locate", "types.FunctionType", "types.CodeType",
+                  "types.LambdaType", "functools.singledispatch", "functools.singledispatchmethod", "site",
+                  "zipimport", "codecs.register", "sys.addaudithook", "sys.monitoring", "sys.breakpointhook",
+                  "threading.settrace", "threading.setprofile", "threading.settrace_all_threads",
+                  "threading.setprofile_all_threads", "idlelib", "xmlrpc.server", "multiprocessing.managers")
 # Modules that run code strings, code files or serialized calls: the same as exec under F1's run-time change rule.
 CODE_RUNNERS = ("timeit", "runpy", "cProfile", "profile", "pdb", "bdb", "code", "codeop", "pickle", "_pickle",
                 "marshal", "shelve", "doctest", "trace", "dill", "cloudpickle", "pickletools", "copyreg")
@@ -2007,6 +2119,10 @@ class _ModuleUses:
         if isinstance(v, ast.Call) and isinstance(v.func, (ast.Name, ast.Attribute)):
             if isinstance(v.func, ast.Name) and v.func.id in SAFE_BASE_CALLS and v.func.id not in self.kinds:
                 return True
+            if isinstance(v.func, ast.Name) and v.func.id == "cls":       # cls() in a classmethod: an instance
+                _, found = self.scope_binds(v, "cls")
+                if len(found) == 1 and isinstance(found[0], ast.arg) and self.param_exempt(found[0], v):
+                    return True
             return self.idx.resolve(self.m, v.func)[0] in ("def", "class")
         return False
 
@@ -2022,12 +2138,15 @@ class _ModuleUses:
     def may_be_module(self, e, node):
         """F1: whether the object an attribute is stored on (or set or deleted with setattr/delattr) is, or may be,
         a module. A base the audit cannot resolve counts as may-be-a-module."""
+        chain = e
         while isinstance(e, (ast.Attribute, ast.Subscript)):
             e = e.value
         if not isinstance(e, ast.Name):
             return True                                    # a call's result, a comprehension, ...
         if self.kind(e):
             return True
+        if chain is not e and self.param_held(chain, node):
+            return True                                    # 1.4.9: self.m.run = ..., where self.m may be anything
         fn, found = self.scope_binds(node, e.id)
         if not found:
             return True                                    # a name bound nowhere here (a builtin, a star import)
@@ -2050,16 +2169,40 @@ class _ModuleUses:
             return True                                    # global, nonlocal, for, with, import, match, ...
         return False
 
-    def param_held(self, e, node):
+    def param_held(self, e, node, depth=0):
         """R8-02: e is a parameter of a repo function, or an attribute or item of one, and that parameter is not
-        exempt (param_exempt)."""
+        exempt (param_exempt); or (1.4.9) an attribute of an exempt self or cls that may hold something else than
+        what the class built (self_attr_safe), or a local bound to one of these (`p = m.path`)."""
+        chain = e
         while isinstance(e, (ast.Attribute, ast.Subscript)):
             e = e.value
-        if not isinstance(e, ast.Name) or self.kind(e):
+        if not isinstance(e, ast.Name) or self.kind(e) or depth > 4:
             return False
         fn, found = self.scope_binds(node, e.id)
-        return any(isinstance(b, ast.arg) for b in found) and \
-            not all(self.param_exempt(b, node) for b in found if isinstance(b, ast.arg))
+        args = [b for b in found if isinstance(b, ast.arg)]
+        if args:
+            if not all(self.param_exempt(b, node) for b in args):
+                return True
+            return chain is not e and not self.self_attr_safe(chain)
+        for b in found:
+            p = self.parents.get(b)
+            if isinstance(p, (ast.Assign, ast.AnnAssign, ast.NamedExpr)) and p.value is not None and \
+                    isinstance(p.value, (ast.Name, ast.Attribute, ast.Subscript)) and \
+                    self.param_held(p.value, p, depth + 1):
+                return True
+        return False
+
+    def self_attr_safe(self, chain):
+        """1.4.9: `self.a...` (self or cls exempt): every binding of an attribute named a in the files the audit reads
+        (`x.a = v`, setattr(x, 'a', v), `a = v` in a class body) gives it a value that is not a module (safe_value),
+        and there is at least one; a class with a decorator may bind fields from its constructor, so a bare
+        annotation there counts as unknown."""
+        first = chain
+        while isinstance(first, (ast.Attribute, ast.Subscript)) and isinstance(first.value, (ast.Attribute, ast.Subscript)):
+            first = first.value
+        if not isinstance(first, ast.Attribute):
+            return False                                     # self[...]: an item of the instance itself
+        return self.idx.attr_safe(first.attr)
 
     def param_exempt(self, b, node):
         """R8-02: a parameter proven not to be a module: the first parameter, named self or cls, of a method whose
@@ -2135,6 +2278,21 @@ class _ModuleUses:
             bound = n.asname or n.name.split(".")[0]
             if bound in EXEC_FAMILY:
                 return f"binds the name {bound} by import, {what}"
+            if n.name == "builtins" or "builtins" in n.name.split(".") or bound == "builtins":
+                return f"imports a builtins module ({n.name}), {what} or its namespace"
+        bound = getattr(n, "name", None) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef,
+                                                            ast.ExceptHandler)) or \
+            type(n).__name__ in ("MatchAs", "MatchStar", "TypeVar", "ParamSpec", "TypeVarTuple") else None
+        if type(n).__name__ == "MatchMapping":
+            bound = n.rest
+        if isinstance(n, (ast.Global, ast.Nonlocal)):
+            bound = next((x for x in n.names if x in EXEC_FAMILY), None)
+        if bound in EXEC_FAMILY and not (isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and
+                                         isinstance(_namespace(n, self.parents), ast.ClassDef)):
+            return f"binds the name {bound}, {what}"         # a method named eval binds an attribute, not the name
+        if isinstance(n, ast.ImportFrom) and not n.level and n.module and any(a.name == "*" for a in n.names) and \
+                any(c == n.module or c.startswith(n.module + ".") or n.module.startswith(c + ".") for c in CODE_FROM_TEXT):
+            return f"imports * from {n.module}, which holds a callable that runs or imports code from text"
         if isinstance(n, ast.Import):
             for a in n.names:
                 if any(a.name == c or a.name.startswith(c + ".") for c in CODE_FROM_TEXT):
@@ -3063,12 +3221,15 @@ def _sdk_agent(idx, mod, call):
             if not (isinstance(k, ast.Constant) and k.value == "PreToolUse"):
                 continue
             if not isinstance(v, (ast.List, ast.Tuple)):
-                hook_results.append((".*", [], f"{mod.where(v)} PreToolUse hooks {mod.src(v)[:40]} are not a list the audit can read"))
+                why_v = f"{mod.where(v)} PreToolUse hooks {mod.src(v)[:40]} are not a list the audit can read"
+                hook_results.append((".*", [Guard("refusal", mod.where(v), "PreToolUse hooks", unresolved=why_v)], why_v))
                 continue
             for hm in v.elts:
                 hl = _kw(hm, "hooks") if isinstance(hm, ast.Call) else None
                 if not isinstance(hl, (ast.List, ast.Tuple)):
-                    hook_results.append((".*", [], f"{mod.where(hm)} a PreToolUse matcher's hooks are not a list the audit can read"))
+                    why_m = f"{mod.where(hm)} a PreToolUse matcher's hooks are not a list the audit can read"
+                    hook_results.append((".*", [Guard("refusal", mod.where(hm), "PreToolUse hooks", unresolved=why_m)],
+                                         why_m))
                     continue
                 matcher = _kw(hm, "matcher")
                 pattern = ".*" if matcher is None or (isinstance(matcher, ast.Constant) and matcher.value is None) \
@@ -3080,7 +3241,8 @@ def _sdk_agent(idx, mod, call):
                         gs = [Guard("refusal", g.where, g.label, unresolved=f"{mod.where(matcher)} hook matcher {mod.src(matcher)[:40]} is not readable") for g in gs]
                     hook_results.append((pattern or ".*", gs, why))
     elif hooks_kw is not None:
-        hook_results.append((".*", [], f"{mod.where(hooks_kw)} hooks={mod.src(hooks_kw)[:40]} is not a dict the audit can read"))
+        why_h = f"{mod.where(hooks_kw)} hooks={mod.src(hooks_kw)[:40]} is not a dict the audit can read"
+        hook_results.append((".*", [Guard("refusal", mod.where(hooks_kw), "PreToolUse hooks", unresolved=why_h)], why_h))
     # can_use_tool decides, instead of a person, for every tool that is not auto-approved
     cut = _kw(call, "can_use_tool")
     cut_guards, cut_why = [], ""
