@@ -857,7 +857,9 @@ CANONICAL_FORMS = (
      "handler for errors; a non-empty cwd with no NUL; a valid mode for the callable (os.popen: r or w; codecs.open: "
      "no t); an int buffering from -1 to 2**30, 0 only for a binary stream (open() in a b mode, codecs.open with an "
      "encoding); newline None, '', \\n, \\r or "
-     "\\r\\n; no encoding, errors or newline with a binary open(); never both text and universal_newlines; "
+     "\\r\\n; no encoding, errors or newline with a binary open(); never both text and universal_newlines; a "
+     "value of another type (a list, dict, set, tuple, bytes, number or None where a string is expected, 1.4.9) "
+     "is not on the list, so the option is UNRESOLVED and the audit still returns its report; "
      "string headers; for a fetch, each callable's own "
      "list, taken from its signature (1.4.7): requests.get, head, options, delete, post, put, patch and "
      "requests.Session().<same>: timeout, headers, allow_redirects, verify (request: also a literal method); "
@@ -1268,6 +1270,15 @@ def _open_mode(m, text=True) -> bool:
 
 
 def _option_value_ok(full, name, v, values) -> bool:
+    """F2 (R8-05): a value of an unexpected type (a list, dict, set, tuple, bytes, number or None where a string is
+    expected) is not on the list, so the option is UNRESOLVED; it never stops the audit."""
+    try:
+        return _option_value_ok_(full, name, v, values)
+    except (TypeError, ValueError, LookupError, OverflowError, AttributeError):
+        return False
+
+
+def _option_value_ok_(full, name, v, values) -> bool:
     """F2 (R7-03): a literal the callable takes for this option without raising, alone and with the other written
     options given (`values`): booleans for the flags, a timeout from 1 s to a year or None, a known text codec and error
     handler, a valid mode for the callable, an int buffering (0 only for a binary open()), a valid newline
@@ -1282,7 +1293,7 @@ def _option_value_ok(full, name, v, values) -> bool:
         except (LookupError, ValueError, TypeError):
             return False
     if name == "errors":
-        return v in ERROR_HANDLERS
+        return isinstance(v, str) and v in ERROR_HANDLERS
     if name == "cwd":
         return isinstance(v, str) and v != "" and "\x00" not in v and _cwd_inside(v)
     mode = values.get("mode", "r")
