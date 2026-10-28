@@ -3369,11 +3369,19 @@ def claude_results(r: "Repo", settings) -> dict:
         except json.JSONDecodeError:
             problem = problem or f"{r.rel(p)} is not valid JSON, so its rules are not read"
             continue
-        pm = data.get("permissions", {}) or {}
+        # 1.4.9 (R8-05 family): a value of an unexpected type is not read, and says so; it never stops the audit
+        pm = data.get("permissions", {}) if isinstance(data, dict) else None
+        pm = {} if pm is None and isinstance(data, dict) else pm
+        if not isinstance(pm, dict) or any(not isinstance(pm.get(k, []), (list, type(None))) for k in perms):
+            problem = problem or f"{r.rel(p)} has permissions of an unexpected type, so its rules are not read"
+            continue
         for k in perms:
             perms[k] += [x for x in pm.get(k, []) or [] if isinstance(x, str)]
-        mode = pm.get("defaultMode", mode)
+        mode = pm.get("defaultMode", mode) if isinstance(pm.get("defaultMode", mode), str) else mode
         sb = data.get("sandbox", {}) or {}
+        if not isinstance(sb, dict):
+            problem = problem or f"{r.rel(p)} has a sandbox of an unexpected type, so its rules are not read"
+            continue
         if sb.get("enabled"):
             # Claude Code defaults: autoAllowBashIfSandboxed and allowUnsandboxedCommands are on unless set to false
             sandbox_on = True
