@@ -35,6 +35,9 @@ VERSION = "1.4.9"
 SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", "dist", "build", ".next", "target", "site-packages", "third_party", "vendor"}
 MAX_FILES = 60000
 MAX_FILE_BYTES = 400_000
+MAX_RESOLVE_DEPTH = 6        # import and re-export steps Index.resolve follows; past them the audit stops (fail closed)
+MAX_PATH_STEPS = 5           # .resolve()/`/`/alias steps _path_ctor reads back to Path(...); past them UNRESOLVED
+MAX_NAME_ALIASES = 4         # local alias steps _full_name expands; past them the callee has no name (fail closed)
 # Files the audit never opens: environment files (templates such as .env.example are fine), keys and credentials.
 SECRET_FILE = re.compile(r"^(\.env(\.(?!example$|sample$|template$|dist$)[^/]*)?|.*\.(key|pem|p12|pfx)|"
                          r"id_(rsa|dsa|ecdsa|ed25519)|\.netrc|credentials(\.json)?)$")
@@ -67,6 +70,7 @@ class Repo:
         self.root = root
         self._real_root = root.resolve()
         self._files = None
+        self.truncated = ""     # B1: set when the walk stops at MAX_FILES
 
     def files(self):
         """Walk the tree once (skipping vendored and build folders); every pattern match reuses this list."""
@@ -76,6 +80,7 @@ class Repo:
                 dns[:] = [d for d in dns if d not in SKIP_DIRS and not d.startswith(".") or d in (".claude", ".github", ".devcontainer")]
                 out += [Path(dp) / f for f in fns if self._readable(Path(dp) / f)]
                 if len(out) > MAX_FILES:
+                    self.truncated = f"the tree holds more than {MAX_FILES} files; the audit read the first ones"
                     break
             self._files = out
             self._rel = [p.relative_to(self.root).as_posix() for p in out]
@@ -372,9 +377,17 @@ class Module:
         self.idx, self.path = idx, path
         self.text = idx.r.text(path)
         self.rel = idx.r.rel(path)
+        self.unread = ""        # B2, B3: why the audit read this file as empty
+        try:
+            if path.is_file() and path.stat().st_size > MAX_FILE_BYTES:
+                self.unread = f"{self.rel} is larger than {MAX_FILE_BYTES} bytes, so the audit did not read it"
+        except OSError:
+            self.unread = f"{self.rel} could not be read"
         try:
             self.tree = ast.parse(self.text or "")
-        except SyntaxError:
+        except (SyntaxError, ValueError, RecursionError, MemoryError) as ex:
+            self.unread = self.unread or (f"{self.rel} does not parse here ({type(ex).__name__}); another Python may "
+                                          "run it, so the audit did not read it")
             self.tree = ast.parse("")
         self.alias, self.funcs, self.classes, self.assigns = {}, {}, {}, {}
         for n in self.tree.body:
@@ -426,6 +439,9 @@ class Index:
 
     def __init__(self, r: "Repo"):
         self.r, self._mods = r, {}
+        self.bounds_hit = []    # 1.4.10: every analysis bound reached; any one withholds G1-G3 credit (fail closed)
+        if r.files() is not None and r.truncated:
+            self.bound(r.truncated)
         self.files = {}
         for f in r.files():
             rel = r.rel(f).replace(os.sep, "/")
@@ -500,6 +516,11 @@ class Index:
                         elif k[0] == "external" and target.id in m.alias:
                             self._tampered.add(k[1].split(".")[0])
         return self._tampered
+
+    def bound(self, why):
+        """Record that an analysis stopped at a bound: the guard checks of every code surface are then UNRESOLVED."""
+        if why not in self.bounds_hit:
+            self.bounds_hit.append(why)
 
     def class_open(self, mod, fn) -> str:
         """R8-02: why the self or cls of method fn may be something other than an instance of its class (or the class),
@@ -800,6 +821,8 @@ class Index:
     def module(self, path: Path) -> Module:
         if path not in self._mods:
             self._mods[path] = Module(self, path)
+            if self._mods[path].unread:
+                self.bound(self._mods[path].unread)
         return self._mods[path]
 
     def find(self, dotted: str, from_mod: Module):
@@ -824,7 +847,9 @@ class Index:
     def resolve(self, mod: Module, node, depth=0):
         """('def', Module, FunctionDef) | ('class', Module, ClassDef) | ('value', Module, node) |
         ('external', dotted) | ('unknown', text) for a name used in `mod`."""
-        if depth > 6:
+        if depth > MAX_RESOLVE_DEPTH:
+            self.bound(f"{mod.where(node)} a name is re-exported through more than {MAX_RESOLVE_DEPTH} steps "
+                       f"({_dotted(node)[:40]}), past what the audit follows")
             return ("unknown", _dotted(node))
         if isinstance(node, ast.Name):
             n = node.id
@@ -1110,7 +1135,7 @@ CANONICAL_FORMS = (
      "the reason \"hand-written refusal: use the kit guard helper to earn credit\" or the rule it breaks. It earns "
      "no points; it does not count as missing either."),
 )
-KIT_GUARD_SHA256 = "295d27ed284dd5492cd6345555c50fc2ddcf211830251c7029be7a5056006ef3"   # kit/shared/kit_guard.py
+KIT_GUARD_SHA256 = "be1813a05f9b46ec1cd862869c08a0f8fa25dccf9cb0de7094f74e889979832d"   # kit/shared/kit_guard.py
 KIT_GUARD_MODULE, KIT_GUARD_NAME = "kit_guard", "refuses"
 STARTUP_MODULES = ("sitecustomize", "usercustomize")   # run at interpreter start, in any form (.py, .pyc, package)
 DUNDER_SETTERS = {"__setattr__", "__delattr__", "__setitem__", "__delitem__"}
@@ -2798,8 +2823,12 @@ def _full_name(mod: Module, aliases: dict, node, depth=0) -> str:
     """Dotted name of a callee with local and module aliases expanded (`runner.run` -> `subprocess.run`)."""
     d = _dotted(node)
     head, _, rest = d.partition(".")
-    if depth < 4 and head in aliases and head not in mod.alias and isinstance(aliases[head], (ast.Name, ast.Attribute)):
+    if head in aliases and head not in mod.alias and isinstance(aliases[head], (ast.Name, ast.Attribute)):
+        if depth >= MAX_NAME_ALIASES:
+            return ""                    # past the bound: no list matches an empty name, so the call is UNRESOLVED
         base = _full_name(mod, aliases, aliases[head], depth + 1)
+        if not base:
+            return ""
         return base + ("." + rest if rest else "")
     return mod.full(node)
 
@@ -2816,8 +2845,8 @@ PATH_SAME = {"resolve", "absolute", "expanduser"}       # the same file, another
 def _path_ctor(mod, aliases, node, depth=0):
     """The Path(...) call a receiver is built from, or None: `Path('.env')`, a name bound to one, `REPO / 'x'`,
     `Path(p).resolve()`. Returned with the path text joined when the parts are literals."""
-    if depth > 5:
-        return None
+    if depth > MAX_PATH_STEPS:
+        return None                      # past the bound: the caller reads the call as UNRESOLVED (fail closed)
     if isinstance(node, ast.Call) and _full_name(mod, aliases, node.func) in PATH_CTORS:
         return node
     if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in PATH_SAME:
@@ -2987,6 +3016,10 @@ def function_reach(idx: Index, mod: Module, fn, tainted=None, depth=0, carry=())
             if pc is not None:
                 target, hit = pc, hit or any(_uses(a, tainted) for a in pc.args)
                 cap = "read" if attr in READ_ATTRS else "open" if attr == "open" else "write"
+            elif full.split(".")[0] == "pathlib" or full.startswith(("Path.", "PurePath.")):
+                reach.unresolved.append(f"{mod.where(call)} {mod.src(call.func)[:40]}(...) reads or writes a path the "
+                                        "audit cannot read (a Path chain it does not model, or past MAX_PATH_STEPS)")
+                continue                                        # 1.4.10: never the safe pathlib head (fail closed)
         if cap == "computer":
             add("computer", call); continue
         if cap is not None and not hit and not on_tainted:
@@ -4085,9 +4118,17 @@ def audit(root: Path) -> Report:
     idx = Index(r)
     for tid in sorted(tracks):
         if TRACK_SIGNATURES[tid]["support"] == "full":
-            surfaces.append((tid, guard_results(idx, tid, tracks[tid])))
+            try:
+                surfaces.append((tid, guard_results(idx, tid, tracks[tid])))
+            except RecursionError:
+                idx.bound(f"{tid}: the code nests deeper than the audit's recursion allows")
+                surfaces.append((tid, {cid: ("UNRESOLVED", "", "") for cid in ("G1", "G2", "G3")}))
         else:
             surfaces.append((tid, declared_results(r, tid)))
+    if idx.bounds_hit:          # 1.4.10: an analysis that stopped at a bound proves nothing (fail closed)
+        why = "the audit stopped at a bound: " + "; ".join(idx.bounds_hit[:3])
+        surfaces = [(tid, {cid: (("UNRESOLVED", f"{why}; {ev}" if ev else why, fx) if st == "VERIFIED" else (st, ev, fx))
+                           for cid, (st, ev, fx) in g.items()}) if tid in tracks else (tid, g) for tid, g in surfaces]
     titles = {"G1": ("Permission deny rules exist", 3), "G2": ("Secrets are denied to the agent (.env, keys, credential folders)", 3),
               "G3": ("Destructive commands are denied or gated (push, reset --hard, rm -rf)", 2)}
     if tracks:

@@ -1,4 +1,4 @@
-"""kit_guard: the harness kit's guard helper (version 6, harness-marketplace 1.4.9). It imports nothing.
+"""kit_guard: the harness kit's guard helper (version 7, harness-marketplace 1.4.10). It imports nothing.
 
     import subprocess
     from kit_guard import refuses
@@ -10,7 +10,8 @@
 
 refuses(value) is True when value names a secret path or is a destructive command. value may be a string (a command,
 a path or a URL) or a tool's whole input (a dict or a list): every string inside it is checked on its own, keys
-included, and a list of strings is also checked as one argument vector (`['rm', '-rf', 'x']`).
+included, and a list of strings is also checked as one argument vector (`['rm', '-rf', 'x']`). A value nested more
+than 20 containers deep is refused.
 
 Before any other step, every string is also read with each backslash-newline pair removed, as the shell removes a
 line continuation (outside single quotes, inside double quotes too), and with every such pair removed wherever it is;
@@ -23,8 +24,9 @@ The classes, as this helper defines them (harness-audit credits exactly these):
                .bak); .netrc; .pgpass; credentials or credentials.<anything>; or inside .ssh, .aws, .gnupg, .azure,
                .kube, .docker or .config/gcloud. Upper and lower case are the same. Read after shell quotes and
                backslashes are removed (or read as Windows separators), %-escapes decoded (up to three times, so
-               %252e is a dot), simple braces expanded (`{a,b}` and sequences `{a..e}`, `{1..9}`; a word with more
-               than four brace groups or more than 64 expansions is refused), and `.` and `..` path parts resolved.
+               %252e is a dot; a value still encoded after the third time is refused), simple braces expanded (`{a,b}` and sequences `{a..e}`, `{1..9}`; a word with more
+               than four brace groups, more than 64 expansions or a sequence of more than 256 items is refused),
+               and `.` and `..` path parts resolved.
   globs        a path part holding `*`, `?` or `[` is read as a superset of what the shell could expand it to: a
                bracket expression (POSIX classes included) is any one character, `?` is one character and `*` is any
                run of characters, a leading dot included. The part is secret when that superset can match a secret
@@ -70,6 +72,9 @@ _HEX = "0123456789abcdefABCDEF"
 _GIT_OPTS_WITH_VALUE = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--super-prefix",
                         "--config-env", "--list-cmds"}
 _MAX_GLOB = 256
+_MAX_SEQUENCE = 256          # items one brace sequence ({1..9}) may stand for; a longer one is refused
+_PERCENT_ROUNDS = 3          # %-decodings read; a value still encoded after them is refused
+_MAX_CONTAINERS = 20         # dicts and lists nested in a tool input; a deeper value is refused
 
 
 def _pattern(text):
@@ -209,19 +214,20 @@ def _secret_part(part):
 
 
 def _sequence(inner):
-    """The items of a brace sequence `a..e` or `1..3` (a step is ignored: a superset), or None."""
+    """The items of a brace sequence `a..e` or `1..3` (a step is ignored: a superset); None when inner is not a
+    sequence, False when it is one of more than _MAX_SEQUENCE items (refused)."""
     parts = inner.split("..")
     if len(parts) not in (2, 3):
         return None
     a, b = parts[0], parts[1]
     if len(a) == 1 and len(b) == 1 and not (a + b).lstrip("-").isdigit():
         lo, hi = sorted((ord(a), ord(b)))
-        return [chr(c) for c in range(lo, hi + 1)] if hi - lo < 256 else None
+        return [chr(c) for c in range(lo, hi + 1)] if hi - lo < _MAX_SEQUENCE else False
     try:
         lo, hi = sorted((int(a), int(b)))
     except ValueError:
         return None
-    return [str(i) for i in range(lo, hi + 1)] if hi - lo < 256 else None
+    return [str(i) for i in range(lo, hi + 1)] if hi - lo < _MAX_SEQUENCE else False
 
 
 def _expand_braces(word, depth=0):
@@ -239,6 +245,8 @@ def _expand_braces(word, depth=0):
         if j < len(word) and word[j] == "}":
             inner = word[i + 1:j]
             items = inner.split(",") if "," in inner else _sequence(inner)
+            if items is False:
+                return None                             # a sequence too long to read: refused
             if items is not None:
                 start, end = i, j
                 break
@@ -310,8 +318,12 @@ def _normalised(parts):
 
 def _secret_word(word):
     forms = {_unquoted(word), _drop(word, "\"'`").replace("\\", "/")}
-    for _ in range(3):                                  # %252e -> %2e -> .
-        forms |= {_percent_decoded(f) for f in forms}
+    last = set(forms)
+    for _ in range(_PERCENT_ROUNDS):                    # %252e -> %2e -> .
+        last = {_percent_decoded(f) for f in last}
+        forms |= last
+    if any(_percent_decoded(f) != f for f in last):
+        return True                                     # still encoded past the bound: refused
     forms |= {_brackets_as_any(f) for f in forms if "[" in f}
     expanded = [_expand_braces(f) for f in forms]
     if None in expanded:
@@ -625,8 +637,8 @@ def _strings(value, depth=0):
     yielded as one argument vector (a tuple)."""
     if isinstance(value, str):
         yield value
-    elif depth > 20:
-        yield str(value)
+    elif depth > _MAX_CONTAINERS:
+        raise _Unread                                   # nested past the bound: refused
     elif isinstance(value, dict):
         for k, v in value.items():
             yield from _strings(k, depth + 1)
@@ -672,7 +684,7 @@ def secret(value) -> bool:
     helper does not read."""
     try:
         return _secret(value) or _unread(value)
-    except RecursionError:
+    except (_Unread, RecursionError):
         return True
 
 
@@ -689,5 +701,5 @@ def refuses(value) -> bool:
     """True when value names a secret path or is a destructive command (an unread nested command is both)."""
     try:
         return _secret(value) or destructive(value)
-    except RecursionError:
+    except (_Unread, RecursionError):
         return True
