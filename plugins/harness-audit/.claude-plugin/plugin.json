@@ -1,6 +1,6 @@
 {
   "name": "harness-audit",
-  "version": "1.4.9",
+  "version": "1.4.10",
   "description": "Score a repo's agent harness across 7 areas, including evidence binding and real-path red teaming, with file:line evidence for every pass and a fix for every gap.",
   "author": {
     "name": "Yen-Ching Wu"

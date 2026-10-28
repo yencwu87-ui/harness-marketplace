@@ -114,6 +114,12 @@ From 1.4.9 any mention of `exec`, `eval`, `compile` or `__import__` (also `built
 ...`), any use of the `builtins` module and any import of `pkgutil` withhold credit; so does a function of yours that
 stores on, or appends to, one of its parameters (`self` in an ordinary class is fine). The helper refuses a command
 nested more than four shells deep, whatever it does.
+From 1.4.10 the audit reads a class or function body through every `if`, `try`, `for`, `while`, `with` and `match`,
+so a binding or a second definition hidden in one counts; a function of yours that changes what one of its parameters
+holds is refused through any chain of names (`p = m.handlers; p.clear()`); and when the audit stops at one of its
+limits (a file too large or not parseable, a linked file or folder, very deep re-exports) it says so and gives no
+credit instead of guessing. The helper refuses a TAB-separated nested command, and any value holding a control
+character other than TAB and newline, or a non-ASCII space (a no-break space in file content included).
 
 ## Honest expectations
 
