@@ -1,5 +1,7 @@
 # Harness Marketplace
 
+> **Preview: independent review in progress, not a release.** This branch (`preview-1.4.10`) carries harness-marketplace 1.4.10 for an early look. An independent engineering review is still open; its latest round found issues that the next version fixes. The current release is on `main` (1.3.0).
+
 **Governed harness engineering for AI agents.** Scaffold it, audit it, verify it, red-team it, on whichever agent framework your team uses.
 
 AI coding agents are good at writing code and bad at long tasks: they lose their place between sessions, read what they shouldn't, and say "done" without proof. A harness is the work around the model: context, state, verification, guardrails and recovery. This repository gives you that harness in two forms.
