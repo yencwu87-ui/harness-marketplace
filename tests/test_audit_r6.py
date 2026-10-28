@@ -297,7 +297,8 @@ MODULE_CONTROLS = {
     "a constant": "X = 1\n",
     "a class with instance stores": "class C:\n    def __init__(self):\n        self.x = 1\n",
     "a dict and list": "D = {}\nD['k'] = 1\nL = []\nL.append(1)\n",
-    "a parameter store": "def configure(cfg):\n    cfg.debug = True\n",
+    # 1.4.9 (R8-02): a store on a plain parameter now withholds credit; a store on self in a closed class does not
+    "a store on self": "class Config:\n    def configure(self):\n        self.debug = True\n",
     "an environment store": "import os\nos.environ['CONSTRUCTED'] = '1'\n",
     "an isinstance test": "import subprocess\ndef ok(x):\n    return isinstance(x, subprocess.CompletedProcess)\n",
     "an os.walk prune": "import os\nfor dirpath, dirnames, files in os.walk('.'):\n    dirnames[:] = []\n",

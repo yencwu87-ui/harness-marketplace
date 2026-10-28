@@ -281,6 +281,11 @@ UNBOUND = {      # a method that stores on self, reached with something else as 
     "the class passed to a repo function": "def go(c):\n    return c.change({h})\ngo(K)",
     "the class returned": "def get():\n    return K\nget().change({h})",
     "functools.partial of C.m": "import functools\nfunctools.partial(K.change, {h})()",
+    "a subclass's name": "class Sub(K):\n    pass\nSub.change({h})",
+    "a subclass in another file": None,
+    "the class through its module": None,
+    "a cooperative call from a method reached unbound": "class B:\n    def go(self):\n        K.change(self)\n"
+                                                        "B.go({h})",
     "a classmethod's cls.m(x)": None,
     "a class decorator": None,
     "a metaclass": None,
@@ -288,6 +293,10 @@ UNBOUND = {      # a method that stores on self, reached with something else as 
     "a decorated method": None,
 }
 SELF_CLASS = "class K:\n    def change(self):\n        self.run = replacement\n"
+UNBOUND_FILES = {   # the method reached from another file
+    "a subclass in another file": "from patch import K\nclass Sub(K):\n    pass\nSub.change(None)\n",
+    "the class through its module": "import patch\npatch.K.change(None)\n",
+}
 UNBOUND_WHOLE = {
     "a classmethod's cls.m(x)": SELF_CLASS + "    @classmethod\n    def go(cls, h):\n        cls.change(h)\n",
     "a class decorator": "def deco(c):\n    return c\n@deco\n" + SELF_CLASS,
@@ -312,6 +321,11 @@ PARAM_CONTROLS = {   # ordinary classes and reads: credit stays
     "a parameter only read": "def show(m):\n    return m.name, m['k'], len(m)\n",
     "a dataclass": "from dataclasses import dataclass\n@dataclass\nclass D:\n    x: int = 0\nD(1)\n",
     "an instance method called on an instance": "class K:\n    def set(self, v):\n        self.v = v\nK().set(1)\n",
+    "a class used from another module's instance": "class K:\n    def __init__(self):\n        self.v = 1\n"
+                                                    "def make():\n    return K()\n",
+    "isinstance and except with a repo class": "class E(Exception):\n    def __init__(self, m):\n"
+                                                "        self.m = m\ntry:\n    pass\nexcept E:\n    pass\n"
+                                                "isinstance(1, (E, int))\n",
     "a local list changed": "def build():\n    out = []\n    out.append(1)\n    return out\n",
 }
 
@@ -331,6 +345,12 @@ class R8Params(unittest.TestCase):
         for ul, call in UNBOUND.items():
             for hl in ("an unknown outside function", "nothing handed"):
                 pre, h = HANDERS[hl]
+                if ul in UNBOUND_FILES:
+                    files = dict(TOOL, **{"patch.py": REPLACEMENT + SELF_CLASS, "other.py": UNBOUND_FILES[ul]})
+                    files["agent.py"] = files["agent.py"].replace("import patch\n", "import patch\nimport other\n")
+                    with self.subTest(case=ul):
+                        self.assertEqual(fast_score(files), 0, files["other.py"])
+                    continue
                 if call is None:
                     text = pre + REPLACEMENT + UNBOUND_WHOLE[ul]
                 else:
