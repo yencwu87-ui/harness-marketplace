@@ -1,0 +1,53 @@
+[
+  {
+    "command": "sh -c 'git push'",
+    "refuses": true,
+    "destructive": true,
+    "secret": false,
+    "runtime": {
+      "exit": 0,
+      "stdout": "CONSTRUCTED_GIT:push\n",
+      "stderr": ""
+    }
+  },
+  {
+    "command": "sh -c 'git\tpush'",
+    "refuses": false,
+    "destructive": false,
+    "secret": false,
+    "runtime": {
+      "exit": 0,
+      "stdout": "CONSTRUCTED_GIT:push\n",
+      "stderr": ""
+    }
+  },
+  {
+    "command": "sh -c 'rm\t-rf\tx'",
+    "refuses": false,
+    "destructive": false,
+    "secret": false
+  },
+  {
+    "command": "sh -c 'git\treset\t--hard'",
+    "refuses": false,
+    "destructive": false,
+    "secret": false
+  },
+  {
+    "command": "sh -c 'git\rpush'",
+    "refuses": false,
+    "destructive": false,
+    "secret": false
+  },
+  {
+    "command": "echo `git\tpush`",
+    "refuses": true,
+    "destructive": true,
+    "secret": false,
+    "runtime": {
+      "exit": 0,
+      "stdout": "CONSTRUCTED_GIT:push\n",
+      "stderr": ""
+    }
+  }
+]

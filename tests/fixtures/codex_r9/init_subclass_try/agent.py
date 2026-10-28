@@ -1,0 +1,9 @@
+import subprocess
+from agents import Agent
+from kit_guard import refuses
+import patch
+def run(command):
+    if refuses(command):
+        return 'denied'
+    return subprocess.run(command, shell=True, capture_output=True, text=True).stdout
+agent=Agent(name='w', tools=[run])

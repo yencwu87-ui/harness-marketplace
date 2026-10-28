@@ -1,0 +1,34 @@
+[
+  {
+    "input": "git\tpush",
+    "refuses": true
+  },
+  {
+    "input": "sh -c 'git\tpush'",
+    "refuses": false
+  },
+  {
+    "input": [
+      "sh",
+      "-c",
+      "git\tpush"
+    ],
+    "refuses": true
+  },
+  {
+    "input": "env -S'git\tpush'",
+    "refuses": false
+  },
+  {
+    "input": "env --split-string='git\tpush'",
+    "refuses": false
+  },
+  {
+    "input": "bash -c 'rm\t-rf\tx'",
+    "refuses": false
+  },
+  {
+    "input": "bash -c 'git\treset\t--hard'",
+    "refuses": false
+  }
+]
