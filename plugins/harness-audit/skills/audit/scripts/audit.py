@@ -31,7 +31,7 @@ import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-VERSION = "1.4.9"
+VERSION = "1.4.10"
 SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", "dist", "build", ".next", "target", "site-packages", "third_party", "vendor"}
 MAX_FILES = 60000
 MAX_FILE_BYTES = 400_000
@@ -970,7 +970,9 @@ CANONICAL_FORMS = (
      "exception name, a function or a class; a call's result, a for or with target, an imported name, an "
      "outside call's result and any other parameter may be a module); an item store or a mutating method (update, append, insert, pop, "
      "clear, add, discard, the set and deque updates, ...) on an object held by a module, or by what an outside call returns "
-     "(`pkgutil.resolve_name('sys').path.insert(...)`), or by a parameter that is not exempt (os.environ excepted, and "
+     "(`pkgutil.resolve_name('sys').path.insert(...)`; 1.4.10: also through a local bound to it, at any alias depth, "
+     "`p = vendorlib.load(); p.handlers.clear()`, while an item of it, `d = json.loads(s); d['a'].append(1)`, stays "
+     "allowed as before), or by a parameter that is not exempt (os.environ excepted, and "
      "`sys.path.insert(0, <this file's folder>)`, inline or through a name bound once to it, a folder the shadow "
      "check reads); any import of importlib, imp, gc, ctypes, inspect, unittest.mock, mock or pkgutil; any import of a module that runs "
      "code strings, code files or serialized calls, the same as exec (timeit, runpy, cProfile, profile, pdb, bdb, "
@@ -1000,13 +1002,19 @@ CANONICAL_FORMS = (
      "not a proof that no other exists); pkgutil and pydoc count as module sources. Parameters (1.4.9): "
      "a repo function that stores an attribute or item on one of its parameters (or on something it holds, also "
      "through a local bound to it: `p = m.path; p.insert(...)`), setattr's or delattr's it, or calls a mutating "
-     "method on it, makes the guard UNRESOLVED, because an outside "
+     "method on it, makes the guard UNRESOLVED (1.4.10: through any chain of local aliases in any binding form: "
+     "plain, annotated or chained assignment, walrus, a for or with target, unpacking, a match capture, a choice "
+     "`a if c else b` or `a or b`, getattr, next, iter and the other builtins that may return what they are "
+     "given, a method of it such as `m.get('x')`, a repo function handed it, and a name declared global or "
+     "nonlocal, each name resolved in the namespace Python reads it from; past 64 alias steps, or at a recursion "
+     "limit, the target counts as held), because an outside "
      "call's result (`pkgutil.resolve_name('subprocess')`, `vendorlib.load(...)`) may be a module handed to it. "
      "Exempt are only: the first parameter, named self or cls, of a function in a class namespace (found through "
      "if, try, for, while, with and match) that is undecorated or a property, setter, getter, deleter, "
      "classmethod, cached_property, abstractmethod or override, of a class with no decorator other than "
      "dataclass, total_ordering, final or unique, no keyword (metaclass=) and only outside bases or exempt repo "
-     "bases without __init_subclass__, whose name, its subclasses' names and every `cls`, in every file the audit "
+     "bases without __init_subclass__ (1.4.10: bound anywhere in the base's namespace, in any form: a def under "
+     "if or try, whatever its first parameter is called, or `__init_subclass__ = classmethod(f)`), whose name, its subclasses' names and every `cls`, in every file the audit "
      "reads, are only called, subclassed, compared, tested, annotated, given to isinstance, issubclass or except, "
      "or read for an attribute that is not one of its plain methods (`Base.m(self, ...)` from a method whose own "
      "self is exempt is allowed; an import alias of the name counts as the name), with no `type(o).m`, "
@@ -1015,7 +1023,10 @@ CANONICAL_FORMS = (
      "body (`staticmethod(m)`, `alias = m`, `(m,)`, `property(None, m)`; `@m.setter` excepted) or a plain "
      "method read through super() outside an instance method; exempt covers self or cls itself, and what it "
      "holds only when every binding of that attribute name in the files the audit reads (`x.a = v`, "
-     "setattr(x, 'a', v), a class-body `a = v`) gives a value that is not a module and one exists (`self.items = "
+     "setattr(x, 'a', v), and (1.4.10) a binding of `a` anywhere in a class's namespace, through every compound "
+     "statement and in any form; a form that gives no value the audit reads, such as a for or with target, "
+     "unpacking, an import, a match capture or an augmented assignment, counts as a module; a method's local is "
+     "not a class attribute) gives a value that is not a module and one exists (`self.items = "
      "[]` then `self.items.append(v)` is fine; `self.m = m` then `self.m.run = ...` is not); `cls()` in an exempt "
      "classmethod is an instance; and a framework-supplied parameter in its documented contract position, written only where the "
      "contract writes: a Strands callback's only argument `event.cancel_tool = ...`, a Microsoft Agent Framework "
@@ -1128,12 +1139,23 @@ CANONICAL_FORMS = (
      "lists their members, globs over-approximated), for the calls it binds: in a tool, the capability calls whose operation argument is P "
      "(a delete such as shutil.rmtree(P) or Path(P).unlink() binds nothing); in a hook, the tools the hook and its "
      "scope apply to. There is no keyword rule: a hand-written test covers nothing. The helper reads text: it does "
-     "not limit where a file-write tool writes."),
+     "not limit where a file-write tool writes. A tool class is followed through its run method (_run, _arun, run, "
+     "__call__, forward or invoke) only when its namespace binds that name once, as a def (1.4.10); a Strands hook "
+     "provider's callback likewise. A pathlib method that reads or writes (read_text, write_text, open, unlink, "
+     "...) on a Path chain the audit does not model (joinpath, parent, with_name, Path.cwd(), or more than five "
+     ".resolve(), `/` or alias steps back to Path(...)) is UNRESOLVED (1.4.10; before, it was read as no "
+     "capability)."),
     ("F7 Everything else",
      "Any other code-level refusal, including hand-written predicates (`'.env' in command`, a regex, your own "
      "is_dangerous()), a helper refusal that is not first, or a refusal through another shape, is UNRESOLVED with "
      "the reason \"hand-written refusal: use the kit guard helper to earn credit\" or the rule it breaks. It earns "
-     "no points; it does not count as missing either."),
+     "no points; it does not count as missing either. Bounds (1.4.10): every bound the code analysis has fails "
+     "closed. When the audit stops at one (more than 60000 files in the tree, a Python file over 400000 bytes or "
+     "one this Python cannot parse, a name re-exported through more than 6 resolve steps, a recursion limit), "
+     "every code-guard check that would be VERIFIED is UNRESOLVED, naming the bound; past the bounds that belong "
+     "to one call (4 helper calls deep, 3 tool-list indirections, 4 nested string constants, 4 local alias steps "
+     "to a callee's name, 5 Path steps, 64 parameter alias steps) that call is UNRESOLVED or its target held. "
+     "The table, with the helper's bounds, is in DECISIONS.md."),
 )
 KIT_GUARD_SHA256 = "f07c81b8145053308c9a26bf4561a6e8d78b675bc8921dccdfc9f079feab9143"   # kit/shared/kit_guard.py
 KIT_GUARD_MODULE, KIT_GUARD_NAME = "kit_guard", "refuses"

@@ -534,6 +534,38 @@ class R9ShellWhitespace(unittest.TestCase):
         self.assertTrue(KG.refuses("git\rpush"))
 
 
+# ------------------------------------------------------------------ neighbours the class suites found (1.4.10)
+STRANDS = ("import re, subprocess\nfrom kit_guard import refuses\nfrom strands import Agent, tool\n"
+           "from strands.hooks import HookProvider, BeforeToolCallEvent\n"
+           "class Gate(HookProvider):\n    def register_hooks(self, registry, **kw):\n"
+           "        registry.add_callback(BeforeToolCallEvent, self.before)\n    def before(self, event):\n"
+           "        if refuses(event.tool_use):\n            event.cancel_tool = 'denied'\n{again}"
+           "@tool\ndef run_shell(command: str) -> str:\n    return subprocess.run(command, shell=True).stdout\n"
+           "agent = Agent(tools=[run_shell], hooks=[Gate()])\n")
+TOOL_CLASS = ("import subprocess\nfrom agents import Agent\nfrom kit_guard import refuses\nclass Shell:\n"
+              "    def run(self, command):\n        if refuses(command):\n            return 'denied'\n"
+              "        return subprocess.run(command, shell=True).returncode\n{again}agent = Agent(name='w', tools=[Shell()])\n")
+
+
+class R9Neighbours(unittest.TestCase):
+    """A method the audit follows is every binding of its name in the class's namespace, not the first def."""
+
+    def test_a_strands_callback_bound_twice_is_not_read(self):
+        self.assertEqual(fast_score({"agent.py": STRANDS.format(again="")}), 8)
+        for wl, wrap in nestings():
+            again = _indent(wrap("def before(self, event):\n    event.tool_use['input'] = {}\n"))
+            with self.subTest(wrapper=wl):
+                self.assertEqual(fast_score({"agent.py": STRANDS.format(again=again)}), 0)
+
+    def test_a_tool_class_run_method_bound_twice_is_not_followed(self):
+        base = fast_score({"agent.py": TOOL_CLASS.format(again="")})
+        for wl, wrap in nestings():
+            again = _indent(wrap("def run(self, command):\n    return subprocess.run(command, shell=True).returncode\n"))
+            with self.subTest(wrapper=wl):
+                self.assertEqual(fast_score({"agent.py": TOOL_CLASS.format(again=again)}), 0)
+        self.assertIn(base, (0, 8))
+
+
 # ------------------------------------------------------------------ the rule code reads namespaces only through helpers
 AUDIT_SRC = ROOT / "plugins/harness-audit/skills/audit/scripts/audit.py"
 NAMESPACE_HELPERS = {"_parents", "_parents_of", "_context", "_in_own", "_namespace", "_enclosing_function",
