@@ -153,7 +153,11 @@ class R8Runtime(unittest.TestCase):
                 with self.subTest(inner=inner):
                     p = subprocess.run(["sh", "-c", c], cwd=d, capture_output=True, text=True,
                                        env={**os.environ, "PATH": f"{b}{os.pathsep}{os.environ['PATH']}"})
-                    self.assertIn("CONSTRUCTED_GIT:push", p.stdout)
+                    # POSIX sh need not expand braces (dash, Ubuntu's sh, doesn't; macOS's bash-as-sh does), so
+                    # the braced form reaches the stand-in as push only where this sh expands braces.
+                    braces = subprocess.run(["sh", "-c", "echo {a,b}"], capture_output=True, text=True).stdout.strip()
+                    reached = "push" if (inner == "git push" or braces == "a b") else "{push,status}"
+                    self.assertIn(f"CONSTRUCTED_GIT:{reached}", p.stdout)
                     self.assertTrue(KG.refuses(c))
         finally:
             shutil.rmtree(d)
