@@ -820,7 +820,7 @@ CANONICAL_FORMS = (
      "clear, add, discard, the set and deque updates, ...) on an object held by a module, or by what an outside call returns "
      "(`pkgutil.resolve_name('sys').path.insert(...)`) (os.environ excepted, and "
      "`sys.path.insert(0, <this file's folder>)`, inline or through a name bound once to it, a folder the shadow "
-     "check reads); any import of importlib, imp, gc, ctypes, inspect, unittest.mock or mock; any import of a module that runs "
+     "check reads); any import of importlib, imp, gc, ctypes, inspect, unittest.mock, mock or pkgutil; any import of a module that runs "
      "code strings, code files or serialized calls, the same as exec (timeit, runpy, cProfile, profile, pdb, bdb, "
      "code, codeop, pickle, marshal, shelve, doctest, trace, dill, cloudpickle, pickletools, copyreg); sys.modules, "
      "sys._getframe, sys.meta_path, sys.path_hooks, sys.path_importer_cache, sys.settrace or sys.setprofile (also "
@@ -1677,7 +1677,15 @@ def _is_environ(m, node) -> bool:
 
 # F1 (R6-02): module objects. A module may be read (`m.attr`) and called (`m.f(...)`), and nothing else: binding it
 # to another name, handing it on, or storing through anything that is or may be a module withholds helper credit.
-MODULE_SOURCES = ("importlib", "imp", "gc", "ctypes", "inspect", "unittest.mock", "mock")   # hand out modules or namespaces
+MODULE_SOURCES = ("importlib", "imp", "gc", "ctypes", "inspect", "unittest.mock", "mock",
+                  "pkgutil")   # hand out modules or namespaces (pkgutil.resolve_name('builtins:exec'), 1.4.9)
+# R8-01: the exec family, by identity. A reference to one of these names anywhere (a call, a binding, an argument, an
+# import alias, a parameter), any attribute of the builtins module other than a plain constant, any `.builtins`
+# attribute, and these callables that run or import code from text, withhold helper credit.
+EXEC_FAMILY = ("exec", "eval", "compile", "__import__")
+BUILTINS_CONSTANTS = ("Ellipsis", "NotImplemented")
+CODE_FROM_TEXT = ("typing.get_type_hints", "typing.ForwardRef", "typing._eval_type", "typing.evaluate_forward_ref",
+                  "annotationlib", "logging.config", "six.exec_", "future.utils.exec_", "past.builtins")
 # Modules that run code strings, code files or serialized calls: the same as exec under F1's run-time change rule.
 CODE_RUNNERS = ("timeit", "runpy", "cProfile", "profile", "pdb", "bdb", "code", "codeop", "pickle", "_pickle",
                 "marshal", "shelve", "doctest", "trace", "dill", "cloudpickle", "pickletools", "copyreg")
@@ -1868,8 +1876,45 @@ class _ModuleUses:
                 return f"{m.where(n)} {why}"
         return ""
 
+    def exec_family(self, n):
+        """R8-01: why n names the exec family or the builtins module (by identity, whatever the spelling), or ''."""
+        m = self.m
+        what = "which runs or imports code from text (the exec family)"
+        if isinstance(n, ast.Name) and n.id in EXEC_FAMILY:
+            return f"names {n.id}, {what}"
+        if isinstance(n, ast.arg) and n.arg in EXEC_FAMILY:
+            return f"binds a parameter named {n.arg}, {what}"
+        if isinstance(n, ast.alias):
+            bound = n.asname or n.name.split(".")[0]
+            if bound in EXEC_FAMILY:
+                return f"binds the name {bound} by import, {what}"
+        if isinstance(n, ast.Import):
+            for a in n.names:
+                if any(a.name == c or a.name.startswith(c + ".") for c in CODE_FROM_TEXT):
+                    return f"imports {a.name}, {what}"
+        if isinstance(n, ast.ImportFrom) and not n.level and n.module:
+            if n.module == "builtins" and any(a.name not in BUILTINS_CONSTANTS for a in n.names):
+                return f"imports from builtins ({', '.join(a.name for a in n.names)[:40]}), {what} or its namespace"
+            for a in n.names:
+                dotted = f"{n.module}.{a.name}"
+                if any(x == c or x.startswith(c + ".") for x in (n.module, dotted) for c in CODE_FROM_TEXT):
+                    return f"imports {dotted}, {what}"
+        if isinstance(n, ast.Attribute):
+            if n.attr == "builtins":
+                return f"reads .builtins ({m.src(n)[:40]}), the builtins module, {what}"
+            full = m.full(n)
+            if full.startswith("builtins.") and full.count(".") == 1 and n.attr not in BUILTINS_CONSTANTS and \
+                    isinstance(n.value, ast.Name) and m.alias.get(n.value.id, "").split(".")[0] == "builtins":
+                return f"uses {m.src(n)[:40]}, an attribute of the builtins module, {what} or its namespace"
+            if any(full == c or full.startswith(c + ".") for c in CODE_FROM_TEXT):
+                return f"uses {full}, {what}"
+        return ""
+
     def why(self, n):
         m = self.m
+        family = self.exec_family(n)
+        if family:
+            return family
         if isinstance(n, ast.Import):
             for a in n.names:
                 if a.name.split(".")[0] in MODULE_SOURCES or a.name in MODULE_SOURCES:
@@ -1884,13 +1929,12 @@ class _ModuleUses:
                 return f"imports from {n.module}, which hands out modules or their namespaces"
             if n.module == "sys" and any(a.name in SYS_SOURCES or a.name == "*" for a in n.names):
                 return "imports sys.modules or another import or frame hook"
-            if n.module == "builtins" and any(a.name == "*" or a.name in NAMESPACE_NAMES or a.name.startswith("__")
-                                              for a in n.names):
-                return "imports a namespace builtin"
         if isinstance(n, ast.Name) and n.id in NAMESPACE_NAMES and n.id not in self.kinds:
             return f"uses {n.id}, which reaches modules or namespaces by name"
-        if isinstance(n, ast.Constant) and isinstance(n.value, str) and n.value in NAMESPACE_STRINGS:
-            return f"names the attribute {n.value!r}, which reaches a namespace"
+        if isinstance(n, ast.Constant) and isinstance(n.value, str) and (
+                n.value in NAMESPACE_STRINGS or (not any(c.isspace() for c in n.value) and
+                                                 set(re.findall(r"[A-Za-z_]\w*", n.value)) & NAMESPACE_STRINGS)):
+            return f"names the attribute {n.value[:40]!r}, which reaches a namespace"   # also 'f.__globals__' (1.4.9)
         if isinstance(n, ast.Attribute):
             if n.attr in FRAME_ATTRS or (n.attr.startswith("__") and n.attr not in DUNDER_READS):
                 return f"reads .{n.attr}, which reaches a namespace or code"
