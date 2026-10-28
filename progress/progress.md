@@ -1,5 +1,31 @@
 # Progress
 
+**Updated:** 28 Oct 2026  **Item:** 1.4.10, Codex round-9 fix round by class (coordinator brief, not a work-list item)  **Status:** passed locally except the 12 port tests, awaiting the coordinator's runs (port tests, Python 3.12, SDK-engine smoke) and Codex round 10
+
+## What changed
+- plugins/harness-audit/skills/audit/scripts/audit.py (1.4.10): one namespace walker (`_namespace`, `_own_nodes`, `_bindings`, `_lookup`, `_binding_source`) used by every rule; R9-01 class attributes and R9-03 `__init_subclass__` read in a class's whole namespace; R8-02/R9-02 alias status over every binding form up to 64 steps, then held; every analysis bound fails closed (table in DECISIONS.md); the independent review's 14 cases; CANONICAL_FORMS and SKILL.md
+- kit/shared/kit_guard.py (version 7, copy synced, re-pinned): blanks and separators read as a shell does, other control characters and non-ASCII spaces refused, bounds refuse, the independent review's helper cases
+- tests: test_audit_r9.py, test_bounds.py, test_audit_review_1_4_10.py, test_helper_review_1_4_10.py; fixtures codex_r9; fairness `c` helper copies refreshed
+
+## Verdicts
+- R9-01 to R9-04 and the generated class suites red on 31bc5148 (5,097 failing subtests; 42 more in the neighbour suite; bounds suite 11 failures and 8 errors), green at HEAD: VERIFIED (deliver/1.4.10/logs/red_*_vs_31bc5148.log, unittest_full/)
+- Independent reviews (audit 14 cases, helper 10 cases) red before the fixes, green at HEAD: VERIFIED (deliver/1.4.10/logs/red_audit_review_vs_0bc4f9b.log, red_helper_review_vs_1baab4c.log)
+- Fairness a=8 b=0 c=2 on 8 tracks, starters 8/8: VERIFIED (deliver/1.4.10/logs/test_audit_fairness.log)
+- Self-audit of clean exports: 83 for 31bc5148 and HEAD: VERIFIED (deliver/1.4.10/logs/audit_self_clean_export.log)
+- 12 TCP-bind tests: UNRESOLVED (sandbox refuses the bind; same 12 as 1.4.9, deliver/1.4.10/logs/failing_after.txt)
+- Pinned SDK-engine smoke and Python 3.12: UNRESOLVED (not available here; the coordinator runs them)
+
+## Usage
+- Wall-clock: 28 Oct 2026, 12:47 to about 14:20 +08 (one session, packaging included)
+- Tokens: not available to this headless session
+
+## Blocker
+none
+
+## Next action
+Coordinator runs the 12 port tests, Python 3.12 and the SDK-engine smoke, and sends the package to Codex for round 10.
+
+---
 **Updated:** 28 Oct 2026  **Item:** 1.4.9, Codex round-8 fix round (coordinator brief, not a work-list item)  **Status:** passed locally except the 12 port tests, awaiting the coordinator's runs (port tests, SDK-engine smoke) and Codex round 9
 
 ## What changed
