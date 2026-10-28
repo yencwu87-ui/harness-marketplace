@@ -45,9 +45,14 @@ The classes, as this helper defines them (harness-audit credits exactly these):
                braced words, a group past the limits above, or more than 256 readings is refused, and so is a word
                holding an unquoted `{` and a quoted or escaped `{` or `}` (`git pu{sh,'}'}`). Each reading's words
                are also read as nested shells (`bash -c {'git push',x}`), and so is the string `env -S` or
-               `--split-string=` carries. Nested shells are read four levels deep (a word holding a space or
-               one of ;&|`$( is read again as a command); a command nested deeper is not read, so it is refused,
+               `--split-string=` carries. Nested shells are read four levels deep: a word holding anything but
+               letters, digits and ._/:=@%+,-~^ (a space, a TAB, a newline, one of ;&|()<>, a quote, a brace, `$`
+               or a backtick) is read again as a command; a command nested deeper is not read, so it is refused,
                benign or not, and counts as secret too (`sh -c` five times around anything with a space).
+  blanks       words are split on a space, a TAB and a newline (a CR before a newline is read with it), and
+               commands on a newline and ; & | ( ). Any other control character (U+0000 to U+001F, U+007F to
+               U+009F) or a non-ASCII space (U+00A0, U+2000 to U+200B, U+3000, U+FEFF, ...) anywhere in a value
+               is refused, benign or not, and counts as secret too.
 Not decoded (bound your claim accordingly): shell variables and parameter expansion ($X, ${X}), command output used
 as a word, ANSI-C quoting ($'\\x2e'), encodings (base64), git aliases defined in config files, programs that delete
 without these words (find -delete, a script file).
@@ -75,6 +80,20 @@ _MAX_GLOB = 256
 _MAX_SEQUENCE = 256          # items one brace sequence ({1..9}) may stand for; a longer one is refused
 _PERCENT_ROUNDS = 3          # %-decodings read; a value still encoded after them is refused
 _MAX_CONTAINERS = 20         # dicts and lists nested in a tool input; a deeper value is refused
+_PLAIN_WORD = frozenset(_LETTERS + "0123456789._/:=@%+,-~^")   # a nested word of only these is not read again
+_ODD_SPACES = frozenset("\u200b\u2060\ufeff\u180e")   # spaces that are not isspace() but read as one
+
+
+def _odd_char(s):
+    """True when s holds a character the helper does not read as a shell would: a control character other than a
+    TAB or a newline (a CR before a newline is read with the newline), or a non-ASCII space."""
+    for i, c in enumerate(s):
+        o = ord(c)
+        if o < 32 and c not in "\t\n" and not (c == "\r" and s[i + 1:i + 2] == "\n"):
+            return True
+        if 127 <= o < 160 or (o > 127 and (c.isspace() or c in _ODD_SPACES)):
+            return True
+    return False
 
 
 def _pattern(text):
@@ -575,7 +594,7 @@ def _destructive_form(s, depth):
             for w in words:                                # bash -c "...", sh -c '...', eval "...", env -S'...'
                 for text in (w, w[2:] if w.startswith("-S") else "", w.split("=", 1)[-1]
                              if w.startswith("--split-string=") else ""):
-                    if text and text != s and any(c in text for c in " ;&|\n`$(") and \
+                    if text and text != s and any(c not in _PLAIN_WORD for c in text) and \
                             _destructive_text(text, depth + 1):     # a word equal to s is s, already read
                         return True
     return False
@@ -626,6 +645,8 @@ def _continuations(s):
 def _forms(value):
     """Every string and argument vector of value (as _strings yields them), each also in its continuation forms."""
     for s in _strings(value):
+        if any(_odd_char(x) for x in (s if isinstance(s, tuple) else (s,))):
+            raise _Unread                               # a control character or an odd space: refused
         if isinstance(s, tuple):
             yield from dict.fromkeys(tuple(f(x) for x in s) for f in _JOINS)
         else:

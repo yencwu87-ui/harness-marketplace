@@ -482,8 +482,9 @@ NON_ASCII_SPACES = {f"U+{c:04X}": chr(c) for c in (0x85, 0xA0, 0x1680, 0x2000, 0
 
 def nest_forms(cmd, depth):
     """The command nested `depth` levels deep, as a shell string, an argument vector and an `env -S` string."""
-    if depth == 0:
-        return {"shell string": cmd, "argv": cmd.split(" ") if " " in cmd else [cmd]}
+    if depth == 0:     # an argument vector of separator text runs a program named `(git`: no argv form for it
+        return {"shell string": cmd, **({} if any(c in cmd for c in ";&|()\n") else
+                                        {"argv": cmd.split(" ") if " " in cmd else [cmd]})}
     inner = cmd
     for _ in range(depth - 1):
         inner = "sh -c " + shlex.quote(inner)
