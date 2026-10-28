@@ -7,7 +7,8 @@ It speaks just enough of two wire formats to drive one tool call and a final ans
 
 Behaviour: if the conversation already holds a tool result, it answers with text that quotes the tool
 result's first 200 characters. Otherwise, if tools are offered, it calls STUB_TOOL (default next_item)
-with empty arguments. It binds to 127.0.0.1 only and never reaches the network.
+with STUB_INPUT as its arguments (default: empty). Each Stub keeps the request bodies it received (`bodies`).
+It binds to 127.0.0.1 only and never reaches the network.
 """
 from __future__ import annotations
 
@@ -16,6 +17,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 STUB_TOOL = "next_item"
+STUB_INPUT: dict = {}     # the tool input the stub asks for (tests/test_sdk_engine_smoke.py sets a Bash command)
 
 
 def _anthropic_has_tool_result(body: dict) -> str | None:
@@ -56,6 +58,7 @@ def _tool_names_openai(body):
 class _Handler(BaseHTTPRequestHandler):
     server_version = "llm-stub/1"
     calls: list = []
+    bodies: list = []
 
     def log_message(self, *a):  # quiet
         pass
@@ -83,6 +86,7 @@ class _Handler(BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(n) or b"{}")
         path = self.path.split("?")[0]
         type(self).calls.append(path)
+        type(self).bodies.append(body)
         if path.endswith("/messages/count_tokens"):
             return self._json(200, {"input_tokens": 10})
         if path.endswith("/v1/messages") or path.endswith("/messages"):
@@ -97,7 +101,7 @@ class _Handler(BaseHTTPRequestHandler):
         model = body.get("model", "stub")
         tools = _tool_names_anthropic(body)
         if result is None and STUB_TOOL in tools:
-            block = {"type": "tool_use", "id": "toolu_stub_1", "name": STUB_TOOL, "input": {}}
+            block = {"type": "tool_use", "id": "toolu_stub_1", "name": STUB_TOOL, "input": dict(STUB_INPUT)}
             stop = "tool_use"
         else:
             block = {"type": "text", "text": f"Stub answer. Tool said: {(result or 'no tool')[:200]}"}
@@ -115,7 +119,7 @@ class _Handler(BaseHTTPRequestHandler):
         else:
             ev += [("content_block_start", {"type": "content_block_start", "index": 0,
                                             "content_block": {"type": "tool_use", "id": block["id"], "name": block["name"], "input": {}}}),
-                   ("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": "{}"}})]
+                   ("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": json.dumps(STUB_INPUT)}})]
         ev += [("content_block_stop", {"type": "content_block_stop", "index": 0}),
                ("message_delta", {"type": "message_delta", "delta": {"stop_reason": stop, "stop_sequence": None},
                                   "usage": {"output_tokens": 5}}),
@@ -129,7 +133,7 @@ class _Handler(BaseHTTPRequestHandler):
         model = body.get("model", "stub")
         if result is None and STUB_TOOL in tools:
             msg = {"role": "assistant", "content": None, "tool_calls": [
-                {"id": "call_stub_1", "type": "function", "function": {"name": STUB_TOOL, "arguments": "{}"}}]}
+                {"id": "call_stub_1", "type": "function", "function": {"name": STUB_TOOL, "arguments": json.dumps(STUB_INPUT)}}]}
             finish = "tool_calls"
         else:
             msg = {"role": "assistant", "content": f"Stub answer. Tool said: {(result or 'no tool')[:200]}"}
@@ -142,7 +146,7 @@ class _Handler(BaseHTTPRequestHandler):
         if finish == "tool_calls":
             tc = msg["tool_calls"][0]
             delta = {"role": "assistant", "tool_calls": [{"index": 0, "id": tc["id"], "type": "function",
-                                                          "function": {"name": tc["function"]["name"], "arguments": "{}"}}]}
+                                                          "function": {"name": tc["function"]["name"], "arguments": json.dumps(STUB_INPUT)}}]}
         else:
             delta = {"role": "assistant", "content": msg["content"]}
         ev = [(None, dict(base, choices=[{"index": 0, "delta": delta, "finish_reason": None}])),
@@ -155,7 +159,7 @@ class Stub:
     """with Stub() as url: ...   url is http://127.0.0.1:<port>"""
 
     def __enter__(self):
-        self.handler = type("_StubHandler", (_Handler,), {"calls": []})   # each stub counts its own requests
+        self.handler = type("_StubHandler", (_Handler,), {"calls": [], "bodies": []})   # each stub its own record
         self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), self.handler)
         self.t = threading.Thread(target=self.httpd.serve_forever, daemon=True)
         self.t.start()
@@ -165,6 +169,10 @@ class Stub:
     @property
     def calls(self):
         return list(self.handler.calls)
+
+    @property
+    def bodies(self):
+        return list(self.handler.bodies)
 
     def __exit__(self, *a):
         self.httpd.shutdown()
