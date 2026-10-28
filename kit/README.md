@@ -105,6 +105,11 @@ line continuations joined (and unjoined, refusing if either form is refused). Th
 file binds a module to another name (`runner = subprocess`), hands one to your own function, stores through something
 that may be a module, or uses `sys.modules`, importlib or `__import__`: call `subprocess.run(...)` directly. A fetch may
 carry only the options its own callable takes (`urlopen(url, timeout=5)`, not `headers=`).
+From 1.4.8 a module may only be used as `m.attr` or `m.attr(...)` (or tested, compared, item-read): `getattr(m, ...)`,
+`hasattr(m, ...)`, passing `m` to any function, putting it in a list or keeping it on a class also withhold credit.
+`check_output` takes no `check` or `capture_output`, option values must be ones the call accepts (`timeout=5`, not
+`'5'`), and SDK options must be built at module level or inside a function, not in a class body. The helper also
+expands braces in commands, so `git {push,status}` is refused.
 
 ## Honest expectations
 
