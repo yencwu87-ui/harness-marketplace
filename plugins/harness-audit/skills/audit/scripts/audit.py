@@ -501,6 +501,65 @@ class Index:
                             self._tampered.add(k[1].split(".")[0])
         return self._tampered
 
+    def class_open(self, mod, fn) -> str:
+        """R8-02: why the self or cls of method fn may be something other than an instance of its class (or the class),
+        or ''. A method is reached with another first argument only through the class object: `C.m(x)`, `cls.m(x)`,
+        `type(o).m(x)`, `o.__class__.m(x)`, getattr, vars, or the class handed somewhere the audit does not follow.
+        So the exemption holds only when fn is undecorated (or a property, setter, classmethod, cached_property,
+        abstractmethod or override), its class has no decorator outside a short list, no keyword (metaclass=), only
+        bases that are outside classes or closed repo classes without `__init_subclass__`, and, in every file the
+        audit reads, the class's name and its subclasses' names (and any `cls`) are only called, subclassed,
+        compared, tested, annotated, used in isinstance/issubclass/except, or read for an attribute that is not one
+        of its plain methods, except `Base.m(self, ...)` from a method whose own self is exempt."""
+        key = (mod.rel, fn.lineno, fn.col_offset)
+        cache = self.__dict__.setdefault("_class_open_cache", {})
+        if key in cache:
+            return cache[key]
+        cache[key] = ""                                   # a cycle (B calls A.m(self) in a method of A) stays closed
+        cache[key] = why = self._class_open(mod, fn)
+        return why
+
+    def _class_open(self, mod, fn) -> str:
+        parents = _parents_of(mod)
+        cls = _namespace(fn, parents)
+        if not isinstance(cls, ast.ClassDef):
+            return f"{mod.where(fn)} `{fn.name}` is not a method of a class"
+        for d in fn.decorator_list:
+            if not _safe_decorator(mod, d, METHOD_DECORATORS, cls, parents):
+                return f"{mod.where(d)} `{fn.name}` has a decorator that may call it with another first argument"
+        why = _class_closed(self, mod, cls, parents, set())
+        if why:
+            return why
+        methods = _plain_methods(cls, parents)
+        names = _subclass_names(self, cls.name)
+        for rel in sorted(self.files) + sorted(self.test_files()):
+            m = self.module(self.files.get(rel) or self._test_files[rel])
+            mp = _parents_of(m)
+            for n in ast.walk(m.tree):
+                if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load) and (n.id in names or n.id == "cls"):
+                    pass
+                elif isinstance(n, ast.Attribute) and isinstance(n.ctx, ast.Load) and n.attr in names:
+                    pass
+                elif isinstance(n, ast.Attribute) and n.attr in methods and (
+                        (isinstance(n.value, ast.Call) and isinstance(n.value.func, ast.Name) and
+                         n.value.func.id == "type") or
+                        (isinstance(n.value, ast.Attribute) and n.value.attr == "__class__")):
+                    return f"{m.where(n)} reaches the method `{n.attr}` through a class object ({m.src(n)[:40]})"
+                elif isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in ("getattr", "vars") \
+                        and n.args and not (n.func.id == "getattr" and len(n.args) >= 2 and
+                                            isinstance(n.args[1], ast.Constant) and n.args[1].value not in methods):
+                    if not (isinstance(n.args[0], ast.Name) and n.args[0].id == "self" and n.func.id == "getattr"):
+                        if n.func.id == "getattr" or (isinstance(n.args[0], ast.Name) and n.args[0].id in names):
+                            return (f"{m.where(n)} {n.func.id}() may reach a method of `{cls.name}` through its class "
+                                    f"({m.src(n)[:40]})")
+                    continue
+                else:
+                    continue
+                why = _class_use(self, m, mp, n, methods)
+                if why:
+                    return f"{m.where(n)} {why} (`{cls.name}`'s self may then be anything)"
+        return ""
+
     def module_change(self) -> str:
         """F1 (R6-02): the first place, in any file tampered() reads, that binds a module object to another name,
         hands one on, stores through something that is or may be a module, or reaches modules through sys.modules,
@@ -813,12 +872,13 @@ CANONICAL_FORMS = (
      "dict key or value, comprehension, a starred item) or using it as a subscript key; (5) holding it as a class "
      "or instance attribute or a default argument; (6) making it the target of getattr, hasattr, setattr, delattr "
      "or vars, or reading its `__dict__`. Also UNRESOLVED, as before: an attribute store or deletion whose object "
-     "is, or may be, a module (anything except a parameter, a name bound only to a literal, a display or a call of "
+     "is, or may be, a module (anything except an exempt parameter (below), a name bound only to a literal, a "
+     "display or a call of "
      "a repo class or function or of dict, list, set, tuple, object, frozenset, bytearray, str, int or float, an "
-     "exception name, a function or a class; a call's result, a for or with target, an imported name and an "
-     "outside call's result may be a module); an item store or a mutating method (update, append, insert, pop, "
+     "exception name, a function or a class; a call's result, a for or with target, an imported name, an "
+     "outside call's result and any other parameter may be a module); an item store or a mutating method (update, append, insert, pop, "
      "clear, add, discard, the set and deque updates, ...) on an object held by a module, or by what an outside call returns "
-     "(`pkgutil.resolve_name('sys').path.insert(...)`) (os.environ excepted, and "
+     "(`pkgutil.resolve_name('sys').path.insert(...)`), or by a parameter that is not exempt (os.environ excepted, and "
      "`sys.path.insert(0, <this file's folder>)`, inline or through a name bound once to it, a folder the shadow "
      "check reads); any import of importlib, imp, gc, ctypes, inspect, unittest.mock, mock or pkgutil; any import of a module that runs "
      "code strings, code files or serialized calls, the same as exec (timeit, runpy, cProfile, profile, pdb, bdb, "
@@ -827,11 +887,37 @@ CANONICAL_FORMS = (
      "`from sys import`); `__import__`, `__builtins__`, `__loader__`, `__spec__`, `__annotations__`, globals() or "
      "locals(); a double-underscore attribute other than __name__, __qualname__, __doc__, __file__, __version__, "
      "__init__, __class__, __module__, __enter__, __exit__, __aenter__, __aexit__ and __call__; a frame or "
-     "traceback attribute (f_globals, f_locals, f_back, tb_frame, gi_frame, ...) or such a name as a string; "
-     "getattr, setattr, delattr or hasattr with a computed name. Arguments a framework passes to a hook or tool are "
-     "taken to be its documented objects, not modules. Not modelled (UNRESOLVED is not claimed for them): an "
+     "traceback attribute (f_globals, f_locals, f_back, tb_frame, gi_frame, ...) or such a name as a string, "
+     "alone or as a part of a string with no spaces (`'f.__globals__'`, `'{0.__dict__}'`, 1.4.9); "
+     "getattr, setattr, delattr or hasattr with a computed name. The exec family (1.4.9, by identity, not by "
+     "spelling): any reference anywhere to the names exec, eval, compile or __import__ (a call, a binding, an "
+     "argument, a container, a default, a parameter or import alias of that name, whatever it is bound to); any "
+     "attribute of the builtins module other than the plain constants Ellipsis and NotImplemented "
+     "(`builtins.exec`, `b.eval` after `import builtins as b`, `builtins.print`); `from builtins import` anything "
+     "but those constants (`from builtins import exec as execute`); any `.builtins` attribute (`pydoc.builtins`); "
+     "`__builtins__` in any form; getattr of a module value (above, so `getattr(builtins, 'exec')`); and these "
+     "callables that run or import code from text, imported or reached by attribute: typing.get_type_hints, "
+     "typing.ForwardRef, typing._eval_type, typing.evaluate_forward_ref, annotationlib, logging.config, "
+     "six.exec_, future.utils.exec_, past.builtins (a list, not a proof that no other exists). Parameters (1.4.9): "
+     "a repo function that stores an attribute or item on one of its parameters (or on something it holds), "
+     "setattr's or delattr's it, or calls a mutating method on it, makes the guard UNRESOLVED, because an outside "
+     "call's result (`pkgutil.resolve_name('subprocess')`, `vendorlib.load(...)`) may be a module handed to it. "
+     "Exempt are only: the first parameter, named self or cls, of a function in a class namespace (found through "
+     "if, try, for, while, with and match) that is undecorated or a property, setter, getter, deleter, "
+     "classmethod, cached_property, abstractmethod or override, of a class with no decorator other than "
+     "dataclass, total_ordering, final or unique, no keyword (metaclass=) and only outside bases or exempt repo "
+     "bases without __init_subclass__, whose name, its subclasses' names and every `cls`, in every file the audit "
+     "reads, are only called, subclassed, compared, tested, annotated, given to isinstance, issubclass or except, "
+     "or read for an attribute that is not one of its plain methods (`Base.m(self, ...)` from a method whose own "
+     "self is exempt is allowed), with no `type(o).m`, `o.__class__.m`, getattr naming a plain method or vars of "
+     "the class; and a framework-supplied parameter in its documented contract position, written only where the "
+     "contract writes: a Strands callback's only argument `event.cancel_tool = ...`, a Microsoft Agent Framework "
+     "async middleware's first of two arguments `context.result = ...`. Arguments a framework passes to a hook or "
+     "tool are otherwise taken to be its documented objects for reading. Not modelled (UNRESOLVED is not claimed "
+     "for them): an "
      "outside function not on the hand-on list that hands an argument back or on; a capitalised outside module "
-     "taken to be a class."),
+     "taken to be a class; an outside class or framework base that calls a repo method with another first "
+     "argument; an outside module's attribute that is a member of the exec family under another name."),
     ("F2 Tool refusal",
      "The tool function's first statements (after its docstring) are `if refuses(P): return <literal>` or "
      "`if refuses(P): raise <built-in exception>(<literals>)`, with no else. P is the tool function's own parameter, "
@@ -1651,6 +1737,128 @@ class _Canon:
             (head if head in self.mod.alias else "builtins") in tampered or "*" in tampered
 
 
+METHOD_DECORATORS = {"property", "classmethod", "functools.cached_property", "abc.abstractmethod", "typing.override",
+                     "typing_extensions.override"}
+CLASS_DECORATORS = {"dataclasses.dataclass", "functools.total_ordering", "typing.final", "typing_extensions.final",
+                    "enum.unique"}
+
+
+def _safe_decorator(mod, d, allowed, cls=None, parents=None) -> bool:
+    """R8-02: a decorator on the written list (resolved through imports, not shadowed by a repo name), called or
+    not, or a property's `.setter`/`.getter`/`.deleter` naming a function of the same class."""
+    if isinstance(d, ast.Call):
+        d = d.func
+    if isinstance(d, ast.Attribute) and d.attr in ("setter", "getter", "deleter") and isinstance(d.value, ast.Name) \
+            and cls is not None:
+        return any(isinstance(x, (ast.FunctionDef, ast.AsyncFunctionDef)) and x.name == d.value.id and
+                   _namespace(x, parents) is cls for x in ast.walk(cls))
+    if isinstance(d, ast.Name) and (d.id in mod.funcs or d.id in mod.classes or d.id in mod.assigns):
+        return False
+    full = mod.full(d)
+    return full in allowed or (isinstance(d, ast.Name) and d.id not in mod.alias and
+                               any(a.split(".")[-1] == d.id and a.split(".")[0] in ("builtins",) for a in allowed)) \
+        or full in {a.split(".")[-1] for a in allowed if "." not in a}
+
+
+def _plain_methods(cls, parents) -> set:
+    """The names of functions in cls's namespace that take an instance first (not staticmethod or classmethod)."""
+    out = set()
+    for x in ast.walk(cls):
+        if isinstance(x, (ast.FunctionDef, ast.AsyncFunctionDef)) and _namespace(x, parents) is cls:
+            decs = {_dotted(d.func if isinstance(d, ast.Call) else d) for d in x.decorator_list}
+            if not decs & {"staticmethod", "classmethod"}:
+                out.add(x.name)
+    return out
+
+
+def _subclass_names(idx, name) -> set:
+    """name and the names of every repo class that has, directly or through others, a base named so."""
+    names, grew = {name}, True
+    while grew:
+        grew = False
+        for rel in sorted(idx.files) + sorted(idx.test_files()):
+            m = idx.module(idx.files.get(rel) or idx._test_files[rel])
+            for n in ast.walk(m.tree):
+                if isinstance(n, ast.ClassDef) and n.name not in names and \
+                        any(_dotted(b).split(".")[-1] in names for b in n.bases if _dotted(b)):
+                    names.add(n.name)
+                    grew = True
+    return names
+
+
+def _class_closed(idx, mod, cls, parents, seen) -> str:
+    """R8-02: why cls (or a repo base) may hand its methods to code the audit does not follow, or ''."""
+    if id(cls) in seen:
+        return ""
+    seen.add(id(cls))
+    for d in cls.decorator_list:
+        if not _safe_decorator(mod, d, CLASS_DECORATORS):
+            return f"{mod.where(d)} the class `{cls.name}` has a decorator, which receives the class object"
+    if cls.keywords:
+        return f"{mod.where(cls)} the class `{cls.name}` has a keyword (a metaclass), which receives the class object"
+    for b in cls.bases:
+        root = b.value if isinstance(b, ast.Subscript) else b
+        k = idx.resolve(mod, root) if isinstance(root, (ast.Name, ast.Attribute)) else ("unknown",)
+        if k[0] == "class":
+            bm, bc = k[1], k[2]
+            if any(isinstance(x, (ast.FunctionDef, ast.AsyncFunctionDef)) and x.name == "__init_subclass__"
+                   for x in bc.body):
+                return f"{bm.where(bc)} the base `{bc.name}` defines __init_subclass__, which receives the class object"
+            why = _class_closed(idx, bm, bc, _parents_of(bm), seen)
+            if why:
+                return why
+        elif k[0] in ("def", "value", "module") or (k[0] == "unknown" and not (
+                isinstance(root, ast.Name) and root.id in dir(builtins)) and not isinstance(root, ast.Attribute)
+                and not (isinstance(root, ast.Name) and root.id in mod.alias)):
+            return f"{mod.where(b)} the class `{cls.name}` has a base the audit cannot follow ({mod.src(b)[:40]})"
+    return ""
+
+
+def _class_use(idx, m, parents, node, methods) -> str:
+    """R8-02: why this use of a class object (its name, a subclass's name, or `cls`) may hand one of its plain
+    methods to other code, or ''."""
+    p = parents.get(node)
+    if isinstance(p, ast.Call) and p.func is node:
+        return ""                                          # C(...): an instance
+    if isinstance(p, ast.Attribute) and p.value is node:
+        if p.attr not in methods:
+            return ""                                      # a constant, a staticmethod, a classmethod, ...
+        gp = parents.get(p)
+        if isinstance(gp, ast.Call) and gp.func is p and gp.args and isinstance(gp.args[0], ast.Name) and \
+                gp.args[0].id == "self":
+            fn = gp
+            while fn is not None and not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                fn = parents.get(fn)
+            if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)) and \
+                    (fn.args.posonlyargs + fn.args.args)[:1] and \
+                    (fn.args.posonlyargs + fn.args.args)[0].arg == "self" and \
+                    isinstance(_namespace(fn, parents), ast.ClassDef) and not idx.class_open(m, fn):
+                return ""                                  # Base.m(self, ...) from a method whose self is exempt
+        return f"reads the method `{p.attr}` through the class object ({m.src(p)[:40]})"
+    if isinstance(p, ast.ClassDef) and (node in p.bases or node in p.decorator_list):
+        return ""
+    if isinstance(p, (ast.FunctionDef, ast.AsyncFunctionDef)) and node in p.decorator_list:
+        return ""
+    cur = node
+    while isinstance(p, ast.Tuple):
+        cur, p = p, parents.get(p)
+    if isinstance(p, ast.ExceptHandler) or (isinstance(p, ast.Call) and isinstance(p.func, ast.Name) and
+                                            p.func.id in ("isinstance", "issubclass") and cur in p.args[1:]):
+        return ""
+    if cur is node and isinstance(p, (ast.Compare, ast.If, ast.While, ast.Assert, ast.Expr, ast.FormattedValue)):
+        return ""
+    child = node
+    while p is not None and not isinstance(p, ast.stmt):
+        if (isinstance(p, (ast.arg, ast.AnnAssign)) and p.annotation is child) or \
+                (isinstance(p, (ast.FunctionDef, ast.AsyncFunctionDef)) and p.returns is child):
+            return ""
+        child, p = p, parents.get(p)
+    if (isinstance(p, ast.AnnAssign) and p.annotation is child) or \
+            (isinstance(p, (ast.FunctionDef, ast.AsyncFunctionDef)) and p.returns is child):
+        return ""
+    return f"hands on the class object ({m.src(node)[:40]})"
+
+
 def _module_handles(m) -> set:
     """Names in m bound to a module object or a module namespace: `b = builtins`, `d = subprocess.__dict__`,
     `mods = sys.modules`. A store or mutation through one changes a module."""
@@ -1825,9 +2033,12 @@ class _ModuleUses:
             return True                                    # a name bound nowhere here (a builtin, a star import)
         for b in found:
             p = self.parents.get(b)
-            if isinstance(b, ast.arg) or isinstance(b, ast.ExceptHandler) or \
-                    isinstance(b, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                continue                                   # a parameter, an exception, a function or class object
+            if isinstance(b, ast.arg):
+                if self.param_exempt(b, node):
+                    continue                               # self or cls of a closed repo class; a framework contract
+                return True                                # R8-02: a repo parameter may be handed a module
+            if isinstance(b, ast.ExceptHandler) or isinstance(b, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                continue                                   # an exception, a function or class object
             if isinstance(b, ast.Name) and isinstance(b.ctx, ast.Del) or isinstance(p, ast.AugAssign):
                 continue
             if isinstance(p, (ast.Assign, ast.AnnAssign, ast.NamedExpr)) and isinstance(b, ast.Name) and \
@@ -1837,6 +2048,42 @@ class _ModuleUses:
             if isinstance(p, ast.AnnAssign) and p.value is None:
                 continue
             return True                                    # global, nonlocal, for, with, import, match, ...
+        return False
+
+    def param_held(self, e, node):
+        """R8-02: e is a parameter of a repo function, or an attribute or item of one, and that parameter is not
+        exempt (param_exempt)."""
+        while isinstance(e, (ast.Attribute, ast.Subscript)):
+            e = e.value
+        if not isinstance(e, ast.Name) or self.kind(e):
+            return False
+        fn, found = self.scope_binds(node, e.id)
+        return any(isinstance(b, ast.arg) for b in found) and \
+            not all(self.param_exempt(b, node) for b in found if isinstance(b, ast.arg))
+
+    def param_exempt(self, b, node):
+        """R8-02: a parameter proven not to be a module: the first parameter, named self or cls, of a method whose
+        class object the audit can follow everywhere (Index.class_open), or a framework-supplied parameter in its
+        documented contract position, written only where the contract writes (Strands `event.cancel_tool` on a
+        callback's only argument, Microsoft Agent Framework `context.result` on a middleware's first of two)."""
+        args = self.parents.get(b)
+        fn = self.parents.get(args)
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            return False
+        positional = fn.args.posonlyargs + fn.args.args
+        method = bool(positional) and positional[0].arg in ("self", "cls") and \
+            isinstance(_namespace(fn, self.parents), ast.ClassDef)
+        if method and positional[0] is b:
+            return not self.idx.class_open(self.m, fn)
+        own = positional[1:] if method else positional
+        if not own or own[0] is not b or fn.args.vararg or fn.args.kwonlyargs:
+            return False
+        if isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Store) and isinstance(node.value, ast.Name) \
+                and node.value.id == b.arg:
+            if node.attr == "cancel_tool" and len(own) == 1:
+                return True                        # Strands BeforeToolCallEvent: event.cancel_tool = '<literal>'
+            if node.attr == "result" and len(own) == 2 and isinstance(fn, ast.AsyncFunctionDef):
+                return True                        # Microsoft Agent Framework middleware: context.result = <literal>
         return False
 
     def in_annotation(self, node):
@@ -1954,12 +2201,19 @@ class _ModuleUses:
             if isinstance(n, ast.Subscript):
                 if (self.kind(n.value) or self.call_held(n.value)) and not self.environ(n.value):
                     return "stores into an object held by a module"
+                if self.param_held(n.value, n):
+                    return (f"stores an item into a parameter, or something it holds ({m.src(n.value)[:40]}), "
+                            "which may be a module or an object a module holds")
             elif self.may_be_module(n.value, n):
                 return (f"sets or deletes .{n.attr} on something that is, or may be, a module "
                         f"({m.src(n.value)[:40]})")
         if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr in MUTATORS and \
                 (self.kind(n.func.value) or self.call_held(n.func.value)) and not self.environ(n.func.value) and not self.own_folder_on_path(n):
             return f"changes an object held by a module ({m.src(n.func)[:40]})"
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr in MUTATORS and \
+                self.param_held(n.func.value, n):
+            return (f"calls a mutating method on a parameter, or something it holds ({m.src(n.func)[:40]}), which may "
+                    "be a module or an object a module holds")
         if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load) and n.id in self.kinds:
             return self.escape(n)
         return ""
