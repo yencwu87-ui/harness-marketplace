@@ -1,4 +1,4 @@
-"""kit_guard: the harness kit's guard helper (version 5, harness-marketplace 1.4.8). It imports nothing.
+"""kit_guard: the harness kit's guard helper (version 6, harness-marketplace 1.4.9). It imports nothing.
 
     import subprocess
     from kit_guard import refuses
@@ -43,7 +43,9 @@ The classes, as this helper defines them (harness-audit credits exactly these):
                braced words, a group past the limits above, or more than 256 readings is refused, and so is a word
                holding an unquoted `{` and a quoted or escaped `{` or `}` (`git pu{sh,'}'}`). Each reading's words
                are also read as nested shells (`bash -c {'git push',x}`), and so is the string `env -S` or
-               `--split-string=` carries.
+               `--split-string=` carries. Nested shells are read four levels deep (a word holding a space or
+               one of ;&|`$( is read again as a command); a command nested deeper is not read, so it is refused,
+               benign or not, and counts as secret too (`sh -c` five times around anything with a space).
 Not decoded (bound your claim accordingly): shell variables and parameter expansion ($X, ${X}), command output used
 as a word, ANSI-C quoting ($'\\x2e'), encodings (base64), git aliases defined in config files, programs that delete
 without these words (find -delete, a script file).
@@ -529,10 +531,18 @@ def _mixed_braces(s):
     return open_brace and quoted_brace
 
 
+_MAX_NESTING = 4             # nested shells (bash -c '...') read; a deeper one is not read, so it is refused
+
+
+class _Unread(Exception):
+    """A nested command past a bound the helper reads to: refused as destructive and secret-bearing (fail closed)."""
+
+
 def _destructive_text(s, depth=0):
-    """A nested shell (bash -c '...') joins its own continued lines, so each level reads every continuation form."""
-    if depth > 4:
-        return False
+    """A nested shell (bash -c '...') joins its own continued lines, so each level reads every continuation form.
+    A nested command past _MAX_NESTING is not read: it raises _Unread, and the value is refused."""
+    if depth > _MAX_NESTING:
+        raise _Unread
     return any(_destructive_form(f, depth) for f in _continuations(s))
 
 
@@ -553,7 +563,8 @@ def _destructive_form(s, depth):
             for w in words:                                # bash -c "...", sh -c '...', eval "...", env -S'...'
                 for text in (w, w[2:] if w.startswith("-S") else "", w.split("=", 1)[-1]
                              if w.startswith("--split-string=") else ""):
-                    if text and any(c in text for c in " ;&|\n`$(") and _destructive_text(text, depth + 1):
+                    if text and text != s and any(c in text for c in " ;&|\n`$(") and \
+                            _destructive_text(text, depth + 1):     # a word equal to s is s, already read
                         return True
     return False
 
@@ -632,8 +643,7 @@ def _strings(value, depth=0):
         yield str(value)
 
 
-def secret(value) -> bool:
-    """True when value names a secret path (the secret class above, globs included)."""
+def _secret(value):
     for s in _forms(value):
         words = list(s) if isinstance(s, tuple) else (_tokens(s) or []) + [s]
         if any(_secret_word(w) for w in words):
@@ -641,17 +651,43 @@ def secret(value) -> bool:
     return False
 
 
-def destructive(value) -> bool:
-    """True when value is a destructive command (the destructive class above)."""
+def _destructive(value):
     for s in _forms(value):
         if _destructive_braced(list(s)) if isinstance(s, tuple) else _destructive_text(s):
             return True
     return False
 
 
-def refuses(value) -> bool:
-    """True when value names a secret path or is a destructive command."""
+def _unread(value):
+    """True when value holds a nested command past the bound the helper reads to."""
     try:
-        return secret(value) or destructive(value)
+        _destructive(value)
+    except (_Unread, RecursionError):
+        return True
+    return False
+
+
+def secret(value) -> bool:
+    """True when value names a secret path (the secret class above, globs included), or holds a nested command the
+    helper does not read."""
+    try:
+        return _secret(value) or _unread(value)
+    except RecursionError:
+        return True
+
+
+def destructive(value) -> bool:
+    """True when value is a destructive command (the destructive class above), or holds a nested command the helper
+    does not read."""
+    try:
+        return _destructive(value)
+    except (_Unread, RecursionError):
+        return True
+
+
+def refuses(value) -> bool:
+    """True when value names a secret path or is a destructive command (an unread nested command is both)."""
+    try:
+        return _secret(value) or destructive(value)
     except RecursionError:
         return True

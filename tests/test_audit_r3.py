@@ -129,7 +129,7 @@ class R3_02_PredicateBindsTheExecutedInput(unittest.TestCase):
         src = src_import.replace("import kit_guard\n", "from kit_guard import refuses\n").replace("kit_guard.refuses(", "refuses(")
         self.assertEqual(score({"agent.py": src, "kit_guard.py": helper})[0], 8)
         self.assertEqual(score({"agent.py": src_import, "kit_guard.py": helper})[0], 0)   # 1.4.5 F1: one import shape
-        edited = helper.replace("return secret(value) or destructive(value)", "return False", 1)
+        edited = helper.replace("return _secret(value) or destructive(value)", "return False", 1)
         self.assertNotEqual(edited, helper)
         self.assertEqual(score({"agent.py": src, "kit_guard.py": edited})[0], 0)
         self.assertEqual(score({"agent.py": src})[0], 0)                       # helper missing: unreadable

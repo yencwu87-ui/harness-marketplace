@@ -939,7 +939,7 @@ CANONICAL_FORMS = (
      "the reason \"hand-written refusal: use the kit guard helper to earn credit\" or the rule it breaks. It earns "
      "no points; it does not count as missing either."),
 )
-KIT_GUARD_SHA256 = "87e3efeaf2e1ca6126c2b8fc3284d1e4660d2e0c315be27d8230b09af13893ca"   # kit/shared/kit_guard.py
+KIT_GUARD_SHA256 = "295d27ed284dd5492cd6345555c50fc2ddcf211830251c7029be7a5056006ef3"   # kit/shared/kit_guard.py
 KIT_GUARD_MODULE, KIT_GUARD_NAME = "kit_guard", "refuses"
 STARTUP_MODULES = ("sitecustomize", "usercustomize")   # run at interpreter start, in any form (.py, .pyc, package)
 DUNDER_SETTERS = {"__setattr__", "__delattr__", "__setitem__", "__delitem__"}
