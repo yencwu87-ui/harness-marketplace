@@ -122,7 +122,7 @@ class R9Acceptance(unittest.TestCase):
         self.assertTrue(KG.refuses("sh -c 'git\tpush'"))
 
     def test_the_reasons_name_the_file_and_line(self):
-        self.assertIn("patch.py:7", fixture_reasons("class_attr_if"))
+        self.assertIn("patch.py:12", fixture_reasons("class_attr_if"))      # the store through self.m
         self.assertIn("patch.py:8", fixture_reasons("alias_guard_4"))
         self.assertIn("patch.py:", fixture_reasons("init_subclass_if"))
 
@@ -535,8 +535,9 @@ class R9ShellWhitespace(unittest.TestCase):
 
 # ------------------------------------------------------------------ the rule code reads namespaces only through helpers
 AUDIT_SRC = ROOT / "plugins/harness-audit/skills/audit/scripts/audit.py"
-NAMESPACE_HELPERS = {"_parents", "_parents_of", "_namespace", "_parent", "_own_nodes", "_bindings", "_lookup",
-                     "_enclosing", "_binding_names", "_bound_value", "_ns_statements", "_up_through"}
+NAMESPACE_HELPERS = {"_parents", "_parents_of", "_context", "_in_own", "_namespace", "_enclosing_function",
+                     "_param_owner", "_own_nodes", "_binding_names", "_bindings", "_lookup", "_binding_source",
+                     "_store_value"}
 
 
 class R9OneWalker(unittest.TestCase):

@@ -521,7 +521,9 @@ class Index:
 
     def attr_safe(self, name) -> bool:
         """1.4.9: every binding of an attribute called `name` anywhere in the files the audit reads gives it a value
-        that is not a module, and there is one."""
+        that is not a module, and there is one. 1.4.10 (R9-01): a class attribute is every binding of the name in the
+        class's whole namespace (_bindings: through every compound statement, in every binding form); a binding form
+        that gives no value the audit reads (for, with, unpacking, import, match, global, ...) is not safe."""
         cache = self.__dict__.setdefault("_attr_safe_cache", {})
         if name in cache:
             return cache[name]
@@ -533,28 +535,23 @@ class Index:
             for n in ast.walk(m.tree):
                 value, bound = None, False
                 if isinstance(n, ast.Attribute) and n.attr == name and isinstance(n.ctx, (ast.Store, ast.Del)):
-                    p = uses.parents.get(n)
-                    bound = True
-                    if isinstance(p, ast.Assign) and p.targets == [n]:
-                        value = p.value
-                    elif isinstance(p, ast.AnnAssign) and p.value is not None:
-                        value = p.value
-                    elif isinstance(p, ast.AugAssign) or isinstance(n.ctx, ast.Del):
+                    p = _context(n, uses.parents)
+                    bound, value = True, _store_value(n, uses.parents)
+                    if isinstance(p, ast.AugAssign) or isinstance(n.ctx, ast.Del):
                         continue
                 elif isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "setattr" and \
                         len(n.args) == 3 and isinstance(n.args[1], ast.Constant) and n.args[1].value == name:
                     bound, value = True, n.args[2]
                 elif isinstance(n, ast.ClassDef):
-                    for st in n.body:
-                        if isinstance(st, ast.Assign) and any(isinstance(t, ast.Name) and t.id == name for t in st.targets):
-                            bound, value = True, st.value
-                        elif isinstance(st, ast.AnnAssign) and isinstance(st.target, ast.Name) and st.target.id == name:
-                            if st.value is None and not n.decorator_list:
-                                continue
-                            bound, value = True, st.value
-                        else:
+                    for b in _bindings(n, name):
+                        how, value = _binding_source(b, uses.parents)
+                        if isinstance(b, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.ExceptHandler)):
+                            seen = True                    # a function, class or exception object, not a module
                             continue
-                        if value is None or not uses.safe_value(value):
+                        if how == "none" and not (isinstance(_context(b, uses.parents), ast.AnnAssign) and
+                                                  n.decorator_list):
+                            continue                       # a deletion; a bare annotation of an undecorated class
+                        if how != "value" or value is None or not uses.safe_value(value):
                             return False
                         seen = True
                     continue
@@ -579,10 +576,9 @@ class Index:
             return why
         methods = _plain_methods(cls, parents)
         names = _subclass_names(self, cls.name)
-        for n in ast.walk(cls):        # 1.4.9: a method named in the class body (staticmethod(m), alias = m, (m,))
-            if isinstance(n, ast.Name) and n.id in methods and isinstance(n.ctx, ast.Load) and \
-                    _namespace(n, parents) is cls:
-                up = parents.get(n)
+        for n in _own_nodes(cls):      # 1.4.9: a method named in the class body (staticmethod(m), alias = m, (m,))
+            if isinstance(n, ast.Name) and n.id in methods and isinstance(n.ctx, ast.Load):
+                up = _context(n, parents)
                 if isinstance(up, ast.Attribute) and up.attr in ("setter", "getter", "deleter") and \
                         any(up is d or (isinstance(d, ast.Call) and d.func is up) for x in ast.walk(cls)
                             if isinstance(x, (ast.FunctionDef, ast.AsyncFunctionDef)) for d in x.decorator_list):
@@ -606,9 +602,7 @@ class Index:
                     pass                                   # 1.4.9: a class object from type(o) or o.__class__
                 elif isinstance(n, ast.Attribute) and n.attr in methods and isinstance(n.value, ast.Call) and \
                         isinstance(n.value.func, ast.Name) and n.value.func.id == "super":
-                    fn2 = mp.get(n)
-                    while fn2 is not None and not isinstance(fn2, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
-                        fn2 = mp.get(fn2)
+                    fn2 = _enclosing_function(n, mp)
                     first = (fn2.args.posonlyargs + fn2.args.args)[:1] if isinstance(
                         fn2, (ast.FunctionDef, ast.AsyncFunctionDef)) else []
                     decs = {_dotted(d.func if isinstance(d, ast.Call) else d) for d in fn2.decorator_list} \
@@ -1467,22 +1461,44 @@ def _bindings(ns, name) -> list:
     return [n for n in _own_nodes(ns) if name in _binding_names(n) or (isinstance(n, ast.alias) and n.name == "*")]
 
 
+def _declared(scope, name, kind, parents) -> list:
+    """The bindings of `name` in every namespace inside scope that declares it `global` or `nonlocal` (kind)."""
+    out = []
+    for d in ast.walk(scope):
+        if isinstance(d, kind) and name in d.names:
+            owner = _namespace(d, parents)
+            if owner is not scope and owner is not None:
+                out += [b for b in _bindings(owner, name) if not isinstance(b, (ast.Global, ast.Nonlocal))]
+    return out
+
+
 def _lookup(node, name, parents):
-    """(namespace, bindings): where Python reads `name` at node. The innermost namespace around node that binds it,
-    passing class namespaces other than the first (a method does not see its class's names); else the module, with
-    no bindings when nothing binds it. At module level every `global name` declaration in the file is added, since a
-    function that declares it binds the module's name. A global or nonlocal declaration stays in the bindings: callers
-    treat it as a binding they cannot read."""
-    ns, first = _namespace(node, parents), True
+    """(namespace, bindings): where Python reads `name` at node, and every binding that may give it its value. The
+    innermost namespace around node that binds it, passing class namespaces other than the first (a method does not
+    see its class's names); else the module, with no bindings when nothing binds it. A `global` declaration sends the
+    name to the module, a `nonlocal` one to the enclosing function; the declaring namespace's own bindings are then
+    bindings of that name, and so are those of every other namespace that declares it so (a superset)."""
+    ns, first, extra = _namespace(node, parents), True, []
     while ns is not None:
         if isinstance(ns, ast.Module):
-            return ns, _bindings(ns, name) + [n for n in ast.walk(ns) if isinstance(n, ast.Global) and name in n.names]
+            return ns, _bindings(ns, name) + _declared(ns, name, ast.Global, parents) + extra
         if first or not isinstance(ns, ast.ClassDef):
             found = _bindings(ns, name)
-            if found:
-                return ns, found
+            if any(isinstance(b, ast.Global) for b in found):
+                top = ns
+                while _namespace(top, parents) is not None:
+                    top = _namespace(top, parents)
+                if isinstance(top, ast.Module):
+                    return top, _bindings(top, name) + _declared(top, name, ast.Global, parents)
+                return None, found
+            if any(isinstance(b, ast.Nonlocal) for b in found):
+                extra += [b for b in found if not isinstance(b, ast.Nonlocal)]
+            elif found:
+                if isinstance(ns, FUNCTIONS):
+                    found = found + _declared(ns, name, ast.Nonlocal, parents)
+                return ns, found + extra
         first, ns = False, _namespace(ns, parents)
-    return None, []
+    return None, extra
 
 
 def _binding_source(b, parents):
@@ -1535,12 +1551,13 @@ def _chain_top(node, parents):
     """The largest P.attr / P['k'] / P.get('k') expression that starts at the Name `node`."""
     top = node
     while True:
-        p = parents.get(top)
+        p = _context(top, parents)
+        up = _context(p, parents)
         if isinstance(p, (ast.Attribute, ast.Subscript)) and p.value is top and _chain(p) is not None:
             top = p
-        elif isinstance(p, ast.Attribute) and p.attr == "get" and isinstance(parents.get(p), ast.Call) \
-                and parents[p].func is p and _chain(parents[p]) is not None:
-            top = parents[p]
+        elif isinstance(p, ast.Attribute) and p.attr == "get" and isinstance(up, ast.Call) and up.func is p \
+                and _chain(up) is not None:
+            top = up
         else:
             return top
 
@@ -1947,9 +1964,9 @@ class _Canon:
         for n in ast.walk(self.fn):
             if not (isinstance(n, ast.Name) and n.id == p) or n in self.allowed:
                 continue
-            call = self.parents.get(n)
+            call = _context(n, self.parents)
             if isinstance(call, ast.keyword):
-                call = self.parents.get(call)
+                call = _context(call, self.parents)
             if isinstance(call, ast.Call) and isinstance(call.func, (ast.Name, ast.Attribute)):
                 full = _full_name(self.mod, aliases, call.func)
                 cap = _capability(call, full, full.split(".")[0], False)
@@ -1971,7 +1988,7 @@ class _Canon:
             if not (isinstance(n, ast.Name) and n.id in self.restricted) or n in self.allowed:
                 continue
             top = _chain_top(n, self.parents)
-            p = self.parents.get(top)
+            p = _context(top, self.parents)
             if isinstance(p, ast.Call) and p.args == [top] and not p.keywords and \
                     self.mod.full(p.func) in PURE_WRAPS and not self.shadowed(p.func):
                 continue                                    # copy.deepcopy(x), json.dumps(x), str(x), repr(x)
@@ -2015,8 +2032,7 @@ def _safe_decorator(mod, d, allowed, cls=None, parents=None) -> bool:
         d = d.func
     if isinstance(d, ast.Attribute) and d.attr in ("setter", "getter", "deleter") and isinstance(d.value, ast.Name) \
             and cls is not None:
-        return any(isinstance(x, (ast.FunctionDef, ast.AsyncFunctionDef)) and x.name == d.value.id and
-                   _namespace(x, parents) is cls for x in ast.walk(cls))
+        return any(isinstance(x, (ast.FunctionDef, ast.AsyncFunctionDef)) for x in _bindings(cls, d.value.id))
     if isinstance(d, ast.Name) and (d.id in mod.funcs or d.id in mod.classes or d.id in mod.assigns):
         return False
     full = mod.full(d)
@@ -2028,8 +2044,8 @@ def _safe_decorator(mod, d, allowed, cls=None, parents=None) -> bool:
 def _plain_methods(cls, parents) -> set:
     """The names of functions in cls's namespace that take an instance first (not staticmethod or classmethod)."""
     out = set()
-    for x in ast.walk(cls):
-        if isinstance(x, (ast.FunctionDef, ast.AsyncFunctionDef)) and _namespace(x, parents) is cls:
+    for x in _own_nodes(cls):
+        if isinstance(x, (ast.FunctionDef, ast.AsyncFunctionDef)):
             decs = {_dotted(d.func if isinstance(d, ast.Call) else d) for d in x.decorator_list}
             if not decs & {"staticmethod", "classmethod"}:
                 out.add(x.name)
@@ -2070,9 +2086,10 @@ def _class_closed(idx, mod, cls, parents, seen) -> str:
         k = idx.resolve(mod, root) if isinstance(root, (ast.Name, ast.Attribute)) else ("unknown",)
         if k[0] == "class":
             bm, bc = k[1], k[2]
-            if any(isinstance(x, (ast.FunctionDef, ast.AsyncFunctionDef)) and x.name == "__init_subclass__"
-                   for x in bc.body):
-                return f"{bm.where(bc)} the base `{bc.name}` defines __init_subclass__, which receives the class object"
+            hook = _bindings(bc, "__init_subclass__")       # R9-03: anywhere in the base's namespace, any form
+            if hook:
+                return (f"{bm.where(hook[0])} the base `{bc.name}` binds __init_subclass__, which receives the class "
+                        "object")
             why = _class_closed(idx, bm, bc, _parents_of(bm), seen)
             if why:
                 return why
@@ -2086,18 +2103,16 @@ def _class_closed(idx, mod, cls, parents, seen) -> str:
 def _class_use(idx, m, parents, node, methods) -> str:
     """R8-02: why this use of a class object (its name, a subclass's name, or `cls`) may hand one of its plain
     methods to other code, or ''."""
-    p = parents.get(node)
+    p = _context(node, parents)
     if isinstance(p, ast.Call) and p.func is node:
         return ""                                          # C(...): an instance
     if isinstance(p, ast.Attribute) and p.value is node:
         if p.attr not in methods:
             return ""                                      # a constant, a staticmethod, a classmethod, ...
-        gp = parents.get(p)
+        gp = _context(p, parents)
         if isinstance(gp, ast.Call) and gp.func is p and gp.args and isinstance(gp.args[0], ast.Name) and \
                 gp.args[0].id == "self":
-            fn = gp
-            while fn is not None and not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
-                fn = parents.get(fn)
+            fn = _enclosing_function(gp, parents)
             if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)) and \
                     (fn.args.posonlyargs + fn.args.args)[:1] and \
                     (fn.args.posonlyargs + fn.args.args)[0].arg == "self" and \
@@ -2110,7 +2125,7 @@ def _class_use(idx, m, parents, node, methods) -> str:
         return ""
     cur = node
     while isinstance(p, ast.Tuple):
-        cur, p = p, parents.get(p)
+        cur, p = p, _context(p, parents)
     if isinstance(p, ast.ExceptHandler) or (isinstance(p, ast.Call) and isinstance(p.func, ast.Name) and
                                             p.func.id in ("isinstance", "issubclass") and cur in p.args[1:]):
         return ""
@@ -2121,7 +2136,7 @@ def _class_use(idx, m, parents, node, methods) -> str:
         if (isinstance(p, (ast.arg, ast.AnnAssign)) and p.annotation is child) or \
                 (isinstance(p, (ast.FunctionDef, ast.AsyncFunctionDef)) and p.returns is child):
             return ""
-        child, p = p, parents.get(p)
+        child, p = p, _context(p, parents)
     if (isinstance(p, ast.AnnAssign) and p.annotation is child) or \
             (isinstance(p, (ast.FunctionDef, ast.AsyncFunctionDef)) and p.returns is child):
         return ""
@@ -2201,6 +2216,20 @@ READERS = {"isinstance", "issubclass", "print", "repr", "str", "id", "len", "cal
            "hash", "format", "dir"}
 TARGET_CALLS = {"getattr", "hasattr", "setattr", "delattr", "vars"}   # a module value as their target withholds credit
 SAFE_BASE_CALLS = {"dict", "list", "set", "tuple", "object", "frozenset", "bytearray", "str", "int", "float"}
+FRESH_CALLS = SAFE_BASE_CALLS | {"sorted", "len", "repr", "bool", "range", "abs", "round", "sum", "any", "all", "hash",
+                                 "id", "isinstance", "issubclass", "callable", "format", "ord", "chr", "bin", "hex",
+                                 "oct", "bytes", "complex", "print"}   # builtins that return a new value
+PASS_THROUGH = {"getattr", "next", "iter", "reversed", "enumerate", "zip", "filter", "map", "min", "max", "vars",
+                "type", "super", "memoryview"}           # builtins that may return what they are given
+MAX_ALIAS_STEPS = 64          # R9-02: alias links the parameter analysis follows; past them the target counts as held
+
+
+def _strongest(*states):
+    """'held' over 'module' over 'self' over None."""
+    for st in ("held", "module", "self"):
+        if st in states:
+            return st
+    return None
 
 
 class _ModuleUses:
@@ -2270,15 +2299,8 @@ class _ModuleUses:
         return None
 
     def scope_binds(self, node, name):
-        """The nodes binding `name` in the innermost function around node that binds it (or the module)."""
-        p = self.parents.get(node)
-        while p is not None:
-            if isinstance(p, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
-                found = _binds(p, name)
-                if found:
-                    return p, found
-            p = self.parents.get(p)
-        return None, _binds(self.m.tree, name)
+        """1.4.10: (namespace, bindings) where Python reads `name` at node (_lookup)."""
+        return _lookup(node, name, self.parents)
 
     def safe_value(self, v):
         """A value that is not a module: a literal or display, or a call of a repo class or function or a builtin
@@ -2315,52 +2337,146 @@ class _ModuleUses:
             return True                                    # a call's result, a comprehension, ...
         if self.kind(e):
             return True
-        if chain is not e and self.param_held(chain, node):
+        if chain is not e and self.held(chain, node):
             return True                                    # 1.4.9: self.m.run = ..., where self.m may be anything
         fn, found = self.scope_binds(node, e.id)
         if not found:
             return True                                    # a name bound nowhere here (a builtin, a star import)
         for b in found:
-            p = self.parents.get(b)
             if isinstance(b, ast.arg):
                 if self.param_exempt(b, node):
                     continue                               # self or cls of a closed repo class; a framework contract
                 return True                                # R8-02: a repo parameter may be handed a module
-            if isinstance(b, ast.ExceptHandler) or isinstance(b, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if isinstance(b, (ast.ExceptHandler, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 continue                                   # an exception, a function or class object
-            if isinstance(b, ast.Name) and isinstance(b.ctx, ast.Del) or isinstance(p, ast.AugAssign):
+            how, value = _binding_source(b, self.parents)
+            if how in ("none", "aug"):
                 continue
-            if isinstance(p, (ast.Assign, ast.AnnAssign, ast.NamedExpr)) and isinstance(b, ast.Name) and \
-                    (p.targets if isinstance(p, ast.Assign) else [p.target]) == [b] and \
-                    p.value is not None and self.safe_value(p.value):
-                continue
-            if isinstance(p, ast.AnnAssign) and p.value is None:
+            if how == "value" and self.safe_value(value):
                 continue
             return True                                    # global, nonlocal, for, with, import, match, ...
         return False
 
-    def param_held(self, e, node, depth=0):
-        """R8-02: e is a parameter of a repo function, or an attribute or item of one, and that parameter is not
-        exempt (param_exempt); or (1.4.9) an attribute of an exempt self or cls that may hold something else than
-        what the class built (self_attr_safe), or a local bound to one of these (`p = m.path`)."""
-        chain = e
-        while isinstance(e, (ast.Attribute, ast.Subscript)):
-            e = e.value
-        if not isinstance(e, ast.Name) or self.kind(e) or depth > 4:
-            return False
-        fn, found = self.scope_binds(node, e.id)
-        args = [b for b in found if isinstance(b, ast.arg)]
-        if args:
-            if not all(self.param_exempt(b, node) for b in args):
-                return True
-            return chain is not e and not self.self_attr_safe(chain)
+    def held(self, e, node):
+        """R8-02 completed (1.4.10): the object e names (the receiver of a mutating method, the container of an item
+        store) may be one a module holds. So it is when e is, or is reached from, a non-exempt repo parameter,
+        through any chain of local aliases in any binding form (assignment, walrus, for, with, unpacking, match, a
+        choice, getattr, a method of it, ...); when e is an attribute or item of what an outside call returned, also
+        through aliases; or when e is an attribute of an exempt self that may hold something else (self_attr_safe).
+        Past MAX_ALIAS_STEPS, or on a RecursionError, the answer is yes (fail closed)."""
+        root = e
+        while isinstance(root, (ast.Attribute, ast.Subscript)):
+            root = root.value
+        if isinstance(root, ast.Name) and self.kind(root):
+            return False                                   # a module's own object: the module checks judge it
+        try:
+            st = self.status(e, node, set(), 0)
+        except RecursionError:
+            return True
+        return st == "held"
+
+    def status(self, e, at, seen, depth):
+        """What the expression e (read at node `at`) may be: 'held' (an object a module or a non-exempt parameter
+        may hold, or unknown), 'module' (an import, or what an outside call returned: it may itself be a module),
+        'self' (an exempt self or cls), or None (a new or safe value). Each alias link costs one step; past
+        MAX_ALIAS_STEPS the answer is 'held'."""
+        if depth > MAX_ALIAS_STEPS:
+            return "held"                                  # R9-02: a bound fails closed
+        rec = lambda x: self.status(x, at, seen, depth)
+        if isinstance(e, ast.Name):
+            return self.name_status(e, at, seen, depth)
+        if isinstance(e, (ast.Attribute, ast.Subscript)):
+            if self.environ(e):
+                return None
+            root, attr = e, False
+            while isinstance(root, (ast.Attribute, ast.Subscript)):
+                attr = attr or isinstance(root, ast.Attribute)
+                root = root.value
+            st = rec(root)
+            if st == "self":
+                return None if self.self_attr_safe(e) else "held"
+            if st == "module" and not attr:
+                return "module"                            # an item of an outside result: as call_held (R7)
+            return "held" if st else None                  # an attribute of a module, a part of a held object
+        if isinstance(e, ast.Call):
+            f, args = e.func, e.args + [k.value for k in e.keywords]
+            if isinstance(f, ast.Name) and f.id in FRESH_CALLS and f.id not in self.m.funcs and \
+                    f.id not in self.m.classes and f.id not in self.kinds:
+                return None                                # sorted(x), len(x), range(n): a new value
+            if isinstance(f, ast.Name) and f.id in PASS_THROUGH and f.id not in self.m.funcs and \
+                    f.id not in self.m.classes and f.id not in self.kinds:
+                return "held" if any(rec(a) for a in args) else None   # getattr(m, 'x'), next(iter(m.x))
+            if isinstance(f, ast.Attribute):
+                st = rec(f.value)
+                if st == "held" or (st == "self" and isinstance(f.value, (ast.Attribute, ast.Subscript)) and
+                                    not self.self_attr_safe(f.value)):
+                    return "held"                          # m.get('x'), m.handlers.copy(): may be what m holds
+            if self.safe_value(e):
+                if isinstance(f, ast.Name) and self.idx.resolve(self.m, f)[0] in ("def", "class") and \
+                        any(rec(a) for a in args):
+                    return "held"                          # a repo callable handed what m holds may return it
+                return None
+            return "module"                                # an outside call: it may return a module
+        if isinstance(e, ast.IfExp):
+            return _strongest(rec(e.body), rec(e.orelse))
+        if isinstance(e, ast.BoolOp):
+            return _strongest(*[rec(v) for v in e.values])
+        if isinstance(e, (ast.NamedExpr, ast.Starred, ast.Await)):
+            return rec(e.value)
+        if isinstance(e, (ast.Constant, ast.JoinedStr, ast.List, ast.Tuple, ast.Set, ast.Dict, ast.ListComp,
+                          ast.SetComp, ast.DictComp, ast.GeneratorExp, ast.BinOp, ast.UnaryOp, ast.Compare,
+                          ast.Lambda)):
+            return None
+        return "held"                                      # yield, anything else: unknown
+
+    def part_status(self, e, at, seen, depth):
+        """What a part of e may be (an item unpacked from it, an element a for loop takes, what `with` enters): a part
+        of what a parameter holds is held; a part of what an outside call returned may be a module (`for d, dirs, f
+        in os.walk(...)`: an item store into dirs changes no module object the audit can tell, as with call_held)."""
+        if isinstance(e, (ast.List, ast.Tuple, ast.Set)):
+            return _strongest(*[self.status(x, at, seen, depth) for x in e.elts])
+        if isinstance(e, ast.Dict):
+            return _strongest(*[self.status(x, at, seen, depth) for x in e.keys + e.values if x is not None])
+        if isinstance(e, (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)):
+            return _strongest(*[self.status(g.iter, at, seen, depth) for g in e.generators])
+        st = self.status(e, at, seen, depth)
+        return "module" if st == "module" else "held" if st else None   # a part of an outside result: as call_held
+
+    def name_status(self, e, at, seen, depth):
+        """status() of a name: every binding Python may read it from (_lookup), each followed one alias step on."""
+        if self.kind(e):
+            return "module"
+        ns, found = self.scope_binds(at, e.id)
+        key = (id(ns), e.id)
+        if key in seen:
+            return None                                    # a cycle: the first visit reads every binding
+        seen.add(key)
+        if not found:
+            return None if e.id in dir(builtins) else "held"
+        out = []
         for b in found:
-            p = self.parents.get(b)
-            if isinstance(p, (ast.Assign, ast.AnnAssign, ast.NamedExpr)) and p.value is not None and \
-                    isinstance(p.value, (ast.Name, ast.Attribute, ast.Subscript)) and \
-                    self.param_held(p.value, p, depth + 1):
-                return True
-        return False
+            if isinstance(b, ast.arg):
+                owner = _param_owner(b, self.parents)
+                first = isinstance(owner, (ast.FunctionDef, ast.AsyncFunctionDef)) and \
+                    (owner.args.posonlyargs + owner.args.args)[:1] == [b]
+                out.append(("self" if first else None) if self.param_exempt(b, at) else "held")
+            elif isinstance(b, (ast.Global, ast.Nonlocal)):
+                out.append("held")                         # bound somewhere this rule does not read
+            elif isinstance(b, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.ExceptHandler)):
+                out.append(None)
+            elif isinstance(b, ast.alias):
+                out.append("module")
+            else:
+                how, value = _binding_source(b, self.parents)
+                if how == "value":
+                    out.append(self.status(value, b, seen, depth + 1))
+                elif how == "part":
+                    out.append(self.part_status(value, b, seen, depth + 1))
+                elif how in ("aug", "none"):
+                    out.append(None)
+                else:
+                    out.append("held")
+        return _strongest(*out)
 
     def self_attr_safe(self, chain):
         """1.4.9: `self.a...` (self or cls exempt): every binding of an attribute named a in the files the audit reads
@@ -2379,8 +2495,7 @@ class _ModuleUses:
         class object the audit can follow everywhere (Index.class_open), or a framework-supplied parameter in its
         documented contract position, written only where the contract writes (Strands `event.cancel_tool` on a
         callback's only argument, Microsoft Agent Framework `context.result` on a middleware's first of two)."""
-        args = self.parents.get(b)
-        fn = self.parents.get(args)
+        fn = _param_owner(b, self.parents)
         if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
             return False
         positional = fn.args.posonlyargs + fn.args.args
@@ -2401,14 +2516,14 @@ class _ModuleUses:
 
     def in_annotation(self, node):
         """node is (part of) an annotation: `x: T`, `def f(a: T) -> T`."""
-        child, p = node, self.parents.get(node)
+        child, p = node, _context(node, self.parents)
         while p is not None:
             if (isinstance(p, (ast.arg, ast.AnnAssign)) and p.annotation is child) or \
                     (isinstance(p, (ast.FunctionDef, ast.AsyncFunctionDef)) and p.returns is child):
                 return True
             if isinstance(p, ast.stmt):
                 return False
-            child, p = p, self.parents.get(p)
+            child, p = p, _context(p, self.parents)
         return False
 
     def own_folder_on_path(self, call):
@@ -2529,7 +2644,7 @@ class _ModuleUses:
             if isinstance(n, ast.Subscript):
                 if (self.kind(n.value) or self.call_held(n.value)) and not self.environ(n.value):
                     return "stores into an object held by a module"
-                if self.param_held(n.value, n):
+                if self.held(n.value, n):
                     return (f"stores an item into a parameter, or something it holds ({m.src(n.value)[:40]}), "
                             "which may be a module or an object a module holds")
             elif self.may_be_module(n.value, n):
@@ -2539,7 +2654,7 @@ class _ModuleUses:
                 (self.kind(n.func.value) or self.call_held(n.func.value)) and not self.environ(n.func.value) and not self.own_folder_on_path(n):
             return f"changes an object held by a module ({m.src(n.func)[:40]})"
         if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr in MUTATORS and \
-                self.param_held(n.func.value, n):
+                self.held(n.func.value, n):
             return (f"calls a mutating method on a parameter, or something it holds ({m.src(n.func)[:40]}), which may "
                     "be a module or an object a module holds")
         if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load) and n.id in self.kinds:
@@ -2552,7 +2667,7 @@ class _ModuleUses:
         an outside callable not on the hand-on list, or be a class in isinstance/issubclass or an except clause."""
         cur = name
         while True:
-            p = self.parents.get(cur)
+            p = _context(cur, self.parents)
             if isinstance(p, (ast.Attribute, ast.Subscript)) and p.value is cur and isinstance(p.ctx, ast.Load):
                 cur = p
                 continue
@@ -2560,7 +2675,7 @@ class _ModuleUses:
         kind = self.kind(cur)
         if kind is None or self.environ(cur) or isinstance(cur, ast.Subscript):
             return ""                           # an item read (sys.argv[0]) is a value, not a module
-        p = self.parents.get(cur)
+        p = _context(cur, self.parents)
         text = self.m.src(cur)[:40]
         if isinstance(p, ast.Call) and isinstance(p.func, ast.Name) and p.func.id in TARGET_CALLS and \
                 p.args and p.args[0] is cur and p.func.id not in self.m.funcs:
@@ -2580,11 +2695,11 @@ class _ModuleUses:
                 (cur in p.decorator_list or cur in getattr(p, "bases", ())):
             return ""
         while isinstance(p, ast.BoolOp) or (isinstance(p, ast.IfExp) and p.test is not cur):
-            cur, p = p, self.parents.get(p)     # a choice goes where the choice goes
+            cur, p = p, _context(p, self.parents)     # a choice goes where the choice goes
         if isinstance(p, (ast.List, ast.Tuple, ast.Set, ast.Dict, ast.Starred)):
-            top, up = p, self.parents.get(p)
+            top, up = p, _context(p, self.parents)
             while isinstance(up, ast.Tuple):
-                top, up = up, self.parents.get(up)
+                top, up = up, _context(up, self.parents)
             if kind == "attr" and isinstance(p, ast.Tuple) and (
                     (isinstance(up, ast.ExceptHandler) and up.type is top) or
                     (isinstance(up, ast.Call) and isinstance(up.func, ast.Name) and
@@ -2596,7 +2711,7 @@ class _ModuleUses:
                 (isinstance(p, ast.UnaryOp) and isinstance(p.op, ast.Not)):
             return ""
         if isinstance(p, ast.keyword):
-            p = self.parents.get(p)
+            p = _context(p, self.parents)
         if isinstance(p, ast.Call) and cur is not p.func:
             full = self.callee_outside(p.func)
             if kind == "attr" and full is not None and full not in LAUNDERERS and full not in TARGET_CALLS and \
@@ -3047,13 +3162,40 @@ def tool_reach(idx: Index, mod: Module, el):
         return name, reach, guards
     if kind[0] == "class":
         cmod, cls = kind[1], kind[2]
-        meth = next((m for m in cls.body if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef))
-                     and m.name in ("_run", "_arun", "run", "__call__", "forward", "invoke")), None)
+        meth, twice = _single_method(cls, ("_run", "_arun", "run", "__call__", "forward", "invoke"))
+        if twice:
+            reach.unresolved.append(f"{cmod.where(twice)} the tool class `{cls.name}` binds its run method more than "
+                                    "once or not as a def, so the audit cannot tell which one runs")
+            return cls.name, reach, []
         if meth:
             reach.merge(function_reach(idx, cmod, meth))
             return cls.name, reach, []
     reach.unresolved.append(f"{mod.where(el)} {label} ({kind[1] if len(kind) == 2 else kind[0]}) is not followed by the audit")
     return label, reach, []
+
+
+def _single_method(cls, names):
+    """(the def, None) when the class's namespace binds the first of `names` it binds exactly once, and as a def;
+    (None, the binding) when that name is bound more than once or otherwise; (None, None) when none is bound."""
+    first = sorted(((b.lineno, b, nm) for nm in names for b in _bindings(cls, nm)), key=lambda x: x[0])
+    if not first:
+        return None, None
+    nm = first[0][2]
+    bs = _bindings(cls, nm)
+    if len(bs) != 1 or not isinstance(bs[0], (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return None, bs[-1]
+    return bs[0], None
+
+
+class _MethodsOf:
+    """A class's methods by name, read through _bindings: a name bound more than once, or not as a def, has none."""
+
+    def __init__(self, cls):
+        self.cls = cls
+
+    def get(self, name):
+        bs = _bindings(self.cls, name)
+        return bs[0] if len(bs) == 1 and isinstance(bs[0], (ast.FunctionDef, ast.AsyncFunctionDef)) else None
 
 
 def _tool_list(idx, mod, node):
@@ -3094,7 +3236,7 @@ def _agent_guards(idx: Index, mod: Module, call: ast.Call, track: str) -> list:
                 k = idx.resolve(hmod, el.func if isinstance(el, ast.Call) else el)
                 if k[0] == "class":
                     cm, cls = k[1], k[2]
-                    methods = {m.name: m for m in cls.body if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef))}
+                    methods = _MethodsOf(cls)
                     found = False
                     for c in (n for n in ast.walk(cls) if isinstance(n, ast.Call) and _dotted(n.func).endswith("add_callback")):
                         if c.args and _dotted(c.args[0]).endswith("BeforeToolCallEvent") and len(c.args) > 1:
@@ -3235,9 +3377,9 @@ def _sdk_options_changed(idx, mod, call) -> str:
     global, nonlocal, del, def, class, comprehension) and is only ever passed whole to the SDK or returned; no
     other file imports it or reads it through this module; and nothing reads a client's `options`."""
     parents = _parents(mod.tree)
-    p = parents.get(call)
+    p = _context(call, parents)
     if isinstance(p, ast.keyword):
-        p = parents.get(p)
+        p = _context(p, parents)
     if isinstance(p, ast.Return):
         return _returned_whole(idx, mod, p, parents) or _client_options_read(idx, mod)
     if _sdk_call(mod, p) and call is not p.func:
@@ -3248,10 +3390,7 @@ def _sdk_options_changed(idx, mod, call) -> str:
         return (f"{mod.where(call)} the options are bound by a form the audit does not model "
                 f"({mod.src(p)[:40] if p is not None else 'module'}), so the options the agent runs with may differ")
     name = (p.targets[0] if isinstance(p, ast.Assign) else p.target).id
-    scope = parents.get(p)
-    while scope is not None and not isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef,
-                                                        ast.Lambda, ast.Module)):
-        scope = parents.get(scope)
+    scope = _namespace(p, parents)
     if not isinstance(scope, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef)):
         return (f"{mod.where(p)} the options are bound in a class namespace (`{name}`), not at module level or as a "
                 "function local, so the options the agent runs with may differ")
@@ -3262,9 +3401,9 @@ def _sdk_options_changed(idx, mod, call) -> str:
             continue
         if n is (p.targets[0] if isinstance(p, ast.Assign) else p.target):
             continue
-        up = parents.get(n)
+        up = _context(n, parents)
         if isinstance(up, ast.keyword):
-            up = parents.get(up)
+            up = _context(up, parents)
         if isinstance(n.ctx, ast.Load) and isinstance(up, ast.Return):
             why = _returned_whole(idx, mod, up, parents)
             if why:
@@ -3282,9 +3421,7 @@ def _sdk_options_changed(idx, mod, call) -> str:
 def _returned_whole(idx, mod, ret, parents) -> str:
     """F5: options returned by a function count only when every use of that function, here and in other files, is a
     call whose result is passed whole to the SDK; '' when so."""
-    fn = parents.get(ret)
-    while fn is not None and not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
-        fn = parents.get(fn)
+    fn = _enclosing_function(ret, parents)
     if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
         return f"{mod.where(ret)} the options are returned from something that is not a named function"
     if fn.decorator_list:
@@ -3298,10 +3435,10 @@ def _returned_whole(idx, mod, ret, parents) -> str:
     for n in ast.walk(mod.tree):
         if not (isinstance(n, ast.Name) and n.id == fn.name and isinstance(n.ctx, ast.Load)):
             continue
-        call = parents.get(n)
-        up = parents.get(call)
+        call = _context(n, parents)
+        up = _context(call, parents)
         if isinstance(up, ast.keyword):
-            up = parents.get(up)
+            up = _context(up, parents)
         if not (isinstance(call, ast.Call) and call.func is n and _sdk_call(mod, up) and call is not up.func):
             return (f"{mod.where(n)} the options `{fn.name}` returns are used other than passed whole to the SDK "
                     f"({mod.src(up if up is not None else n)[:40]}), so their hooks may change")
@@ -3339,7 +3476,7 @@ def _client_options_read(idx, mod) -> str:
                 return (f"{m.where(n)} a match pattern reads `options` or `hooks` of an object, so a client's "
                         "options may change before it connects")
             if isinstance(n, ast.Constant) and n.value in ("options", "_options") and \
-                    isinstance(_parents_of(m).get(n), ast.Call):
+                    isinstance(_context(n, _parents_of(m)), ast.Call):
                 return (f"{m.where(n)} names the attribute {n.value!r} in a call, so a client's options may change "
                         "before it connects")
     return ""
