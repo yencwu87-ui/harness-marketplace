@@ -2642,6 +2642,17 @@ def _sdk_options_changed(idx, mod, call) -> str:
     return _client_options_read(idx, mod)
 
 
+def _namespace(node, parents):
+    """R8-03: the lexical namespace a definition or statement belongs to: the nearest enclosing function, lambda,
+    class or module. if, try/except/else/finally, for, while, with and match make no namespace, so they are passed
+    through whatever their depth."""
+    p = parents.get(node)
+    while p is not None and not isinstance(p, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef,
+                                               ast.Module)):
+        p = parents.get(p)
+    return p
+
+
 def _returned_whole(idx, mod, ret, parents) -> str:
     """F5: options returned by a function count only when every use of that function, here and in other files, is a
     call whose result is passed whole to the SDK; '' when so."""
@@ -2951,17 +2962,6 @@ def judge_agent(agent) -> dict:
     out = {}
     for cid, cats in (("G1", G1_CATS), ("G2", G2_CATS), ("G3", G3_CATS)):
         bad, unclear, good = [], [], []
-def _namespace(node, parents):
-    """R8-03: the lexical namespace a definition or statement belongs to: the nearest enclosing function, lambda,
-    class or module. if, try/except/else/finally, for, while, with and match make no namespace, so they are passed
-    through whatever their depth."""
-    p = parents.get(node)
-    while p is not None and not isinstance(p, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef,
-                                               ast.Module)):
-        p = parents.get(p)
-    return p
-
-
         if problem:
             unclear.append(problem)
         for name, reach, tguards in tools:
