@@ -1,5 +1,34 @@
 # Progress
 
+**Updated:** 28 Oct 2026  **Item:** 1.4.9, Codex round-8 fix round (coordinator brief, not a work-list item)  **Status:** passed locally except the 12 port tests, awaiting the coordinator's runs (port tests, SDK-engine smoke) and Codex round 9
+
+## What changed
+- kit/shared/kit_guard.py (version 6, copy synced, re-pinned): a nested command past four levels is refused as destructive and secret; a word equal to the text being read is not read again
+- plugins/harness-audit/skills/audit/scripts/audit.py (1.4.9): F1 exec family by identity (names in every binding form, builtins module, code-from-text list, pkgutil and pydoc as module sources); repo parameters not exempt (self/cls of followed classes and two framework contract stores excepted; what self holds checked by attribute name); F5 class namespace through compound statements, unreadable hooks UNRESOLVED; F2 and settings never crash on a literal, tighter value rules; CANONICAL_FORMS and SKILL.md
+- tests: test_audit_r8.py, test_audit_review_1_4_9.py, test_sdk_engine_smoke.py (pinned, skips without claude-agent-sdk 0.2.174 and sandbox-exec); fixtures codex_r8, review_1_4_9; llm_stub STUB_INPUT; fairness `c` helper copies refreshed
+
+## Verdicts
+- R8-01 to R8-05 red on eaff72a (2071 cases in 24 tests), green at HEAD: VERIFIED (deliver/1.4.9/logs/red_r8_vs_eaff72a.log, unittest_full_sandboxed.log)
+- Independent review cases red at 6257461 (62 of 70), green at HEAD: VERIFIED (deliver/1.4.9/logs/red_review_1_4_9_vs_6257461.log)
+- Fairness a=8 b=0 c=2 on 8 tracks, starters 8/8: VERIFIED (deliver/1.4.9/logs/test_audit_fairness.log)
+- Self-audit of a clean export: 83 for eaff72a and HEAD: VERIFIED (deliver/1.4.9/logs/audit_self_clean_export.log)
+- 12 TCP-bind tests: UNRESOLVED (sandbox refuses the bind; same 12 as 1.4.8, deliver/1.4.9/logs/failing_after.txt)
+- Pinned SDK-engine smoke: UNRESOLVED (written, skips here: nothing installed; the coordinator runs it)
+- init.sh: UNRESOLVED (stopped at the 10-minute tool limit; it runs the same suite)
+- Python 3.12 run: UNRESOLVED (3.14.6 only here)
+
+## Usage
+- Wall-clock: 28 Oct 2026, 08:53 to about 10:15 +08 (one session, packaging included)
+- Tokens: not available to this headless session
+
+## Blocker
+none
+
+## Next action
+Coordinator runs the port tests and the pinned SDK-engine smoke, and sends the package to Codex for round 9.
+
+---
+
 **Updated:** 28 Oct 2026  **Item:** 1.4.8, Codex round-7 fix round (coordinator brief, not a work-list item)  **Status:** passed locally except the 12 port tests, awaiting the coordinator's run and Codex round 8
 
 ## What changed
