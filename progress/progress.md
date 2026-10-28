@@ -1,5 +1,33 @@
 # Progress
 
+**Updated:** 28 Oct 2026  **Item:** 1.4.8, Codex round-7 fix round (coordinator brief, not a work-list item)  **Status:** passed locally except the 12 port tests, awaiting the coordinator's run and Codex round 8
+
+## What changed
+- kit/shared/kit_guard.py (version 5, copy synced, re-pinned): brace groups expanded in destructive commands (each alternative and the shell's in-a-row reading, bounded); a word mixing an unquoted `{` with a quoted or escaped brace refused; brace readings and `env -S` strings read as nested shells
+- plugins/harness-audit/skills/audit/scripts/audit.py (1.4.8): F1 closed list of module-value uses (getattr/hasattr targets, arguments, containers, keys, returns, attributes, defaults withhold credit), bounded capitalised-class exception, code-running modules, mutators through outside call results; F5 options only at module level or as a function local, no decorated or class-defined options function, match patterns; F2 per-callable lists (check_output) and value rules; CANONICAL_FORMS and SKILL.md
+- tests: test_audit_r7.py, test_audit_review_1_4_8.py; fixtures codex_r7, review_1_4_8; fairness `c` helper copies refreshed
+
+## Verdicts
+- R7-01 to R7-04 and the brace observation red on 855ccb5 (1308 cases), green at HEAD: VERIFIED (deliver/1.4.8/logs/red_r7_vs_855ccb5.log, unittest_full_sandboxed.log)
+- Independent review cases red at 5397389 (10) and 0b2933f (33), green at HEAD: VERIFIED (deliver/1.4.8/logs/red_review_1_4_8_a_vs_5397389.log, red_review_1_4_8_b_vs_0b2933f.log)
+- Fairness a=8 b=0 c=2 on 8 tracks, starters 8/8: VERIFIED (deliver/1.4.8/logs/test_audit_fairness.log)
+- Self-audit of a clean export: 83: VERIFIED (deliver/1.4.8/logs/audit_self_clean_export.log)
+- 12 TCP-bind tests: UNRESOLVED (sandbox refuses the bind; the coordinator runs them)
+- Pinned SDK-engine smoke for R5-04: UNRESOLVED (nothing installed, as the brief says)
+- Python 3.12 run: UNRESOLVED (no 3.12 interpreter on this machine; 3.14.6 only)
+
+## Usage
+- Wall-clock: 28 Oct 2026, 07:33 to about 08:45 +08 (one session, packaging included)
+- Tokens: not available to this headless session
+
+## Blocker
+none
+
+## Next action
+Coordinator runs the port tests, takes the SDK install question to the owner, and sends the package to Codex for round 8.
+
+---
+
 **Updated:** 28 Oct 2026  **Item:** 1.4.7, Codex round-6 fix round (coordinator brief, not a work-list item)  **Status:** passed locally except the 12 port tests, awaiting the coordinator's run and Codex round 7
 
 ## What changed
