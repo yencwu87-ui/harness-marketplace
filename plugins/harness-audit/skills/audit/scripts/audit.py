@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import ast
 import builtins
+import codecs
 import hashlib
 import json
 import os
@@ -30,7 +31,7 @@ import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-VERSION = "1.4.7"
+VERSION = "1.4.8"
 SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", "dist", "build", ".next", "target", "site-packages", "third_party", "vendor"}
 MAX_FILES = 60000
 MAX_FILE_BYTES = 400_000
@@ -786,35 +787,48 @@ CANONICAL_FORMS = (
      "`__setattr__`/`__setitem__` calls, operator.setitem, an attribute or item store, also through a name bound "
      "to a module, its `__dict__` or `sys.modules`; `__dict__` or `sys.modules` methods; exec, eval or compile; "
      "importlib.reload; an `os.environ[...]` store is not a module change), and the tree has no sitecustomize or "
-     "usercustomize module in any form (.py, compiled, a package) and no .pth file. Module objects (1.4.7): in any "
-     "file the audit reads (the same files), a module may only be read (`m.attr`, `m[...]`, `getattr(m, '<name>')`, "
-     "a loop over `m.attr`; an item read such as `sys.argv[0]` is a value) and called (`m.f(...)`). A module is a name bound by `import`, a name imported with `from` that is a repo module or comes "
-     "from outside the repo and is not capitalised (a capitalised one is taken to be a class), or an attribute of "
-     "either (an attribute of an outside module may be a module). Any of these makes the guard UNRESOLVED, naming the "
-     "file and line, for every helper-credited tool and hook in the tree: binding a module to another name in any "
-     "form (plain, annotated or augmented assignment, walrus, for or with target, unpacking, a default, a class "
-     "attribute, an attribute or item target); returning, yielding or putting one in a display (list, tuple, set, "
-     "dict), except in an `except` clause or the class argument of isinstance/issubclass; passing one to a function "
-     "defined in the repo or to a method the audit cannot resolve, or to an outside callable that may hand it on "
-     "(setattr, delattr, vars, map, filter, iter, next, zip, sorted, min, max, list, tuple, set, dict, super, type, "
-     "and anything from functools, operator, itertools, copy, contextlib, threading, multiprocessing, concurrent, "
-     "asyncio, weakref, types, builtins, copyreg, pickle, sched, atexit; a capitalised name may be passed anywhere); "
-     "an attribute store or deletion, setattr or delattr whose object is, or may be, a module (anything except a "
-     "parameter, a name bound only to a literal, a display or a call of a repo class or function or of dict, list, "
-     "set, tuple, object, frozenset, bytearray, str, int or float, an exception name, a function or a class; a call's "
-     "result, a for or with target and an outside call's result may be a module); an item store or a mutating "
-     "method (update, append, insert, pop, clear, add, discard, the set and deque updates, ...) on an object held "
-     "by a module, also through getattr (os.environ excepted, and `sys.path.insert(0, <this file's folder>)`, "
-     "inline or through a name bound once to it, a folder the shadow check reads); any import of importlib, imp, "
-     "gc, ctypes, inspect, unittest.mock or mock; sys.modules, sys._getframe, sys.meta_path, sys.path_hooks, "
-     "sys.path_importer_cache, sys.settrace or sys.setprofile (also through getattr or `from sys import`); "
-     "`__import__`, `__builtins__`, `__loader__`, `__spec__`, `__annotations__`, globals() or locals(); vars() "
-     "of something that may be a module; a double-underscore attribute other than __name__, __qualname__, __doc__, "
-     "__file__, __version__, __init__, __class__, __module__, __enter__, __exit__, __aenter__, __aexit__ and "
-     "__call__; a frame or traceback attribute (f_globals, f_locals, f_back, tb_frame, gi_frame, ...) or such a "
-     "name as a string; getattr, setattr, delattr or hasattr with a computed name. Arguments a framework passes to "
-     "a hook or tool are taken to be its documented objects, not modules. Not modelled (UNRESOLVED is not claimed "
-     "for them): an outside function not in the list above that hands an argument back or on."),
+     "usercustomize module in any form (.py, compiled, a package) and no .pth file. Module values (1.4.8): "
+     "a module value is a name bound by `import`; a name imported with `from` that is a repo module, or comes from "
+     "outside the repo and is not a class; an attribute of a module value (an attribute of a repo module only when "
+     "it is not a def, class or value there); and what getattr returns for a module value. A name imported with "
+     "`from` from outside the repo is taken to be a class, and is not a module value, when the imported name and "
+     "the bound name are both capitalised (`from collections import Counter`, `... import OrderedDict as OD`; not "
+     "`from os import path as Path`): a stated limitation, since a capitalised outside module such as ElementTree "
+     "is then not followed (a store on it still counts below). In any file the audit reads (the same files), a "
+     "module value m may only be the object of an attribute read or call (`m.attr`, `m.attr(...)`), have an item "
+     "read (`sys.argv[0]` is a value), be iterated through an attribute (`for p in sys.path`), or be tested or "
+     "compared (if, while, assert, `is`, `==`, `not`, an f-string, an except clause, an annotation, a decorator, a "
+     "base class, an expression statement). An outside module's attribute (`subprocess.PIPE`, `socket.socket`) "
+     "may also, in the same expression, be passed to an outside callable not on the hand-on list below, or be a "
+     "class in the tuple given to isinstance/issubclass or an except clause. Every other use makes the guard "
+     "UNRESOLVED, naming the file and line, for every helper-credited tool and hook in the tree: (1) assigning or "
+     "binding it in any form (plain, annotated or augmented assignment, walrus, chained, unpacking, a for or with "
+     "target, global); (2) passing it as an argument, positional, keyword or starred, to anything (a module name "
+     "or a getattr result even to an outside function such as print), and an outside module's attribute to a repo "
+     "function or class, a method the audit cannot resolve, or an outside callable that may hand it on (setattr, "
+     "delattr, vars, map, filter, iter, next, zip, enumerate, reversed, sorted, min, max, list, tuple, set, "
+     "frozenset, dict, super, type, object, and anything from functools, operator, itertools, copy, contextlib, "
+     "threading, multiprocessing, concurrent, asyncio, weakref, types, builtins, copyreg, pickle, sched, atexit); "
+     "(3) returning or yielding it, or making it a lambda's body; (4) putting it in a container (list, tuple, set, "
+     "dict key or value, comprehension, a starred item) or using it as a subscript key; (5) holding it as a class "
+     "or instance attribute or a default argument; (6) making it the target of getattr, hasattr, setattr, delattr "
+     "or vars, or reading its `__dict__`. Also UNRESOLVED, as before: an attribute store or deletion whose object "
+     "is, or may be, a module (anything except a parameter, a name bound only to a literal, a display or a call of "
+     "a repo class or function or of dict, list, set, tuple, object, frozenset, bytearray, str, int or float, an "
+     "exception name, a function or a class; a call's result, a for or with target, an imported name and an "
+     "outside call's result may be a module); an item store or a mutating method (update, append, insert, pop, "
+     "clear, add, discard, the set and deque updates, ...) on an object held by a module (os.environ excepted, and "
+     "`sys.path.insert(0, <this file's folder>)`, inline or through a name bound once to it, a folder the shadow "
+     "check reads); any import of importlib, imp, gc, ctypes, inspect, unittest.mock or mock; sys.modules, "
+     "sys._getframe, sys.meta_path, sys.path_hooks, sys.path_importer_cache, sys.settrace or sys.setprofile (also "
+     "`from sys import`); `__import__`, `__builtins__`, `__loader__`, `__spec__`, `__annotations__`, globals() or "
+     "locals(); a double-underscore attribute other than __name__, __qualname__, __doc__, __file__, __version__, "
+     "__init__, __class__, __module__, __enter__, __exit__, __aenter__, __aexit__ and __call__; a frame or "
+     "traceback attribute (f_globals, f_locals, f_back, tb_frame, gi_frame, ...) or such a name as a string; "
+     "getattr, setattr, delattr or hasattr with a computed name. Arguments a framework passes to a hook or tool are "
+     "taken to be its documented objects, not modules. Not modelled (UNRESOLVED is not claimed for them): an "
+     "outside function not on the hand-on list that hands an argument back or on; a capitalised outside module "
+     "taken to be a class."),
     ("F2 Tool refusal",
      "The tool function's first statements (after its docstring) are `if refuses(P): return <literal>` or "
      "`if refuses(P): raise <built-in exception>(<literals>)`, with no else. P is the tool function's own parameter, "
@@ -828,11 +842,18 @@ CANONICAL_FORMS = (
      "buffering, encoding, errors, newline, closefd, opener; a fetch takes its URL and the method's own positional "
      "parameters; any other capability takes P alone). P is the sole operation-bearing argument, and every other "
      "supplied argument, positional or keyword, is a literal that the capability itself takes and that is on this "
-     "list: shell, capture_output, text, check, timeout, encoding, errors, universal_newlines, and cwd as a relative "
-     "path with no `..`, `~` or drive, for subprocess.run and check_output (call and check_call: no capture_output "
-     "or check; Popen: no timeout either); encoding, errors for getoutput and getstatusoutput; mode, buffering for "
+     "callable's own list (1.4.8): subprocess.run: shell, capture_output, text, check, timeout, encoding, errors, "
+     "universal_newlines, and cwd as a relative path with no `..`, `~` or drive; check_output: shell, text, timeout, "
+     "encoding, errors, universal_newlines, cwd (it sets stdout and check itself and raises when given check, "
+     "stdout or capture_output); call and check_call: the same as check_output; Popen: the same without timeout; encoding, errors for getoutput and getstatusoutput; mode, buffering for "
      "os.popen; cwd for asyncio.create_subprocess_shell; nothing for os.system or any other capability; mode, "
-     "buffering, encoding, errors, newline for open (codecs.open: no newline); for a fetch, each callable's own "
+     "buffering, encoding, errors, newline for open (codecs.open: no newline); each value a literal the callable "
+     "takes without raising, alone and with the others: True or False for shell, capture_output, text, check, "
+     "universal_newlines, allow_redirects, follow_redirects and verify; a positive number or None for timeout; a "
+     "codec Python knows for encoding; a standard error handler for errors; a valid mode for the callable (os.popen: "
+     "r or w; codecs.open: no t); an int buffering, 0 only for a binary open(); newline None, '', \\n, \\r or "
+     "\\r\\n; no encoding, errors or newline with a binary open(); never both text and universal_newlines; "
+     "string headers; for a fetch, each callable's own "
      "list, taken from its signature (1.4.7): requests.get, head, options, delete, post, put, patch and "
      "requests.Session().<same>: timeout, headers, allow_redirects, verify (request: also a literal method); "
      "httpx.get, head, options, delete, post, put, patch: timeout, headers, follow_redirects, verify (request and "
@@ -886,8 +907,9 @@ CANONICAL_FORMS = (
      "credit of every hook on the agent (UNRESOLVED), whatever the registration order, since the SDK may run matching "
      "hooks in parallel. The hooks dict has only literal, distinct keys (no `**`). The options are passed whole to "
      "the SDK (ClaudeSDKClient, query), returned from a named function every use of which is a call passed whole "
-     "to the SDK, or bound to one name by a plain or annotated assignment (1.4.7: "
-     "any other binding form, such as a walrus, for or with target, unpacking, a chained assignment, an attribute or "
+     "to the SDK, or bound to one name by a plain or annotated assignment at module level or as a function local "
+     "(1.4.8: a binding in a class namespace, nested classes included, an instance or class attribute, a default, "
+     "or options returned by a function defined in a class namespace, is UNRESOLVED; 1.4.7: any other binding form, such as a walrus, for or with target, unpacking, a chained assignment, an attribute or "
      "item target, a display, a default or another call, is UNRESOLVED). A bound name is bound once in the module, "
      "counting every binding form (plain, annotated or augmented assignment, a bare annotation, walrus, for, with, "
      "except, match, import, global, nonlocal, del, def, class, comprehension), and is only passed whole to the "
@@ -909,7 +931,7 @@ CANONICAL_FORMS = (
      "the reason \"hand-written refusal: use the kit guard helper to earn credit\" or the rule it breaks. It earns "
      "no points; it does not count as missing either."),
 )
-KIT_GUARD_SHA256 = "2c56e596b8b2de7779bbd1aabb872b178de6f69469d7e6ac088a209117189701"   # kit/shared/kit_guard.py
+KIT_GUARD_SHA256 = "937b9b3d136a90e4fd93a3a1605b77ed24003a088acbdcba3edd8ef6647c6210"   # kit/shared/kit_guard.py
 KIT_GUARD_MODULE, KIT_GUARD_NAME = "kit_guard", "refuses"
 STARTUP_MODULES = ("sitecustomize", "usercustomize")   # run at interpreter start, in any form (.py, .pyc, package)
 DUNDER_SETTERS = {"__setattr__", "__delattr__", "__setitem__", "__delitem__"}
@@ -1210,7 +1232,9 @@ FETCH_CALLABLES = {
 _RUN_OPTIONS = ("shell", "capture_output", "text", "check", "timeout", "encoding", "errors", "universal_newlines", "cwd")
 # The allow-list, per capability: only options that capability really takes (a TypeError is not a guard).
 ALLOWED_OPTIONS = {
-    "subprocess.run": _RUN_OPTIONS, "subprocess.check_output": _RUN_OPTIONS,
+    "subprocess.run": _RUN_OPTIONS,
+    # check_output sets stdout and check itself and raises when given them (or capture_output, which sets stdout)
+    "subprocess.check_output": ("shell", "text", "timeout", "encoding", "errors", "universal_newlines", "cwd"),
     "subprocess.call": ("shell", "text", "timeout", "encoding", "errors", "universal_newlines", "cwd"),
     "subprocess.check_call": ("shell", "text", "timeout", "encoding", "errors", "universal_newlines", "cwd"),
     "subprocess.Popen": ("shell", "text", "encoding", "errors", "universal_newlines", "cwd"),
@@ -1219,6 +1243,67 @@ ALLOWED_OPTIONS = {
     "open": ("mode", "buffering", "encoding", "errors", "newline"), "io.open": ("mode", "buffering", "encoding", "errors", "newline"),
     "builtins.open": ("mode", "buffering", "encoding", "errors", "newline"),
     "codecs.open": ("mode", "encoding", "errors", "buffering")}
+
+
+BOOL_OPTIONS = {"shell", "capture_output", "text", "check", "universal_newlines", "allow_redirects",
+                "follow_redirects", "verify"}
+ERROR_HANDLERS = {"strict", "ignore", "replace", "backslashreplace", "surrogateescape", "xmlcharrefreplace",
+                  "namereplace", "surrogatepass"}
+NEWLINES = (None, "", "\n", "\r", "\r\n")
+OPEN_MODES = ("open", "io.open", "builtins.open")
+
+
+def _open_mode(m, text=True) -> bool:
+    """A mode open() accepts: one of r, w, x, a; at most one of b and t (t only when text is allowed); +; no repeats."""
+    return isinstance(m, str) and len(set(m)) == len(m) and not set(m) - set("rwxabt+") and \
+        sum(c in m for c in "rwxa") == 1 and not ("b" in m and "t" in m) and (text or "t" not in m)
+
+
+def _option_value_ok(full, name, v, values) -> bool:
+    """F2 (R7-03): a literal the callable takes for this option without raising, alone and with the other written
+    options given (`values`): booleans for the flags, a positive number or None for timeout, a known codec and error
+    handler, a valid mode for the callable, an int buffering (0 only for a binary open()), a valid newline
+    and no encoding, errors or newline in binary mode, text and universal_newlines not both, string headers."""
+    if name in BOOL_OPTIONS:
+        return isinstance(v, bool)
+    if name == "timeout":
+        return v is None or (isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0)
+    if name == "encoding":
+        try:
+            return isinstance(v, str) and bool(codecs.lookup(v))
+        except LookupError:
+            return False
+    if name == "errors":
+        return v in ERROR_HANDLERS
+    if name == "cwd":
+        return _cwd_inside(v)
+    mode = values.get("mode", "r")
+    if name == "mode":
+        if full == "os.popen":
+            return v in ("r", "w")
+        return _open_mode(v, text=full != "codecs.open")
+    if name == "buffering":
+        if not isinstance(v, int) or isinstance(v, bool):
+            return False
+        if full == "os.popen":
+            return v != 0
+        return v != 0 or (full in OPEN_MODES and "b" in str(mode))     # unbuffered only for a binary open()
+    if name == "newline":
+        return v in NEWLINES
+    if name == "headers":
+        return isinstance(v, dict) and all(isinstance(k, str) and isinstance(x, str) for k, x in v.items())
+    if name == "method":
+        return isinstance(v, str)
+    return False
+
+
+def _options_conflict(full, values) -> bool:
+    """Written options that raise together: text with universal_newlines; encoding, errors or newline with a binary
+    open()."""
+    if "text" in values and "universal_newlines" in values:
+        return True
+    return full in OPEN_MODES and "b" in str(values.get("mode", "")) and \
+        any(k in values for k in ("encoding", "errors", "newline"))
 
 
 def _cwd_inside(v) -> bool:
@@ -1260,13 +1345,15 @@ def _op_arg(call, cat, full):
             return None
         bound[k.arg] = k.value
     allowed = fetch[1] if fetch is not None else ALLOWED_OPTIONS.get(full, ())
+    values = {}
     for p, v in bound.items():
         if p == op:
             continue
         if p not in allowed or not _literal(v):
             return None              # executable, env, preexec_fn, stdin, opener, data, unknown; or a computed option
-        if p == "cwd" and not _cwd_inside(ast.literal_eval(v)):
-            return None
+        values[p] = ast.literal_eval(v)
+    if any(not _option_value_ok(full, p, v, values) for p, v in values.items()) or _options_conflict(full, values):
+        return None                  # a value or a pair the real callable rejects (R7-03)
     return bound.get(op)
 
 
@@ -1587,8 +1674,9 @@ LAUNDERERS = {"setattr", "delattr", "vars", "map", "filter", "iter", "next", "zi
 LAUNDER_HEADS = {"functools", "operator", "itertools", "copy", "contextlib", "threading", "multiprocessing",
                  "concurrent", "asyncio", "weakref", "types", "builtins", "copyreg", "pickle", "sched", "atexit"}
 # Outside callables that only read their arguments here: a module may be passed to them.
-READERS = {"isinstance", "issubclass", "hasattr", "getattr", "print", "repr", "str", "id", "len", "callable", "bool",
+READERS = {"isinstance", "issubclass", "print", "repr", "str", "id", "len", "callable", "bool",
            "hash", "format", "dir"}
+TARGET_CALLS = {"getattr", "hasattr", "setattr", "delattr", "vars"}   # a module value as their target withholds credit
 SAFE_BASE_CALLS = {"dict", "list", "set", "tuple", "object", "frozenset", "bytearray", "str", "int", "float"}
 
 
@@ -1612,26 +1700,33 @@ class _ModuleUses:
                     if k[0] == "module":
                         self.kinds[a.asname or a.name] = "module"
                     elif k[0] in ("external", "unknown"):
-                        self.kinds.setdefault(a.asname or a.name, "from")
+                        bound = a.asname or a.name
+                        # R7-04: a capitalised outside name, not a lower-case one renamed, is taken to be a class
+                        self.kinds.setdefault(bound, "class" if a.name[:1].isupper() and bound[:1].isupper()
+                                              else "from")
 
     def kind(self, e):
-        """'module' when e is, or may be, a module (an imported module, an attribute of one, a lower-case name
-        imported with `from` from outside the repo), 'class' for a capitalised such name, None otherwise."""
+        """'module' when e is, or may be, a module (a name bound by import, a name imported with `from` that is not
+        a class, an attribute of a repo module that is not a def, class or value, what getattr returns for a module
+        value); 'attr' for an attribute of an outside module (it may be a module); None otherwise (a capitalised
+        outside class, R7-04, is not a module value)."""
         if isinstance(e, ast.Call) and isinstance(e.func, ast.Name) and e.func.id == "getattr" and e.args and \
                 e.func.id not in self.m.funcs:
-            return "module" if self.kind(e.args[0]) else None     # getattr(sys, 'path') is sys.path
+            return "module" if self.kind(e.args[0]) else None     # getattr(lib, 'subprocess') may be a module
         root = e
         while isinstance(root, (ast.Attribute, ast.Subscript)) or (isinstance(root, ast.Call) and
                                                                     isinstance(root.func, ast.Name) and
                                                                     root.func.id == "getattr" and root.args):
             root = root.args[0] if isinstance(root, ast.Call) else root.value
-        if not isinstance(root, ast.Name) or root.id not in self.kinds:
+        if not isinstance(root, ast.Name) or root.id not in self.kinds or self.kinds[root.id] == "class":
             return None
         if e is not root:
             k = self.idx.resolve_dotted(self.m, self.m.full(e)) if isinstance(e, ast.Attribute) else ("unknown",)
-            return None if k[0] in ("def", "class", "value") else "module"
-        if self.kinds[root.id] == "from" and root.id[:1].isupper():
-            return "class"
+            if k[0] in ("def", "class", "value"):
+                return None
+            if self.idx.resolve_dotted(self.m, self.m.full(root))[0] == "module":
+                return "module"                                   # lib.subprocess: a repo module's module
+            return "attr"
         return "module"
 
     def environ(self, e):
@@ -1767,9 +1862,8 @@ class _ModuleUses:
             if n.func.id in ("getattr", "setattr", "delattr", "hasattr") and \
                     (len(n.args) < 2 or not (isinstance(n.args[1], ast.Constant) and isinstance(n.args[1].value, str))):
                 return f"{n.func.id}() with a computed attribute name"
-            if n.func.id == "getattr" and len(n.args) >= 2 and self.kind(n.args[0]) and n.args[1].value in SYS_SOURCES \
-                    and m.full(n.args[0]) == "sys":
-                return f"getattr(sys, {n.args[1].value!r})"
+            if n.func.id in ("getattr", "hasattr") and n.args and self.kind(n.args[0]):
+                return f"makes a module value ({m.src(n.args[0])[:40]}) the target of {n.func.id}()"
             if n.func.id in ("setattr", "delattr") and n.args and self.may_be_module(n.args[0], n):
                 return f"{n.func.id}() on something that is, or may be, a module"
             if n.func.id == "vars" and (not n.args or self.may_be_module(n.args[0], n)):
@@ -1789,7 +1883,9 @@ class _ModuleUses:
         return ""
 
     def escape(self, name):
-        """Why the module value starting at `name` is bound to another name or handed on, or ''."""
+        """F1 (R7-01): why the module value starting at `name` is used other than as `m.attr`, `m.attr(...)`, an item
+        read, a test or a comparison, or ''. An outside module's attribute (`subprocess.PIPE`) may also be passed to
+        an outside callable not on the hand-on list, or be a class in isinstance/issubclass or an except clause."""
         cur = name
         while True:
             p = self.parents.get(cur)
@@ -1802,34 +1898,46 @@ class _ModuleUses:
             return ""                           # an item read (sys.argv[0]) is a value, not a module
         p = self.parents.get(cur)
         text = self.m.src(cur)[:40]
+        if isinstance(p, ast.Call) and isinstance(p.func, ast.Name) and p.func.id in TARGET_CALLS and \
+                p.args and p.args[0] is cur and p.func.id not in self.m.funcs:
+            return ""                           # getattr(m, ...), setattr(m, ...), vars(m): judged in why()
         if isinstance(p, (ast.For, ast.AsyncFor, ast.comprehension)) and p.iter is cur and \
                 isinstance(cur, ast.Attribute):
             return ""                           # for p in sys.path: the target is an element
         if isinstance(p, ast.Call) and p.func is cur:
             return ""
-        if isinstance(p, (ast.Attribute, ast.Subscript)):           # a store or a read on it, judged elsewhere
-            return ""
+        if isinstance(p, (ast.Attribute, ast.Subscript)) and p.value is cur:
+            return ""                           # a store through it, judged in why()
+        if isinstance(p, (ast.Subscript, ast.Slice)):
+            return f"uses a module value ({text}) as a key"
         if self.in_annotation(cur):
             return ""
         if isinstance(p, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and \
                 (cur in p.decorator_list or cur in getattr(p, "bases", ())):
             return ""
-        # a value inside a display or a choice is judged where the display or the choice goes
-        while (isinstance(p, (ast.List, ast.Tuple, ast.Set, ast.BoolOp, ast.Starred)) or
-               (isinstance(p, ast.Dict) and cur in p.values) or (isinstance(p, ast.IfExp) and p.test is not cur)):
-            cur, p = p, self.parents.get(p)
-        if isinstance(p, (ast.Compare, ast.Expr, ast.FormattedValue, ast.If, ast.While, ast.Assert, ast.ExceptHandler)) \
-                or (isinstance(p, ast.IfExp) and p.test is cur):
+        while isinstance(p, ast.BoolOp) or (isinstance(p, ast.IfExp) and p.test is not cur):
+            cur, p = p, self.parents.get(p)     # a choice goes where the choice goes
+        if isinstance(p, (ast.List, ast.Tuple, ast.Set, ast.Dict, ast.Starred)):
+            top, up = p, self.parents.get(p)
+            while isinstance(up, ast.Tuple):
+                top, up = up, self.parents.get(up)
+            if kind == "attr" and isinstance(p, ast.Tuple) and (
+                    (isinstance(up, ast.ExceptHandler) and up.type is top) or
+                    (isinstance(up, ast.Call) and isinstance(up.func, ast.Name) and
+                     up.func.id in ("isinstance", "issubclass") and len(up.args) == 2 and up.args[1] is top)):
+                return ""                       # isinstance(x, (socket.socket, ssl.SSLSocket))
+            return f"puts a module value ({text}) in a container"
+        if isinstance(p, (ast.Compare, ast.Expr, ast.FormattedValue, ast.If, ast.While, ast.Assert,
+                          ast.ExceptHandler)) or (isinstance(p, ast.IfExp) and p.test is cur) or \
+                (isinstance(p, ast.UnaryOp) and isinstance(p.op, ast.Not)):
             return ""
         if isinstance(p, ast.keyword):
             p = self.parents.get(p)
         if isinstance(p, ast.Call) and cur is not p.func:
             full = self.callee_outside(p.func)
-            if full is not None and (kind == "class" or full in READERS or
-                                     (full not in LAUNDERERS and full.split(".")[0] not in LAUNDER_HEADS)):
-                return ""                       # read by an outside callable (subprocess.run(c, stdout=subprocess.PIPE))
-            if kind == "class" and full is None and isinstance(p.func, ast.Attribute):
-                return ""                       # a class handed to a method (registry.add_callback(Event, ...))
+            if kind == "attr" and full is not None and full not in LAUNDERERS and full not in TARGET_CALLS and \
+                    full.split(".")[0] not in LAUNDER_HEADS:
+                return ""                       # subprocess.run(c, stdout=subprocess.PIPE)
             return f"hands a module value ({text}) to {self.m.src(p.func)[:40]}"
         return f"binds or hands on a module value ({text}) here"
 
@@ -2476,6 +2584,13 @@ def _sdk_options_changed(idx, mod, call) -> str:
         return (f"{mod.where(call)} the options are bound by a form the audit does not model "
                 f"({mod.src(p)[:40] if p is not None else 'module'}), so the options the agent runs with may differ")
     name = (p.targets[0] if isinstance(p, ast.Assign) else p.target).id
+    scope = parents.get(p)
+    while scope is not None and not isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef,
+                                                        ast.Lambda, ast.Module)):
+        scope = parents.get(scope)
+    if not isinstance(scope, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef)):
+        return (f"{mod.where(p)} the options are bound in a class namespace (`{name}`), not at module level or as a "
+                "function local, so the options the agent runs with may differ")
     if len(_binds(mod.tree, name)) != 1:
         return f"{mod.where(p)} `{name}` is bound more than once, so the options the agent runs with may differ"
     for n in ast.walk(mod.tree):
@@ -2508,6 +2623,9 @@ def _returned_whole(idx, mod, ret, parents) -> str:
         fn = parents.get(fn)
     if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
         return f"{mod.where(ret)} the options are returned from something that is not a named function"
+    if isinstance(parents.get(fn), ast.ClassDef):
+        return (f"{mod.where(fn)} the options are returned by `{fn.name}`, defined in a class namespace, so callers "
+                "the audit cannot follow may change them")
     if len(_binds(mod.tree, fn.name)) != 1:
         return f"{mod.where(fn)} `{fn.name}`, which returns the options, is bound more than once"
     for n in ast.walk(mod.tree):

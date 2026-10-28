@@ -1,4 +1,4 @@
-"""kit_guard: the harness kit's guard helper (version 4, harness-marketplace 1.4.7). It imports nothing.
+"""kit_guard: the harness kit's guard helper (version 5, harness-marketplace 1.4.8). It imports nothing.
 
     import subprocess
     from kit_guard import refuses
@@ -37,7 +37,10 @@ The classes, as this helper defines them (harness-audit credits exactly these):
                (-C dir, -c k=v, --git-dir=...); git reset with --hard, options in any order, abbreviations such as
                --ha included (and `reset --hard` after any program); git -c alias.*=... or --config-env alias.*=...
                (an alias can run anything); rm with a recursive option in any position (-r, -R, -rf, -fr, -r -f,
-               --recursive and its abbreviations, rm x -rf).
+               --recursive and its abbreviations, rm x -rf). Brace groups are expanded first, as for secrets
+               (`git {push,status}`, `r{m,x} -rf x`, `{git,push}`): the command is refused when any word read as
+               one of its expansions, or as all of them in a row, gives a destructive command; more than four
+               braced words, a group past the limits above, or more than 256 readings is refused.
 Not decoded (bound your claim accordingly): shell variables and parameter expansion ($X, ${X}), command output used
 as a word, ANSI-C quoting ($'\\x2e'), encodings (base64), git aliases defined in config files, programs that delete
 without these words (find -delete, a script file).
@@ -459,6 +462,42 @@ def _split_substitutions(tok):
     return [p for p in out if p]
 
 
+_MAX_BRACE_WORDS = 4         # words in one command that hold a brace group
+_MAX_BRACE_READINGS = 256    # argument vectors one command's braces may be read as
+
+
+def _brace_readings(words):
+    """The argument vectors a command's brace groups may stand for: each word with a group replaced by each of its
+    expansions on its own, or by all of them in a row (as the shell does: `{git,push}` is `git push`). None when the
+    words hold too many groups, a group expands too far or nests too deep, or the readings are too many (refused)."""
+    choices, braced = [], 0
+    for w in words:
+        alts = _expand_braces(w) if "{" in w else [w]
+        if alts is None:
+            return None
+        if len(alts) > 1:
+            braced += 1
+            choices.append([[a] for a in alts] + [alts])
+        else:
+            choices.append([alts])
+    if braced == 0:
+        return [list(words)]
+    if braced > _MAX_BRACE_WORDS:
+        return None
+    readings = [[]]
+    for c in choices:
+        readings = [r + x for r in readings for x in c]
+        if len(readings) > _MAX_BRACE_READINGS:
+            return None
+    return readings
+
+
+def _destructive_braced(words):
+    """True when any reading of the words' brace groups is destructive, or when they are too many to read."""
+    readings = _brace_readings(words)
+    return readings is None or any(_destructive_argv(r) for r in readings)
+
+
 def _destructive_text(s, depth=0):
     """A nested shell (bash -c '...') joins its own continued lines, so each level reads every continuation form."""
     if depth > 4:
@@ -472,7 +511,7 @@ def _destructive_form(s, depth):
         toks = _tokens(_unquoted(s)) or _unquoted(s).split()
     toks = [t for tok in toks for t in _split_substitutions(tok)]
     for seg in _segments(toks):
-        if _destructive_argv(seg):
+        if _destructive_braced(seg):
             return True
         for w in seg:                                      # bash -c "...", sh -c '...', eval "..."
             if any(c in w for c in " ;&|\n`$(") and _destructive_text(w, depth + 1):
@@ -566,7 +605,7 @@ def secret(value) -> bool:
 def destructive(value) -> bool:
     """True when value is a destructive command (the destructive class above)."""
     for s in _forms(value):
-        if _destructive_argv(list(s)) if isinstance(s, tuple) else _destructive_text(s):
+        if _destructive_braced(list(s)) if isinstance(s, tuple) else _destructive_text(s):
             return True
     return False
 
