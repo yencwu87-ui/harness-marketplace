@@ -40,7 +40,10 @@ The classes, as this helper defines them (harness-audit credits exactly these):
                --recursive and its abbreviations, rm x -rf). Brace groups are expanded first, as for secrets
                (`git {push,status}`, `r{m,x} -rf x`, `{git,push}`): the command is refused when any word read as
                one of its expansions, or as all of them in a row, gives a destructive command; more than four
-               braced words, a group past the limits above, or more than 256 readings is refused.
+               braced words, a group past the limits above, or more than 256 readings is refused, and so is a word
+               holding an unquoted `{` and a quoted or escaped `{` or `}` (`git pu{sh,'}'}`). Each reading's words
+               are also read as nested shells (`bash -c {'git push',x}`), and so is the string `env -S` or
+               `--split-string=` carries.
 Not decoded (bound your claim accordingly): shell variables and parameter expansion ($X, ${X}), command output used
 as a word, ANSI-C quoting ($'\\x2e'), encodings (base64), git aliases defined in config files, programs that delete
 without these words (find -delete, a script file).
@@ -498,6 +501,34 @@ def _destructive_braced(words):
     return readings is None or any(_destructive_argv(r) for r in readings)
 
 
+def _mixed_braces(s):
+    """True when a shell word holds an unquoted `{` and also a quoted or escaped `{` or `}`: the shell may expand a
+    group the helper cannot pair (`git pu{sh,'}'}` is `git push pu}`), so the word is refused (fail closed)."""
+    quote, open_brace, quoted_brace, i, n = None, False, False, 0, len(s)
+    while i < n:
+        c = s[i]
+        if quote == "'":
+            quoted_brace = quoted_brace or c in "{}"
+            quote = None if c == "'" else quote
+        elif c == "\\" and i + 1 < n:
+            quoted_brace = quoted_brace or s[i + 1] in "{}"
+            i += 1
+        elif c == '"':
+            quote = None if quote == '"' else '"'
+        elif quote == '"':
+            quoted_brace = quoted_brace or c in "{}"
+        elif c == "'":
+            quote = "'"
+        elif c in _SPACE or c in _PUNCT:
+            if open_brace and quoted_brace:
+                return True
+            open_brace = quoted_brace = False
+        elif c == "{":
+            open_brace = True
+        i += 1
+    return open_brace and quoted_brace
+
+
 def _destructive_text(s, depth=0):
     """A nested shell (bash -c '...') joins its own continued lines, so each level reads every continuation form."""
     if depth > 4:
@@ -509,13 +540,21 @@ def _destructive_form(s, depth):
     toks = _tokens(s)
     if toks is None:                                      # unbalanced quotes: judge the words without them
         toks = _tokens(_unquoted(s)) or _unquoted(s).split()
+    if _mixed_braces(s):
+        return True
     toks = [t for tok in toks for t in _split_substitutions(tok)]
     for seg in _segments(toks):
-        if _destructive_braced(seg):
+        readings = _brace_readings(seg)
+        if readings is None:
             return True
-        for w in seg:                                      # bash -c "...", sh -c '...', eval "..."
-            if any(c in w for c in " ;&|\n`$(") and _destructive_text(w, depth + 1):
+        for words in [seg] + readings:                     # the words as written, and each brace reading
+            if _destructive_argv(words):
                 return True
+            for w in words:                                # bash -c "...", sh -c '...', eval "...", env -S'...'
+                for text in (w, w[2:] if w.startswith("-S") else "", w.split("=", 1)[-1]
+                             if w.startswith("--split-string=") else ""):
+                    if text and any(c in text for c in " ;&|\n`$(") and _destructive_text(text, depth + 1):
+                        return True
     return False
 
 

@@ -15,9 +15,10 @@ EXPECT = {
     "c1_profile_run": 0, "c1_pdb_run": 0, "c1_code_interpreter": 0, "c1_pickle_loads": 0, "c1_from_runpy": 0,
     "c2_resolve_name_path_insert": 0, "c2_resolve_name_item_store": 0,
     "control_outside_call_result": 8,
-    **{n: 0 for n in ("f2_open_hex_codec", "f2_getoutput_base64", "f2_open_rot13_positional", "f2_open_huge_buffering",
-                      "f2_popen_huge_buffering", "f2_timeout_huge", "f2_timeout_infinite", "f2_timeout_tiny",
-                      "f2_cwd_empty", "f2_cwd_nul", "f2_encoding_nul_crash", "f5_decorated_returning_function",
+    # a read tool loses G2 only (5 points left), a write tool G1 and G3 (3 left), a shell tool everything
+    "f2_open_hex_codec": 5, "f2_open_huge_buffering": 5, "f2_encoding_nul_crash": 5, "f2_open_rot13_positional": 3,
+    **{n: 0 for n in ("f2_getoutput_base64", "f2_popen_huge_buffering", "f2_timeout_huge", "f2_timeout_infinite", "f2_timeout_tiny",
+                      "f2_cwd_empty", "f2_cwd_nul", "f5_decorated_returning_function",
                       "f5_match_client_options", "f5_match_nested_options")},
     "f2_codecs_open_unbuffered_ok": 8,
 }

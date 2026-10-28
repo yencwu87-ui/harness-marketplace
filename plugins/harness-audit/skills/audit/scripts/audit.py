@@ -852,9 +852,11 @@ CANONICAL_FORMS = (
      "os.popen; cwd for asyncio.create_subprocess_shell; nothing for os.system or any other capability; mode, "
      "buffering, encoding, errors, newline for open (codecs.open: no newline); each value a literal the callable "
      "takes without raising, alone and with the others: True or False for shell, capture_output, text, check, "
-     "universal_newlines, allow_redirects, follow_redirects and verify; a positive number or None for timeout; a "
-     "codec Python knows for encoding; a standard error handler for errors; a valid mode for the callable (os.popen: "
-     "r or w; codecs.open: no t); an int buffering, 0 only for a binary open(); newline None, '', \\n, \\r or "
+     "universal_newlines, allow_redirects, follow_redirects and verify; a number from 1 to 31,536,000 (one year) or None "
+     "for timeout; a text encoding Python knows for encoding (not hex, base64, rot13, zlib, ...); a standard error "
+     "handler for errors; a non-empty cwd with no NUL; a valid mode for the callable (os.popen: r or w; codecs.open: "
+     "no t); an int buffering from -1 to 2**30, 0 only for a binary stream (open() in a b mode, codecs.open with an "
+     "encoding); newline None, '', \\n, \\r or "
      "\\r\\n; no encoding, errors or newline with a binary open(); never both text and universal_newlines; "
      "string headers; for a fetch, each callable's own "
      "list, taken from its signature (1.4.7): requests.get, head, options, delete, post, put, patch and "
@@ -909,7 +911,7 @@ CANONICAL_FORMS = (
      "unpacking, a helper's return, an imported value, a `yield`, `updatedInput` or any other output voids the guard "
      "credit of every hook on the agent (UNRESOLVED), whatever the registration order, since the SDK may run matching "
      "hooks in parallel. The hooks dict has only literal, distinct keys (no `**`). The options are passed whole to "
-     "the SDK (ClaudeSDKClient, query), returned from a named function every use of which is a call passed whole "
+     "the SDK (ClaudeSDKClient, query), returned from a named, undecorated function every use of which is a call passed whole "
      "to the SDK, or bound to one name by a plain or annotated assignment at module level or as a function local "
      "(1.4.8: a binding in a class namespace, nested classes included, an instance or class attribute, a default, "
      "or options returned by a function defined in a class namespace, is UNRESOLVED; 1.4.7: any other binding form, such as a walrus, for or with target, unpacking, a chained assignment, an attribute or "
@@ -919,7 +921,7 @@ CANONICAL_FORMS = (
      "SDK or returned (as above): an attribute read such as `opts.hooks[...].append(...)` or another call such as "
      "`dataclasses.replace(opts, ...)` voids it too, and so does another file importing the name (or *) from the "
      "module or reading it through the module (getattr and vars included), or any `.options` or `._options` "
-     "attribute in the tree, or `'options'`/`'_options'` given to a call (a client "
+     "attribute in the tree, a match class pattern naming `options`, `_options` or `hooks`, or `'options'`/`'_options'` given to a call (a client "
      "keeps its options there until it connects). `can_use_tool`, when set, never passes `updated_input`. Strands: nothing in the repo sets `cancel_tool` to "
      "anything but a non-empty literal, deletes or augments it, or calls setattr or delattr with a computed name."),
     ("F6 Classes",
@@ -934,7 +936,7 @@ CANONICAL_FORMS = (
      "the reason \"hand-written refusal: use the kit guard helper to earn credit\" or the rule it breaks. It earns "
      "no points; it does not count as missing either."),
 )
-KIT_GUARD_SHA256 = "937b9b3d136a90e4fd93a3a1605b77ed24003a088acbdcba3edd8ef6647c6210"   # kit/shared/kit_guard.py
+KIT_GUARD_SHA256 = "87e3efeaf2e1ca6126c2b8fc3284d1e4660d2e0c315be27d8230b09af13893ca"   # kit/shared/kit_guard.py
 KIT_GUARD_MODULE, KIT_GUARD_NAME = "kit_guard", "refuses"
 STARTUP_MODULES = ("sitecustomize", "usercustomize")   # run at interpreter start, in any form (.py, .pyc, package)
 DUNDER_SETTERS = {"__setattr__", "__delattr__", "__setitem__", "__delitem__"}
@@ -1253,6 +1255,8 @@ BOOL_OPTIONS = {"shell", "capture_output", "text", "check", "universal_newlines"
 ERROR_HANDLERS = {"strict", "ignore", "replace", "backslashreplace", "surrogateescape", "xmlcharrefreplace",
                   "namereplace", "surrogatepass"}
 NEWLINES = (None, "", "\n", "\r", "\r\n")
+MAX_TIMEOUT = 86400 * 365          # seconds; larger values overflow the clock arithmetic
+MAX_BUFFERING = 2 ** 30
 OPEN_MODES = ("open", "io.open", "builtins.open")
 
 
@@ -1264,33 +1268,36 @@ def _open_mode(m, text=True) -> bool:
 
 def _option_value_ok(full, name, v, values) -> bool:
     """F2 (R7-03): a literal the callable takes for this option without raising, alone and with the other written
-    options given (`values`): booleans for the flags, a positive number or None for timeout, a known codec and error
+    options given (`values`): booleans for the flags, a timeout from 1 s to a year or None, a known text codec and error
     handler, a valid mode for the callable, an int buffering (0 only for a binary open()), a valid newline
     and no encoding, errors or newline in binary mode, text and universal_newlines not both, string headers."""
     if name in BOOL_OPTIONS:
         return isinstance(v, bool)
-    if name == "timeout":
-        return v is None or (isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0)
+    if name == "timeout":           # long enough for any command to start, small enough to convert
+        return v is None or (isinstance(v, (int, float)) and not isinstance(v, bool) and 1 <= v <= MAX_TIMEOUT)
     if name == "encoding":
         try:
-            return isinstance(v, str) and bool(codecs.lookup(v))
-        except LookupError:
+            return isinstance(v, str) and codecs.lookup(v)._is_text_encoding
+        except (LookupError, ValueError, TypeError):
             return False
     if name == "errors":
         return v in ERROR_HANDLERS
     if name == "cwd":
-        return _cwd_inside(v)
+        return isinstance(v, str) and v != "" and "\x00" not in v and _cwd_inside(v)
     mode = values.get("mode", "r")
     if name == "mode":
         if full == "os.popen":
             return v in ("r", "w")
         return _open_mode(v, text=full != "codecs.open")
     if name == "buffering":
-        if not isinstance(v, int) or isinstance(v, bool):
+        if not isinstance(v, int) or isinstance(v, bool) or not -1 <= v <= MAX_BUFFERING:
             return False
         if full == "os.popen":
             return v != 0
-        return v != 0 or (full in OPEN_MODES and "b" in str(mode))     # unbuffered only for a binary open()
+        if v != 0:
+            return True
+        # unbuffered only for a binary stream: open() in a b mode, or codecs.open with an encoding (it adds b)
+        return (full in OPEN_MODES and "b" in str(mode)) or (full == "codecs.open" and "encoding" in values)
     if name == "newline":
         return v in NEWLINES
     if name == "headers":
@@ -2642,6 +2649,9 @@ def _returned_whole(idx, mod, ret, parents) -> str:
         fn = parents.get(fn)
     if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
         return f"{mod.where(ret)} the options are returned from something that is not a named function"
+    if fn.decorator_list:
+        return (f"{mod.where(fn)} `{fn.name}`, which returns the options, has a decorator, which may replace what "
+                "it returns")
     if isinstance(parents.get(fn), ast.ClassDef):
         return (f"{mod.where(fn)} the options are returned by `{fn.name}`, defined in a class namespace, so callers "
                 "the audit cannot follow may change them")
@@ -2693,6 +2703,9 @@ def _client_options_read(idx, mod) -> str:
         for n in ast.walk(m.tree):
             if isinstance(n, ast.Attribute) and n.attr in ("options", "_options"):
                 return f"{m.where(n)} reads or sets .{n.attr}, so a client's options may change before it connects"
+            if type(n).__name__ == "MatchClass" and set(n.kwd_attrs) & {"options", "_options", "hooks"}:
+                return (f"{m.where(n)} a match pattern reads `options` or `hooks` of an object, so a client's "
+                        "options may change before it connects")
             if isinstance(n, ast.Constant) and n.value in ("options", "_options") and \
                     isinstance(_parents_of(m).get(n), ast.Call):
                 return (f"{m.where(n)} names the attribute {n.value!r} in a call, so a client's options may change "
