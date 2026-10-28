@@ -817,9 +817,12 @@ CANONICAL_FORMS = (
      "a repo class or function or of dict, list, set, tuple, object, frozenset, bytearray, str, int or float, an "
      "exception name, a function or a class; a call's result, a for or with target, an imported name and an "
      "outside call's result may be a module); an item store or a mutating method (update, append, insert, pop, "
-     "clear, add, discard, the set and deque updates, ...) on an object held by a module (os.environ excepted, and "
+     "clear, add, discard, the set and deque updates, ...) on an object held by a module, or by what an outside call returns "
+     "(`pkgutil.resolve_name('sys').path.insert(...)`) (os.environ excepted, and "
      "`sys.path.insert(0, <this file's folder>)`, inline or through a name bound once to it, a folder the shadow "
-     "check reads); any import of importlib, imp, gc, ctypes, inspect, unittest.mock or mock; sys.modules, "
+     "check reads); any import of importlib, imp, gc, ctypes, inspect, unittest.mock or mock; any import of a module that runs "
+     "code strings, code files or serialized calls, the same as exec (timeit, runpy, cProfile, profile, pdb, bdb, "
+     "code, codeop, pickle, marshal, shelve, doctest, trace, dill, cloudpickle, pickletools, copyreg); sys.modules, "
      "sys._getframe, sys.meta_path, sys.path_hooks, sys.path_importer_cache, sys.settrace or sys.setprofile (also "
      "`from sys import`); `__import__`, `__builtins__`, `__loader__`, `__spec__`, `__annotations__`, globals() or "
      "locals(); a double-underscore attribute other than __name__, __qualname__, __doc__, __file__, __version__, "
@@ -1656,6 +1659,9 @@ def _is_environ(m, node) -> bool:
 # F1 (R6-02): module objects. A module may be read (`m.attr`) and called (`m.f(...)`), and nothing else: binding it
 # to another name, handing it on, or storing through anything that is or may be a module withholds helper credit.
 MODULE_SOURCES = ("importlib", "imp", "gc", "ctypes", "inspect", "unittest.mock", "mock")   # hand out modules or namespaces
+# Modules that run code strings, code files or serialized calls: the same as exec under F1's run-time change rule.
+CODE_RUNNERS = ("timeit", "runpy", "cProfile", "profile", "pdb", "bdb", "code", "codeop", "pickle", "_pickle",
+                "marshal", "shelve", "doctest", "trace", "dill", "cloudpickle", "pickletools", "copyreg")
 SYS_SOURCES = {"modules", "_getframe", "_current_frames", "_current_exceptions", "meta_path", "path_hooks",
                "path_importer_cache", "settrace", "setprofile"}
 FRAME_ATTRS = {"f_globals", "f_locals", "f_builtins", "f_back", "f_code", "tb_frame", "tb_next", "gi_frame", "cr_frame",
@@ -1769,6 +1775,15 @@ class _ModuleUses:
             return self.idx.resolve(self.m, v.func)[0] in ("def", "class")
         return False
 
+    def call_held(self, e):
+        """e is an attribute (or item) of what an outside call returned (`pkgutil.resolve_name('sys').path`): the
+        call may return a module, so e may be an object a module holds. A repo call or a builtin constructor is not."""
+        attr = False
+        while isinstance(e, (ast.Attribute, ast.Subscript)):
+            attr = attr or isinstance(e, ast.Attribute)
+            e = e.value
+        return attr and isinstance(e, ast.Call) and not self.safe_value(e)
+
     def may_be_module(self, e, node):
         """F1: whether the object an attribute is stored on (or set or deleted with setattr/delattr) is, or may be,
         a module. A base the audit cannot resolve counts as may-be-a-module."""
@@ -1840,6 +1855,10 @@ class _ModuleUses:
             for a in n.names:
                 if a.name.split(".")[0] in MODULE_SOURCES or a.name in MODULE_SOURCES:
                     return f"imports {a.name}, which hands out modules or their namespaces"
+                if a.name.split(".")[0] in CODE_RUNNERS:
+                    return f"imports {a.name}, which runs code strings or files (the same as exec)"
+        if isinstance(n, ast.ImportFrom) and not n.level and n.module and n.module.split(".")[0] in CODE_RUNNERS:
+            return f"imports from {n.module}, which runs code strings or files (the same as exec)"
         if isinstance(n, ast.ImportFrom) and not n.level and n.module:
             if n.module.split(".")[0] in MODULE_SOURCES or n.module in MODULE_SOURCES or \
                     any(f"{n.module}.{a.name}" in MODULE_SOURCES for a in n.names):
@@ -1870,13 +1889,13 @@ class _ModuleUses:
                 return "vars() of something that is, or may be, a module"
         if isinstance(n, (ast.Attribute, ast.Subscript)) and isinstance(n.ctx, (ast.Store, ast.Del)):
             if isinstance(n, ast.Subscript):
-                if self.kind(n.value) and not self.environ(n.value):
+                if (self.kind(n.value) or self.call_held(n.value)) and not self.environ(n.value):
                     return "stores into an object held by a module"
             elif self.may_be_module(n.value, n):
                 return (f"sets or deletes .{n.attr} on something that is, or may be, a module "
                         f"({m.src(n.value)[:40]})")
         if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr in MUTATORS and \
-                self.kind(n.func.value) and not self.environ(n.func.value) and not self.own_folder_on_path(n):
+                (self.kind(n.func.value) or self.call_held(n.func.value)) and not self.environ(n.func.value) and not self.own_folder_on_path(n):
             return f"changes an object held by a module ({m.src(n.func)[:40]})"
         if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load) and n.id in self.kinds:
             return self.escape(n)
