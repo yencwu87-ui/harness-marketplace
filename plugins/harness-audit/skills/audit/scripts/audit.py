@@ -1159,29 +1159,9 @@ def canonical_forms_text() -> str:
 
 
 def _binds(tree, name, skip=()):
-    """Every node in tree that binds `name`: assignments, deletions, imports (`as`), def and class names, `except ... as`,
-    match captures, global and nonlocal declarations, and parameters (except the nodes in `skip`)."""
-    out = []
-    for n in ast.walk(tree):
-        if n in skip:
-            continue
-        if isinstance(n, ast.Name) and n.id == name and isinstance(n.ctx, (ast.Store, ast.Del)):
-            out.append(n)
-        elif isinstance(n, ast.alias) and (n.asname or n.name.split(".")[0]) == name:
-            out.append(n)
-        elif isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and n.name == name:
-            out.append(n)
-        elif isinstance(n, ast.ExceptHandler) and n.name == name:
-            out.append(n)
-        elif isinstance(n, (ast.Global, ast.Nonlocal)) and name in n.names:
-            out.append(n)
-        elif isinstance(n, ast.arg) and n.arg == name:
-            out.append(n)
-        elif type(n).__name__ in ("MatchAs", "MatchStar") and getattr(n, "name", None) == name:
-            out.append(n)
-        elif type(n).__name__ == "MatchMapping" and getattr(n, "rest", None) == name:
-            out.append(n)
-    return out
+    """Every node anywhere in tree that binds `name` (any form _binding_names knows), nested namespaces included,
+    except the nodes in `skip`: for the rules that count bindings file-wide (a name bound once in the file)."""
+    return [n for n in ast.walk(tree) if n not in skip and name in _binding_names(n)]
 
 
 def _assigned_once(tree, name) -> bool:
@@ -1353,12 +1333,202 @@ def _rebound(fn, name, path=()):
     return None
 
 
-def _parents(fn) -> dict:
+# ------------------------------------------------------------------ lexical namespaces (1.4.10: one walker)
+# Every rule that asks where a node lives, or what binds a name, asks these helpers and nothing else (a test fails on
+# a direct parent lookup or a loop over a class body anywhere else). A namespace is the module, a class body, a
+# function or a lambda. if, try/except/except*/else/finally, for, while, with and match make none, whatever their
+# depth. A def's decorators, defaults and annotations, and a class's bases and keywords, are read in the namespace
+# around it. A comprehension is read as part of the namespace around it, so its targets count as bindings there (a
+# superset of what Python binds: a rule that needs every binding sees too many, never too few).
+NAMESPACES = (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
+FUNCTIONS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
+
+
+def _parents(tree) -> dict:
     out = {}
-    for p in ast.walk(fn):
+    for p in ast.walk(tree):
         for c in ast.iter_child_nodes(p):
             out[c] = p
     return out
+
+
+def _parents_of(m) -> dict:
+    if getattr(m, "_parents", None) is None:
+        m._parents = _parents(m.tree)
+    return m._parents
+
+
+def _context(node, parents):
+    """The node's direct syntactic parent: for reading the expression or statement it sits in (the call it is an
+    argument of, the assignment it is a target of). Never for a namespace question: _namespace, _enclosing_function,
+    _param_owner, _bindings and _lookup answer those."""
+    return parents.get(node)
+
+
+def _in_own(ns, child, below, start) -> bool:
+    """child, a direct child of the namespace node ns, holds start in ns's own namespace (below is the node under
+    child on the way from start, or None when child is start)."""
+    if isinstance(ns, ast.Module):
+        return True
+    if isinstance(ns, ast.ClassDef):
+        return any(child is st for st in ns.body)
+    if isinstance(ns, ast.Lambda) and child is ns.body:
+        return True
+    if isinstance(ns, (ast.FunctionDef, ast.AsyncFunctionDef)) and (
+            any(child is st for st in ns.body) or any(child is t for t in getattr(ns, "type_params", ()))):
+        return True
+    return child is ns.args and isinstance(below, ast.arg) and below is start      # a parameter, not its annotation
+
+
+def _namespace(node, parents):
+    """R8-03, 1.4.10: the lexical namespace node belongs to (the module, a class, a function or a lambda), through
+    every compound statement at any depth; a def's decorators, defaults and annotations and a class's bases belong
+    to the namespace around it. None for the module itself."""
+    below, child, p = None, node, parents.get(node)
+    while p is not None:
+        if isinstance(p, NAMESPACES) and _in_own(p, child, below, node):
+            return p
+        below, child, p = child, p, parents.get(p)
+    return None
+
+
+def _enclosing_function(node, parents):
+    """The nearest function or lambda namespace around node, passing class namespaces; None at module level."""
+    ns = _namespace(node, parents)
+    while ns is not None and not isinstance(ns, FUNCTIONS):
+        ns = _namespace(ns, parents)
+    return ns
+
+
+def _param_owner(arg, parents):
+    """The function or lambda whose own parameter the ast.arg node is, or None."""
+    ns = _namespace(arg, parents)
+    if isinstance(ns, FUNCTIONS) and any(arg is a for a in ns.args.posonlyargs + ns.args.args + ns.args.kwonlyargs +
+                                         [x for x in (ns.args.vararg, ns.args.kwarg) if x is not None]):
+        return ns
+    return None
+
+
+def _own_nodes(ns):
+    """Every node in ns's own namespace, in source order: its statements through every compound statement, its own
+    parameters, and of a nested def, class or lambda only what is evaluated here (the node itself, its decorators,
+    defaults, annotations, bases and keywords), never the nested body."""
+    if isinstance(ns, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+        a = ns.args
+        todo = [x for x in a.posonlyargs + a.args + [a.vararg] + a.kwonlyargs + [a.kwarg] if x is not None]
+        todo += [ns.body] if isinstance(ns, ast.Lambda) else list(getattr(ns, "type_params", ())) + list(ns.body)
+    else:
+        todo = list(ns.body)
+    todo.reverse()
+    while todo:
+        n = todo.pop()
+        yield n
+        if isinstance(n, ast.arg):
+            continue                                   # an own parameter; its annotation is read outside
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            a = n.args
+            more = [d for d in a.defaults + a.kw_defaults if d is not None] + [
+                x.annotation for x in a.posonlyargs + a.args + [a.vararg] + a.kwonlyargs + [a.kwarg]
+                if x is not None and x.annotation is not None]
+            if not isinstance(n, ast.Lambda):
+                more = list(n.decorator_list) + more + ([n.returns] if n.returns is not None else [])
+        elif isinstance(n, ast.ClassDef):
+            more = list(n.decorator_list) + list(n.bases) + list(n.keywords)
+        else:
+            more = list(ast.iter_child_nodes(n))
+        todo.extend(reversed(more))
+
+
+def _binding_names(n) -> tuple:
+    """The names the node n binds: a Name stored or deleted, an import alias, a def or class name, `except ... as`,
+    a parameter, global and nonlocal declarations, match captures, type parameters."""
+    if isinstance(n, ast.Name) and isinstance(n.ctx, (ast.Store, ast.Del)):
+        return (n.id,)
+    if isinstance(n, ast.alias):
+        return (n.asname or n.name.split(".")[0],)
+    if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return (n.name,)
+    if isinstance(n, ast.ExceptHandler) and n.name:
+        return (n.name,)
+    if isinstance(n, (ast.Global, ast.Nonlocal)):
+        return tuple(n.names)
+    if isinstance(n, ast.arg):
+        return (n.arg,)
+    if type(n).__name__ in ("MatchAs", "MatchStar", "TypeVar", "ParamSpec", "TypeVarTuple") and getattr(n, "name", None):
+        return (n.name,)
+    if type(n).__name__ == "MatchMapping" and getattr(n, "rest", None):
+        return (n.rest,)
+    return ()
+
+
+def _bindings(ns, name) -> list:
+    """Every node in ns's own namespace that binds `name` (any form _binding_names knows), through every compound
+    statement; a star import counts as binding every name."""
+    return [n for n in _own_nodes(ns) if name in _binding_names(n) or (isinstance(n, ast.alias) and n.name == "*")]
+
+
+def _lookup(node, name, parents):
+    """(namespace, bindings): where Python reads `name` at node. The innermost namespace around node that binds it,
+    passing class namespaces other than the first (a method does not see its class's names); else the module, with
+    no bindings when nothing binds it. At module level every `global name` declaration in the file is added, since a
+    function that declares it binds the module's name. A global or nonlocal declaration stays in the bindings: callers
+    treat it as a binding they cannot read."""
+    ns, first = _namespace(node, parents), True
+    while ns is not None:
+        if isinstance(ns, ast.Module):
+            return ns, _bindings(ns, name) + [n for n in ast.walk(ns) if isinstance(n, ast.Global) and name in n.names]
+        if first or not isinstance(ns, ast.ClassDef):
+            found = _bindings(ns, name)
+            if found:
+                return ns, found
+        first, ns = False, _namespace(ns, parents)
+    return None, []
+
+
+def _binding_source(b, parents):
+    """How the binding node b gets its value:
+    ('value', expr)  b is a whole target of an assignment (chained targets too), an annotated assignment or a walrus;
+    ('part', expr)   b receives part of what expr gives: an unpacked item, a for or comprehension element, a with's
+                     entered value, a match capture of the subject;
+    ('aug', expr)    an augmented assignment (`b += expr`: a mutable object keeps its identity);
+    ('none', None)   no value: a deletion, or an annotation without one;
+    ('other', None)  any other binding: an import, def, class, except, parameter, global or nonlocal declaration."""
+    t, p, part = b, parents.get(b), False
+    if type(b).__name__ in ("MatchAs", "MatchStar", "MatchMapping"):
+        while p is not None and not isinstance(p, ast.match_case):
+            p = parents.get(p)
+        m = parents.get(p) if p is not None else None
+        return ("part", m.subject) if isinstance(m, ast.Match) else ("other", None)
+    if isinstance(b, ast.Name) and isinstance(b.ctx, ast.Del):
+        return "none", None
+    if not isinstance(b, ast.Name):
+        return "other", None
+    while isinstance(p, (ast.Tuple, ast.List, ast.Starred)):
+        t, p, part = p, parents.get(p), True
+    if isinstance(p, ast.Assign) and any(t is x for x in p.targets):
+        return ("part" if part else "value"), p.value
+    if isinstance(p, ast.AnnAssign) and p.target is t:
+        return ("value", p.value) if p.value is not None else ("none", None)
+    if isinstance(p, ast.NamedExpr) and p.target is t:
+        return "value", p.value
+    if isinstance(p, ast.AugAssign) and p.target is t:
+        return "aug", p.value
+    if isinstance(p, (ast.For, ast.AsyncFor, ast.comprehension)) and p.target is t:
+        return "part", p.iter
+    if isinstance(p, ast.withitem) and p.optional_vars is t:
+        return "part", p.context_expr
+    return "other", None
+
+
+def _store_value(target, parents):
+    """The value an attribute or item store gives (chained targets too), or None when the store form gives none the
+    audit reads (augmented, unpacking, for, with, deletion)."""
+    p = parents.get(target)
+    if isinstance(p, ast.Assign) and any(target is x for x in p.targets):
+        return p.value
+    if isinstance(p, ast.AnnAssign) and p.target is target:
+        return p.value
+    return None
 
 
 def _chain_top(node, parents):
@@ -3109,17 +3279,6 @@ def _sdk_options_changed(idx, mod, call) -> str:
     return _client_options_read(idx, mod)
 
 
-def _namespace(node, parents):
-    """R8-03: the lexical namespace a definition or statement belongs to: the nearest enclosing function, lambda,
-    class or module. if, try/except/else/finally, for, while, with and match make no namespace, so they are passed
-    through whatever their depth."""
-    p = parents.get(node)
-    while p is not None and not isinstance(p, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef,
-                                               ast.Module)):
-        p = parents.get(p)
-    return p
-
-
 def _returned_whole(idx, mod, ret, parents) -> str:
     """F5: options returned by a function count only when every use of that function, here and in other files, is a
     call whose result is passed whole to the SDK; '' when so."""
@@ -3166,12 +3325,6 @@ def _imported_elsewhere(idx, mod, name) -> str:
                     and n.args and idx.resolve(m, n.args[0])[:2] == ("module", mod):
                 return f"{m.where(n)} reads names of {mod.rel} with {n.func.id}(), so its hooks may change"
     return ""
-
-
-def _parents_of(m) -> dict:
-    if getattr(m, "_parents", None) is None:
-        m._parents = _parents(m.tree)
-    return m._parents
 
 
 def _client_options_read(idx, mod) -> str:
