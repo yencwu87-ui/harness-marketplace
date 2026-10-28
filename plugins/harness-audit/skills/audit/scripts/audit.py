@@ -914,7 +914,8 @@ CANONICAL_FORMS = (
      "the SDK (ClaudeSDKClient, query), returned from a named, undecorated function every use of which is a call passed whole "
      "to the SDK, or bound to one name by a plain or annotated assignment at module level or as a function local "
      "(1.4.8: a binding in a class namespace, nested classes included, an instance or class attribute, a default, "
-     "or options returned by a function defined in a class namespace, is UNRESOLVED; 1.4.7: any other binding form, such as a walrus, for or with target, unpacking, a chained assignment, an attribute or "
+     "or options returned by a function defined in a class namespace, is UNRESOLVED (1.4.9: the namespace is the "
+     "nearest enclosing function, class or module, through if, try, for, while, with and match at any depth); 1.4.7: any other binding form, such as a walrus, for or with target, unpacking, a chained assignment, an attribute or "
      "item target, a display, a default or another call, is UNRESOLVED). A bound name is bound once in the module, "
      "counting every binding form (plain, annotated or augmented assignment, a bare annotation, walrus, for, with, "
      "except, match, import, global, nonlocal, del, def, class, comprehension), and is only passed whole to the "
@@ -2652,7 +2653,7 @@ def _returned_whole(idx, mod, ret, parents) -> str:
     if fn.decorator_list:
         return (f"{mod.where(fn)} `{fn.name}`, which returns the options, has a decorator, which may replace what "
                 "it returns")
-    if isinstance(parents.get(fn), ast.ClassDef):
+    if isinstance(_namespace(fn, parents), ast.ClassDef):
         return (f"{mod.where(fn)} the options are returned by `{fn.name}`, defined in a class namespace, so callers "
                 "the audit cannot follow may change them")
     if len(_binds(mod.tree, fn.name)) != 1:
@@ -2950,6 +2951,17 @@ def judge_agent(agent) -> dict:
     out = {}
     for cid, cats in (("G1", G1_CATS), ("G2", G2_CATS), ("G3", G3_CATS)):
         bad, unclear, good = [], [], []
+def _namespace(node, parents):
+    """R8-03: the lexical namespace a definition or statement belongs to: the nearest enclosing function, lambda,
+    class or module. if, try/except/else/finally, for, while, with and match make no namespace, so they are passed
+    through whatever their depth."""
+    p = parents.get(node)
+    while p is not None and not isinstance(p, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef,
+                                               ast.Module)):
+        p = parents.get(p)
+    return p
+
+
         if problem:
             unclear.append(problem)
         for name, reach, tguards in tools:
