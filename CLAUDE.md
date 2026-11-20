@@ -8,7 +8,7 @@ A Claude Code plugin marketplace (`.claude-plugin/marketplace.json`, `plugins/`)
 
 ## Hard rules
 - Never read or print secrets: `.env*`, `*.key`, `*.pem`, credential folders.
-- Never push, force-push, `reset --hard` or rewrite history. Commit locally only.
+- Never force-push, `reset --hard` or rewrite history. Push only when the owner asks for that push in her own words in the session; otherwise commit locally only.
 - Never mark work done without checking its `done_when`.
 - Never claim a percentage improvement or a certification. A passing audit means files exist, not that they work.
 - Keep plugin `name` fields identical to their marketplace entries.
