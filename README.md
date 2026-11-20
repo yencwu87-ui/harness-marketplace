@@ -8,6 +8,8 @@
 
 AI coding agents are good at writing code and bad at long tasks: they lose their place between sessions, read what they shouldn't, and say "done" without proof. A harness is the work around the model: context, state, verification, guardrails and recovery. This repository gives you that harness in two forms.
 
+**3D world:** [`docs/media/3d-world.html`](docs/media/3d-world.html) is an animated three.js view of this marketplace and Agent Company. Each plugin is a building; click one for its figures from this repo. Download it and open it in a browser, since GitHub shows HTML as source.
+
 ## 1. Claude Code plugins (install in one minute)
 
 ```text
