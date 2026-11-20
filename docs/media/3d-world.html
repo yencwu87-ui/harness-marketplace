@@ -103,7 +103,7 @@
   <pre><button class="cp">Copy</button>git clone https://github.com/yencwu87-ui/agent-company.git
 cd agent-company
 python3 agent_company.py launch</pre>
-  <p style="margin-top:6px">launch opens the live 3D World in your browser and walks a repo through six steps.</p>
+  <p style="margin-top:6px">launch opens the live 3D World in your browser and walks a repo through six steps. It needs Python 3.9 or later, and git.</p>
   <div class="step"><em>3</em>Suggested order for a repo</div>
   <p style="margin-top:2px">audit → init → core → redteam → audit again (from the marketplace README).</p>
   <div style="text-align:right;margin-top:10px"><button class="btn dark" id="closeM">Done</button></div>
@@ -148,21 +148,21 @@ const WORLDS={
   title:'Agent Company',
   src:'Snapshot of github.com/yencwu87-ui/agent-company, main at 0352da7 (v0.6.1): README, tests and docs/ops/council, read 20 Nov 2026',
   chips:{
-   L:[['version','Version','0.6.1',C.blue,'keep'],['classes','Classes','8',C.purple,'herald'],['harness','Harness pieces','6 / 6',C.orange,'forge'],['council','Council rounds','7',C.teal,'council']],
+   L:[['version','Version','0.6.1',C.blue,'keep'],['roles','Roles','8',C.purple,'herald'],['harness','Harness pieces','6',C.orange,'forge'],['council','Council rounds','7',C.teal,'council']],
    R:[['tests','Unit tests','133',C.teal,'vault'],['guard','Guard & rule cases','590',C.coral,'vault'],['ui','Browser checks','45',C.blue,'evaluator'],['world','World steps','6',C.purple,'world']]
   },
   ents:{
-   keep:{n:"Owner's Keep",i:'crown',c:C.blue,rows:[['Role','Owner (a person)'],['Keeps','Direction, judgement, repair'],['Code PRs waiting, cap','2'],['Review rounds, cap','3'],['Agents may merge','Never','bad']],note:'The only path into a protected branch is the owner merging.'},
-   herald:{n:'Herald · Chief of staff',i:'pen',c:C.purple,rows:[['Turns goals into','Numbered instructions'],['Template','instruction.md'],['Must carry','Owner’s words, branch, tests'],['Stop point','“Don’t merge”']],note:'Builds or merges: never.'},
-   coord:{n:'Raid Leader · Coordinator',i:'inbox',c:C.blue,rows:[['Coordinators allowed','Exactly 1'],['Inbox order','By number'],['Worktrees','1 per instruction'],['STATUS.md','Rewritten every step'],['Templates','5'],['Background runner','run . --tool claude'],['Runner stops on','Kill switch or stop file']],note:'Templates: instruction, status, report, council, declaration card. The runner does one instruction, then stops. It never merges.'},
-   builder:{n:'Artificer · Builder',i:'hammer',c:C.orange,rows:[['Branches each','1'],['Order','Failing tests first'],['Then','Upload, pull request, brief'],['Reviews own work','Never','bad']],note:'One builder per branch. It stops at the pull request.'},
-   rogue:{n:'Rogue · Challenger',i:'bug',c:C.coral,rows:[['Job','Tries to break the work'],['With','Failing tests, counter-examples'],['Fixes','Never','bad']]},
-   evaluator:{n:'Paladin · Evaluator',i:'shield',c:C.teal,rows:[['Reviews from','A clean checkout'],['Vendor','Different from builder'],['Browser checks','45'],['Edits builder branch','Never','bad']],note:'The readiness ring warns when evaluator and builder share a tool.'},
-   scribe:{n:'Scribe · Claims officer',i:'pen',c:C.purple,rows:[['Checks','Every public sentence'],['Against','The evidence'],['Approves content','Never','bad']]},
-   watch:{n:'Ranger · Watch',i:'eye',c:C.greenDark,rows:[['Reads STATUS','2–3 times a day'],['Then','Queues next builder step'],['And','Pings the owner']],note:'A report older than a day is treated as possibly stale.'},
-   forge:{n:'The Forge · OpenProof harness',i:'flame',c:C.orange,rows:[['Pieces fitted','6 / 6','ok'],['Worktree Helm','Own worktree only'],['Deny-rule Plate','Secrets blocked'],['No-merge Gauntlets','No merge, no push to main'],['Allowlist Belt','Ticked tools only'],['Constructed-data Boots','No real data'],['Evidence Amulet','Every action logged'],['Travels with the repo','Committed files','ok']],note:'The deploy gate lifts only at six of six. Step 3 of the World is done only when the harness files are committed.'},
-   vault:{n:'Evidence Vault',i:'lock',c:C.teal,rows:[['Unit tests','133'],['Guard & rule cases','590'],['Browser checks','45'],['Ledger records','2'],['“Done” without evidence','Unknown','bad']],note:'Unit tests counted from tests/*.py on main. Guard cases and browser checks are the README figures.'},
-   council:{n:'Review Council',i:'scale',c:C.teal,rows:[['Rounds held','7'],['Span','0.5.0 → 0.6.0'],['Last verdict','Go with conditions'],['Option B score','6.5 / 10'],['Confidence','8 / 10'],['Seats abstained','1 (breaker)','bad']],note:'Last round: “Agent Company 0.6.0: default deny, the final council”.'},
+   keep:{n:'Owner',i:'crown',c:C.blue,rows:[['Role','Owner (a person)'],['Keeps','Direction, judgement, repair'],['Code PRs waiting, cap','2'],['Review rounds, cap','3'],['Agents may merge','Never','bad']],note:'The two caps are presets in the playbook that you adopt. In Claude Code the guard refuses a merge by an agent; branch protection on your Git host is the final stop.'},
+   herald:{n:'Chief of staff',i:'pen',c:C.purple,rows:[['Turns goals into','Numbered instructions'],['Template','instruction.md'],['Must carry','Owner’s words, branch, tests'],['Stop point','“Don’t merge”']],note:'Builds or merges: never.'},
+   coord:{n:'Coordinator',i:'inbox',c:C.blue,rows:[['Coordinators allowed','Exactly 1'],['Inbox order','By number'],['Worktrees','1 per instruction'],['STATUS.md','Rewritten every step'],['Templates','5'],['Background runner','run . --tool claude'],['Runner stops on','Kill switch or stop file']],note:'Templates: instruction, status, report, council, declaration card. The runner does one instruction, then stops. It has been tested with a stand-in tool only: a real claude -p or codex exec run has not been tried yet.'},
+   builder:{n:'Builder',i:'hammer',c:C.orange,rows:[['Branches each','1'],['Order','Failing tests first'],['Then','Upload, pull request, brief'],['Reviews own work','Never','bad']],note:'One builder per branch. It stops at the pull request.'},
+   rogue:{n:'Challenger',i:'bug',c:C.coral,rows:[['Job','Tries to break the work'],['With','Failing tests, counter-examples'],['Fixes','Never','bad']]},
+   evaluator:{n:'Evaluator',i:'shield',c:C.teal,rows:[['Reviews from','A clean checkout'],['A different vendor','Advised, with a warning'],['Browser checks','45'],['Edits builder branch','Never','bad']],note:'The readiness ring warns when evaluator and builder share a tool.'},
+   scribe:{n:'Claims officer',i:'pen',c:C.purple,rows:[['Role','Checks public words against the evidence'],['Command','agent_company.py claims'],['The command finds','7 claim words'],['Approves content','Never','bad']],note:'The command finds claim words. Checking a sentence against the evidence is the role’s own work and is not automated.'},
+   watch:{n:'Watch',i:'eye',c:C.greenDark,rows:[['Reads STATUS','2–3 times a day'],['Then','Queues next builder step'],['And','Pings the owner']],note:'A role you schedule with your own tool. Agent Company does not run the schedule. A report older than a day is treated as possibly stale.'},
+   forge:{n:'The Forge · OpenProof harness',i:'flame',c:C.orange,rows:[['Pieces','6'],['Worktree Helm','Writes outside the project refused'],['Deny-rule Plate','Listed secret paths refused'],['No-merge Gauntlets','Merge and push to main refused'],['Allowlist Belt','Unlisted MCP and web tools refused'],['Constructed-data Boots','Listed real-data paths never read'],['Evidence Amulet','Every tool call logged'],['Travels with the repo','Committed files','ok']],note:'The guard and the log are Claude Code hooks. Other tools get the written rules (AGENTS.md) and the git pre-push hook. The guard checks which program runs, not what a listed program then does. Step 3 of the World is done only when all six are enforced and the files are committed.'},
+   vault:{n:'Evidence Vault',i:'lock',c:C.teal,rows:[['Unit tests','133'],['Guard & rule cases','590'],['Browser checks','45'],['Records in this repo’s ledger','2'],['“Done” without evidence','Unknown','bad']],note:'Unit tests counted from tests/*.py on main. Guard cases and browser checks are the README figures.'},
+   council:{n:'Review Council',i:'scale',c:C.teal,rows:[['Rounds held','7'],['Span','0.5.0 → 0.6.0'],['Last verdict','Go with conditions'],['Option B score','6.5 / 10'],['Confidence','8 / 10'],['Seats abstained','1 (breaker)','bad']],note:'Last round: “Agent Company 0.6.0: default deny, the final council”. The council is a self-evaluation and approves nothing.'},
    world:{n:'The World · start screen',i:'grid',c:C.purple,rows:[['Opens with','agent_company.py launch'],['Steps','6'],['','Setup → Team → Harness'],['','Orders → Run → Proof'],['Reads the repo every','3 seconds'],['A step is done','Only after all earlier ones']],note:'On main since pull request #2. The Guild still opens with agent_company.py guild.'},
    van:{n:'Dispatch line',i:'truck',c:C.blue,rows:[['Route','Inbox → builder → challenger'],['Then','Evaluator → owner’s desk'],['Hand-offs','Files, not chat']]}
   }
@@ -176,12 +176,12 @@ const WORLDS={
   },
   ents:{
    hall:{n:'Marketplace Hall',i:'store',c:C.blue,rows:[['Plugins','4'],['Version','1.3.0'],['Owner','Yen-Ching Wu'],['Install','/plugin marketplace add']],note:'Suggested order: audit → init → core → redteam → audit again.'},
-   audit:{n:'harness-audit',i:'gauge',c:C.teal,rows:[['Areas scored','7'],['Score out of','100'],['Evidence','file:line per pass'],['Tests','7']],note:'Runs without Claude too: audit.py .'},
-   init:{n:'harness-init',i:'layers',c:C.orange,rows:[['Templates','10'],['Sets up','Work list, guard, ledger'],['Overwrites','Never','ok']]},
-   core:{n:'harness-core',i:'box',c:C.purple,rows:[['Skills','2 (resume, checkpoint)'],['Agents','2 (Haiku explore, Sonnet verifier)'],['Hooks','1 (failing output only)']]},
+   audit:{n:'harness-audit',i:'gauge',c:C.teal,rows:[['Areas scored','7'],['Score out of','100'],['Evidence','file:line per pass'],['Tests','7']],note:'Runs without Claude too: audit.py . A pass means the piece exists in files, not that it works.'},
+   init:{n:'harness-init',i:'layers',c:C.orange,rows:[['Template files','11'],['Sets up','Work list, guard, ledger'],['Overwrites','Never','ok']]},
+   core:{n:'harness-core',i:'box',c:C.purple,rows:[['Skills','2 (resume, checkpoint)'],['Agents','2 (Haiku explore, Sonnet verifier)'],['Hooks','1 (failing output only)']],note:'The hook needs jq.'},
    redteam:{n:'harness-redteam',i:'bug',c:C.coral,rows:[['Engines','promptfoo + DeepTeam'],['Mapped to','OWASP LLM & agentic'],['Live path tests','8'],['Self-test','Positive + negative control','ok']],note:'Attacks run through the real agent command, with canaries and a logging egress proxy.'},
    ledger:{n:'Evidence Ledger',i:'link',c:C.teal,rows:[['Chain','Hash-linked'],['Commands','approve · verify · check · reverify'],['Binding tests','22'],['All tests','37']],note:'Only verify sets “passes”. A weakened test needs fresh human approval.'},
-   kit:{n:'Multi-framework kit',i:'grid',c:C.purple,rows:[['Tracks','4'],['','Claude Code'],['','Claude Agent SDK'],['','Microsoft Agent Framework'],['','Google ADK']]},
+   kit:{n:'Multi-framework kit',i:'grid',c:C.purple,rows:[['Tracks','4'],['','Claude Code'],['','Claude Agent SDK'],['','Microsoft Agent Framework'],['','Google ADK']],note:'No track has been run end to end with a live model yet. That is work item M-003, still open.'},
    board:{n:'Work list',i:'list',c:C.coral,rows:[['Items','5'],['Passing','4','ok'],['Open','M-003','bad'],['M-003','Live model, end to end']],note:'Agents may change only passes, evidence and next_action.'},
    van:{n:'Plugin delivery',i:'truck',c:C.blue,rows:[['Carries','4 Claude Code plugins'],['From','.claude-plugin/marketplace.json']]}
   }
