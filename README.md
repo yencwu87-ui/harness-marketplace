@@ -1,5 +1,9 @@
 # Harness Marketplace
 
+[![Harness Marketplace in 3D: each plugin is a building](docs/media/3d-world.png)](docs/media/3d-world.html)
+
+**3D world:** an animated three.js view of this marketplace and Agent Company. Each plugin is a building; click one for its figures from this repo. The picture is a snapshot of `main` on 20 Nov 2026. To use it, download [`docs/media/3d-world.html`](docs/media/3d-world.html) and open it in a browser (GitHub shows HTML files as source), or open the [published copy](https://claude.ai/artifact/7Tus8GCnXPjYbHNH8T17ug).
+
 [![Build it with the free kit. Prove it with OpenProof.](docs/media/build-it-prove-it.jpg)](https://github.com/yencwu87-ui/harness-marketplace/releases/download/v1.3.0/OpenProof_harness_build_it_prove_it_share.mp4)
 
 *Build it with the free kit. Prove it with OpenProof. (OpenProof features shown are in final review.)*

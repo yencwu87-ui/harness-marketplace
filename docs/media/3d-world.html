@@ -1,0 +1,439 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent Company &amp; Harness Marketplace in 3D</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Newsreader:opsz,wght@6..72,400;6..72,500&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet">
+<style>
+  :root{--bg:#efeeea;--ink:#16181d;--mute:#7b7f88;--line:#d8d9dd;--red:#e0553b;--blue:#2f47e0;--teal:#2fae8c;--purple:#8c6cf2;--orange:#f2875a}
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);font-family:Inter,system-ui,sans-serif;overflow:hidden;-webkit-font-smoothing:antialiased}
+  #stage{position:fixed;inset:0}
+  canvas{display:block;touch-action:none}
+  #lines{position:fixed;inset:0;pointer-events:none;z-index:2}
+  header{position:fixed;top:0;left:0;right:0;text-align:center;padding:22px 16px 0;z-index:5;pointer-events:none}
+  .badge{display:inline-flex;align-items:center;gap:6px;background:#d9603f;color:#fff;font-weight:600;font-size:13px;padding:4px 10px 4px 8px;border-radius:7px;letter-spacing:.01em}
+  .badge i{width:7px;height:7px;border-radius:50%;background:#fff}
+  @keyframes pulse{50%{opacity:.25}}
+  h1{font-family:Newsreader,Georgia,serif;font-weight:400;font-size:clamp(30px,5vw,54px);margin:10px 0 4px;letter-spacing:-.01em}
+  .sub{color:var(--mute);font-size:14px;margin:0}
+  .tabs{display:inline-flex;gap:4px;margin-top:14px;background:#fff;border:1px solid var(--line);border-radius:999px;padding:4px;pointer-events:auto;box-shadow:0 4px 18px rgba(0,0,0,.05)}
+  .tabs button{border:0;background:none;font:600 13px Inter;padding:8px 14px;border-radius:999px;color:var(--mute);cursor:pointer}
+  .tabs button.on{background:var(--ink);color:#fff}
+  .chips{position:fixed;z-index:4;display:flex;flex-direction:column;gap:10px;top:50%;transform:translateY(-38%)}
+  .chips.l{left:22px}.chips.r{right:22px}
+  .chip{background:rgba(255,255,255,.86);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border:1px solid rgba(0,0,0,.05);border-radius:10px;padding:8px 12px 9px;min-width:132px;box-shadow:0 6px 22px rgba(30,30,50,.07);cursor:pointer;opacity:0;transform:translateY(8px);transition:opacity .5s,transform .5s}
+  .chip.in{opacity:1;transform:none}
+  .chip small{display:flex;align-items:center;gap:6px;color:var(--mute);font-size:11px}
+  .chip small i{width:6px;height:6px;border-radius:50%}
+  .chip b{display:block;font-size:19px;font-weight:700;margin-top:1px;letter-spacing:-.01em}
+  .card{position:fixed;z-index:6;width:264px;background:rgba(255,255,255,.78);backdrop-filter:blur(18px) saturate(1.3);-webkit-backdrop-filter:blur(18px) saturate(1.3);border:1px solid rgba(255,255,255,.9);border-radius:16px;padding:16px 18px 14px;box-shadow:0 18px 50px rgba(30,30,60,.16);opacity:0;transform:scale(.96);transition:opacity .25s,transform .25s;pointer-events:none}
+  .card.show{opacity:1;transform:none;pointer-events:auto}
+  .card .hd{display:flex;gap:10px;align-items:center;margin-bottom:10px}
+  .ic{width:34px;height:34px;border-radius:50%;display:grid;place-items:center;flex:none}
+  .ic svg{width:18px;height:18px;fill:none;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
+  .card h3{margin:0;font-size:16px;font-weight:700;line-height:1.15}
+  .live{font:600 9.5px Inter;letter-spacing:.12em;color:var(--red);display:flex;align-items:center;gap:4px;margin-top:2px}
+  .live:before{content:"";width:5px;height:5px;border-radius:50%;background:currentColor}
+  .row{display:flex;justify-content:space-between;gap:12px;font-size:13px;padding:5px 0;align-items:baseline}
+  .row span{color:var(--mute)}
+  .row b{font-weight:700;text-align:right}
+  .row b.bad{color:var(--red)}
+  .row b.ok{color:var(--teal)}
+  .note{font-size:11.5px;color:var(--mute);border-top:1px solid rgba(0,0,0,.07);margin-top:8px;padding-top:8px;line-height:1.45}
+  .x{position:absolute;top:10px;right:12px;border:0;background:none;font-size:18px;color:var(--mute);cursor:pointer}
+  footer{position:fixed;left:0;right:0;bottom:0;z-index:5;display:flex;justify-content:space-between;align-items:center;gap:10px;padding:12px 18px;font-size:11.5px;color:var(--mute);pointer-events:none}
+  footer a{color:var(--mute)}
+  footer .r{display:flex;gap:8px;pointer-events:auto}
+  .btn{border:1px solid var(--line);background:#fff;border-radius:999px;font:600 12px Inter;padding:8px 13px;cursor:pointer;color:var(--ink)}
+  .btn.dark{background:var(--ink);color:#fff;border-color:var(--ink)}
+  .hint{position:fixed;left:50%;bottom:54px;transform:translateX(-50%);z-index:5;background:var(--ink);color:#fff;font:600 12px Inter;padding:8px 14px;border-radius:999px;opacity:0;transition:opacity .6s;pointer-events:none;white-space:nowrap}
+  .hint.in{opacity:.92}
+  .modal{position:fixed;inset:0;z-index:20;background:rgba(239,238,234,.6);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);display:none;align-items:center;justify-content:center;padding:16px}
+  .modal.show{display:flex}
+  .sheet{background:#fff;border-radius:18px;max-width:560px;width:100%;padding:22px 22px 18px;box-shadow:0 24px 70px rgba(0,0,0,.15);max-height:86vh;overflow:auto}
+  .sheet h2{font-family:Newsreader,serif;font-weight:400;font-size:28px;margin:0 0 4px}
+  .sheet p{color:var(--mute);font-size:13px;margin:4px 0 12px;line-height:1.5}
+  .step{display:flex;gap:10px;align-items:flex-start;margin:14px 0 6px;font-weight:600;font-size:14px}
+  .step em{font-style:normal;width:24px;height:24px;border-radius:50%;background:#d9603f;color:#fff;display:grid;place-items:center;font-size:12px;flex:none}
+  pre{background:#16181d;color:#e9ecf2;border-radius:10px;padding:12px 14px;font:500 12px/1.6 'JetBrains Mono',monospace;overflow:auto;margin:6px 0 0;position:relative;white-space:pre}
+  .cp{position:absolute;top:8px;right:8px;background:#2b2f38;color:#fff;border:0;border-radius:6px;font:600 11px Inter;padding:4px 8px;cursor:pointer}
+  @media (max-width:760px){
+    header{padding-top:14px}
+    .sub{display:none}
+    .chips{flex-direction:row;flex-wrap:wrap;gap:6px;top:auto;transform:none;width:calc(50% - 14px)}
+    .chips.l{left:10px;top:150px}.chips.r{right:10px;top:150px;justify-content:flex-end}
+    .chip{min-width:0;flex:1 1 calc(50% - 6px);padding:6px 8px 7px}
+    .chip b{font-size:15px}.chip small{font-size:9.5px}
+    .card{left:12px!important;right:12px;width:auto;top:auto!important;bottom:62px}
+    footer .src{display:none}
+  }
+</style>
+<script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"}}</script>
+</head>
+<body>
+<div id="stage"></div>
+<svg id="lines"></svg>
+<header>
+  <span class="badge"><i></i>Snapshot of GitHub main · 20 Nov 2026</span>
+  <h1 id="title">Agent Company</h1>
+  <p class="sub" id="sub">Click any building for its real numbers. Drag to turn, pinch or scroll to zoom.</p>
+  <div class="tabs"><button data-w="company" class="on">Agent Company</button><button data-w="market">Harness Marketplace</button></div>
+</header>
+<div class="chips l" id="chipsL"></div>
+<div class="chips r" id="chipsR"></div>
+<div class="card" id="card"></div>
+<div class="hint" id="hint">Tap a building</div>
+<footer>
+  <span class="src" id="src"></span>
+  <span class="r"><button class="btn" id="reset">Reset view</button><button class="btn dark" id="install">Install the skills</button></span>
+</footer>
+<div class="modal" id="modal"><div class="sheet">
+  <h2>Install the skills</h2>
+  <p>Run these on your own computer. Both come from your public repos on GitHub.</p>
+  <div class="step"><em>1</em>Harness Marketplace (in Claude Code)</div>
+  <pre><button class="cp">Copy</button>/plugin marketplace add yencwu87-ui/harness-marketplace
+/plugin install harness-audit@harness-marketplace
+/plugin install harness-init@harness-marketplace
+/plugin install harness-core@harness-marketplace
+/plugin install harness-redteam@harness-marketplace</pre>
+  <div class="step"><em>2</em>Agent Company (Terminal)</div>
+  <pre><button class="cp">Copy</button>git clone https://github.com/yencwu87-ui/agent-company.git
+cd agent-company
+python3 agent_company.py launch</pre>
+  <p style="margin-top:6px">launch opens the live 3D World in your browser and walks a repo through six steps. It needs Python 3.9 or later, and git.</p>
+  <div class="step"><em>3</em>Suggested order for a repo</div>
+  <p style="margin-top:2px">audit → init → core → redteam → audit again (from the marketplace README).</p>
+  <div style="text-align:right;margin-top:10px"><button class="btn dark" id="closeM">Done</button></div>
+</div></div>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
+
+/* ---------- palette (sampled from the reference) ---------- */
+const C={slab:0xf2f3f6,slabSide:0xdfe2e8,road:0xe2e5ea,dash:0xffffff,blue:0x2f47e0,blueDark:0x1d2b78,panel:0x1a2350,teal:0x34b996,tealLight:0xa8ead7,purple:0x8c6cf2,orange:0xf2875a,coral:0xef6b4f,green:0x63c46f,greenDark:0x3f9a58,trunk:0x9b7b5b,crate:0xd9b27c,white:0xffffff,grey:0xc9ced6,dark:0x2a2f3a,yellow:0xf4c542,red:0xe0553b,cream:0xf7f2e8};
+
+/* ---------- icons ---------- */
+const P={
+ user:'<circle cx="12" cy="8" r="3.5"/><path d="M5 20c1.2-3.6 4-5 7-5s5.8 1.4 7 5"/>',
+ crown:'<path d="M4 18h16M5 15l-1-8 5 4 3-6 3 6 5-4-1 8z"/>',
+ inbox:'<path d="M4 13l2-7h12l2 7v5H4z"/><path d="M4 13h5l1 2h4l1-2h5"/>',
+ hammer:'<path d="M14 4l6 6-3 3-6-6zM11 7l-7 7 3 3 7-7"/>',
+ shield:'<path d="M12 3l7 3v5c0 4.5-3 8-7 10-4-2-7-5.5-7-10V6z"/><path d="M9 12l2 2 4-4"/>',
+ bug:'<circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="4"/><circle cx="12" cy="12" r=".8"/>',
+ pen:'<path d="M4 20l4-1 11-11-3-3L5 16z"/><path d="M14 6l3 3"/>',
+ eye:'<path d="M3 12s3.5-6 9-6 9 6 9 6-3.5 6-9 6-9-6-9-6z"/><circle cx="12" cy="12" r="2.5"/>',
+ flame:'<path d="M12 21c-4 0-6-2.6-6-6 0-4 4-6 4-10 3 2 3 4 3 6 1-1 2-2 2-4 2 2 3 4.5 3 8 0 3.4-2 6-6 6z"/>',
+ lock:'<rect x="5" y="10" width="14" height="10" rx="2"/><path d="M8 10V7a4 4 0 018 0v3"/>',
+ scale:'<path d="M12 4v16M7 20h10M5 7h14M5 7l-3 6h6zM19 7l-3 6h6z"/>',
+ store:'<path d="M4 9l1-5h14l1 5M4 9v11h16V9M4 9h16M9 20v-6h6v6"/>',
+ gauge:'<path d="M4 16a8 8 0 1116 0"/><path d="M12 16l4-5"/>',
+ layers:'<path d="M12 4l9 5-9 5-9-5z"/><path d="M3 14l9 5 9-5"/>',
+ box:'<path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><path d="M4 7.5l8 4.5 8-4.5M12 12v9"/>',
+ link:'<path d="M10 14a4 4 0 005.7 0l3-3a4 4 0 00-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 00-5.7 0l-3 3a4 4 0 005.7 5.7l1-1"/>',
+ grid:'<rect x="4" y="4" width="7" height="7" rx="1.5"/><rect x="13" y="4" width="7" height="7" rx="1.5"/><rect x="4" y="13" width="7" height="7" rx="1.5"/><rect x="13" y="13" width="7" height="7" rx="1.5"/>',
+ list:'<path d="M9 6h11M9 12h11M9 18h11"/><path d="M4 6l1 1 2-2M4 12l1 1 2-2"/><circle cx="5" cy="18" r="1"/>',
+ truck:'<path d="M3 7h11v9H3zM14 10h4l3 3v3h-7"/><circle cx="7" cy="17" r="1.8"/><circle cx="17" cy="17" r="1.8"/>'
+};
+const hex=n=>'#'+n.toString(16).padStart(6,'0');
+const icon=(k,col)=>`<span class="ic" style="background:${col}1f"><svg viewBox="0 0 24 24" style="stroke:${col}">${P[k]}</svg></span>`;
+
+/* ---------- a snapshot: figures read from the main branch of the two GitHub repos on 20 Nov 2026; the page does not refresh itself ---------- */
+const WORLDS={
+ company:{
+  title:'Agent Company',
+  src:'Snapshot of github.com/yencwu87-ui/agent-company, main at 0352da7 (v0.6.1): README, tests and docs/ops/council, read 20 Nov 2026',
+  chips:{
+   L:[['version','Version','0.6.1',C.blue,'keep'],['roles','Roles','8',C.purple,'herald'],['harness','Harness pieces','6',C.orange,'forge'],['council','Council rounds','7',C.teal,'council']],
+   R:[['tests','Unit tests','133',C.teal,'vault'],['guard','Guard & rule cases','590',C.coral,'vault'],['ui','Browser checks','45',C.blue,'evaluator'],['world','World steps','6',C.purple,'world']]
+  },
+  ents:{
+   keep:{n:'Owner',i:'crown',c:C.blue,rows:[['Role','Owner (a person)'],['Keeps','Direction, judgement, repair'],['Code PRs waiting, cap','2'],['Review rounds, cap','3'],['Agents may merge','Never','bad']],note:'The two caps are presets in the playbook that you adopt. In Claude Code the guard refuses a merge by an agent; branch protection on your Git host is the final stop.'},
+   herald:{n:'Chief of staff',i:'pen',c:C.purple,rows:[['Turns goals into','Numbered instructions'],['Template','instruction.md'],['Must carry','Owner’s words, branch, tests'],['Stop point','“Don’t merge”']],note:'Builds or merges: never.'},
+   coord:{n:'Coordinator',i:'inbox',c:C.blue,rows:[['Coordinators allowed','Exactly 1'],['Inbox order','By number'],['Worktrees','1 per instruction'],['STATUS.md','Rewritten every step'],['Templates','5'],['Background runner','run . --tool claude'],['Runner stops on','Kill switch or stop file']],note:'Templates: instruction, status, report, council, declaration card. The runner does one instruction, then stops. It has been tested with a stand-in tool only: a real claude -p or codex exec run has not been tried yet.'},
+   builder:{n:'Builder',i:'hammer',c:C.orange,rows:[['Branches each','1'],['Order','Failing tests first'],['Then','Upload, pull request, brief'],['Reviews own work','Never','bad']],note:'One builder per branch. It stops at the pull request.'},
+   rogue:{n:'Challenger',i:'bug',c:C.coral,rows:[['Job','Tries to break the work'],['With','Failing tests, counter-examples'],['Fixes','Never','bad']]},
+   evaluator:{n:'Evaluator',i:'shield',c:C.teal,rows:[['Reviews from','A clean checkout'],['A different vendor','Advised, with a warning'],['Browser checks','45'],['Edits builder branch','Never','bad']],note:'The readiness ring warns when evaluator and builder share a tool.'},
+   scribe:{n:'Claims officer',i:'pen',c:C.purple,rows:[['Role','Checks public words against the evidence'],['Command','agent_company.py claims'],['The command finds','7 claim words'],['Approves content','Never','bad']],note:'The command finds claim words. Checking a sentence against the evidence is the role’s own work and is not automated.'},
+   watch:{n:'Watch',i:'eye',c:C.greenDark,rows:[['Reads STATUS','2–3 times a day'],['Then','Queues next builder step'],['And','Pings the owner']],note:'A role you schedule with your own tool. Agent Company does not run the schedule. A report older than a day is treated as possibly stale.'},
+   forge:{n:'The Forge · OpenProof harness',i:'flame',c:C.orange,rows:[['Pieces','6'],['Worktree Helm','Writes outside the project refused'],['Deny-rule Plate','Listed secret paths refused'],['No-merge Gauntlets','Merge and push to main refused'],['Allowlist Belt','Unlisted MCP and web tools refused'],['Constructed-data Boots','Listed real-data paths never read'],['Evidence Amulet','Every tool call logged'],['Travels with the repo','Committed files','ok']],note:'The guard and the log are Claude Code hooks. Other tools get the written rules (AGENTS.md) and the git pre-push hook. The guard checks which program runs, not what a listed program then does. Step 3 of the World is done only when all six are enforced and the files are committed.'},
+   vault:{n:'Evidence Vault',i:'lock',c:C.teal,rows:[['Unit tests','133'],['Guard & rule cases','590'],['Browser checks','45'],['Records in this repo’s ledger','2'],['“Done” without evidence','Unknown','bad']],note:'Unit tests counted from tests/*.py on main. Guard cases and browser checks are the README figures.'},
+   council:{n:'Review Council',i:'scale',c:C.teal,rows:[['Rounds held','7'],['Span','0.5.0 → 0.6.0'],['Last verdict','Go with conditions'],['Option B score','6.5 / 10'],['Confidence','8 / 10'],['Seats abstained','1 (breaker)','bad']],note:'Last round: “Agent Company 0.6.0: default deny, the final council”. The council is a self-evaluation and approves nothing.'},
+   world:{n:'The World · start screen',i:'grid',c:C.purple,rows:[['Opens with','agent_company.py launch'],['Steps','6'],['','Setup → Team → Harness'],['','Orders → Run → Proof'],['Reads the repo every','3 seconds'],['A step is done','Only after all earlier ones']],note:'On main since pull request #2. The Guild still opens with agent_company.py guild.'},
+   van:{n:'Dispatch line',i:'truck',c:C.blue,rows:[['Route','Inbox → builder → challenger'],['Then','Evaluator → owner’s desk'],['Hand-offs','Files, not chat']]}
+  }
+ },
+ market:{
+  title:'Harness Marketplace',
+  src:'Snapshot of github.com/yencwu87-ui/harness-marketplace, main at d615f32 (v1.3.0): marketplace.json, CHANGELOG and progress/feature_list.json, read 20 Nov 2026',
+  chips:{
+   L:[['plugins','Plugins','4',C.blue,'hall'],['mtests','Tests','37',C.teal,'ledger'],['areas','Audit areas','7',C.orange,'audit'],['tracks','Framework tracks','4',C.purple,'kit']],
+   R:[['ver','Version','1.3.0',C.blue,'hall'],['work','Work list passing','4 / 5',C.coral,'board'],['bind','Binding tests','22',C.teal,'ledger'],['rt','Red-team tests','8',C.coral,'redteam']]
+  },
+  ents:{
+   hall:{n:'Marketplace Hall',i:'store',c:C.blue,rows:[['Plugins','4'],['Version','1.3.0'],['Owner','Yen-Ching Wu'],['Install','/plugin marketplace add']],note:'Suggested order: audit → init → core → redteam → audit again.'},
+   audit:{n:'harness-audit',i:'gauge',c:C.teal,rows:[['Areas scored','7'],['Score out of','100'],['Evidence','file:line per pass'],['Tests','7']],note:'Runs without Claude too: audit.py . A pass means the piece exists in files, not that it works.'},
+   init:{n:'harness-init',i:'layers',c:C.orange,rows:[['Template files','11'],['Sets up','Work list, guard, ledger'],['Overwrites','Never','ok']]},
+   core:{n:'harness-core',i:'box',c:C.purple,rows:[['Skills','2 (resume, checkpoint)'],['Agents','2 (Haiku explore, Sonnet verifier)'],['Hooks','1 (failing output only)']],note:'The hook needs jq.'},
+   redteam:{n:'harness-redteam',i:'bug',c:C.coral,rows:[['Engines','promptfoo + DeepTeam'],['Mapped to','OWASP LLM & agentic'],['Live path tests','8'],['Self-test','Positive + negative control','ok']],note:'Attacks run through the real agent command, with canaries and a logging egress proxy.'},
+   ledger:{n:'Evidence Ledger',i:'link',c:C.teal,rows:[['Chain','Hash-linked'],['Commands','approve · verify · check · reverify'],['Binding tests','22'],['All tests','37']],note:'Only verify sets “passes”. A weakened test needs fresh human approval.'},
+   kit:{n:'Multi-framework kit',i:'grid',c:C.purple,rows:[['Tracks','4'],['','Claude Code'],['','Claude Agent SDK'],['','Microsoft Agent Framework'],['','Google ADK']],note:'No track has been run end to end with a live model yet. That is work item M-003, still open.'},
+   board:{n:'Work list',i:'list',c:C.coral,rows:[['Items','5'],['Passing','4','ok'],['Open','M-003','bad'],['M-003','Live model, end to end']],note:'Agents may change only passes, evidence and next_action.'},
+   van:{n:'Plugin delivery',i:'truck',c:C.blue,rows:[['Carries','4 Claude Code plugins'],['From','.claude-plugin/marketplace.json']]}
+  }
+ }
+};
+
+/* ---------- renderer ---------- */
+const stage=document.getElementById('stage');
+const renderer=new THREE.WebGLRenderer({antialias:true,preserveDrawingBuffer:true});
+renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+renderer.shadowMap.enabled=true;renderer.shadowMap.type=THREE.PCFSoftShadowMap;
+renderer.outputColorSpace=THREE.SRGBColorSpace;
+stage.appendChild(renderer.domElement);
+const scene=new THREE.Scene();scene.background=new THREE.Color(0xefeeea);
+const camera=new THREE.PerspectiveCamera(26,1,0.5,400);
+const controls=new OrbitControls(camera,renderer.domElement);
+controls.enableDamping=true;controls.enablePan=false;controls.minPolarAngle=.55;controls.maxPolarAngle=1.12;controls.minDistance=34;controls.maxDistance=150;
+scene.add(new THREE.HemisphereLight(0xffffff,0xd6d2c8,1.35));
+const sun=new THREE.DirectionalLight(0xffffff,1.55);sun.position.set(18,34,14);sun.castShadow=true;
+sun.shadow.mapSize.set(2048,2048);Object.assign(sun.shadow.camera,{left:-34,right:34,top:34,bottom:-34,near:1,far:90});sun.shadow.bias=-0.0006;sun.shadow.radius=4;
+scene.add(sun);
+
+/* ---------- helpers ---------- */
+const matCache={};
+const M=(c,o={})=>{const k=c+JSON.stringify(o);return matCache[k]||(matCache[k]=new THREE.MeshStandardMaterial({color:c,roughness:.82,metalness:0,...o}))};
+function mesh(geo,col,x=0,y=0,z=0,parent,opt){const m=new THREE.Mesh(geo,M(col,opt));m.position.set(x,y,z);m.castShadow=true;m.receiveShadow=true;parent&&parent.add(m);return m}
+const box=(w,h,d,col,x,y,z,p,r=0.06)=>mesh(r?new RoundedBoxGeometry(w,h,d,2,r):new THREE.BoxGeometry(w,h,d),col,x,y+h/2,z,p);
+const cyl=(rt,rb,h,col,x,y,z,p,seg=24)=>mesh(new THREE.CylinderGeometry(rt,rb,h,seg),col,x,y+h/2,z,p);
+
+function windowsTex(base,win,cols=4,rows=8){const c=document.createElement('canvas');c.width=128;c.height=256;const g=c.getContext('2d');g.fillStyle=base;g.fillRect(0,0,128,256);g.fillStyle=win;const cw=128/cols,rh=256/rows;for(let i=0;i<cols;i++)for(let j=0;j<rows;j++)g.fillRect(i*cw+cw*.18,j*rh+rh*.22,cw*.64,rh*.5);const t=new THREE.CanvasTexture(c);t.colorSpace=THREE.SRGBColorSpace;return t}
+function tower(p,w,h,d,col,winCol,rows){const g=new THREE.Group();p.add(g);
+ const t=windowsTex(hex(col),winCol,4,rows);const side=new THREE.MeshStandardMaterial({map:t,roughness:.8});
+ const top=M(col);const m=new THREE.Mesh(new THREE.BoxGeometry(w,h,d),[side,side,top,top,side,side]);m.position.y=h/2;m.castShadow=m.receiveShadow=true;g.add(m);
+ box(w*.86,.25,d*.86,0xeef2f4,0,h,0,g,.04);box(w*.3,.5,d*.3,0xdfe4e8,w*.18,h+.25,0,g,.04);return g}
+function house(p,col,w=2.2,d=2.2,h=1.3){const g=new THREE.Group();p.add(g);box(w,h,d,0xf6f6f8,0,0,0,g,.05);
+ const roof=new THREE.Mesh(new THREE.CylinderGeometry(0,1,1,4,1),M(col));roof.scale.set(w*.78,1.1,d*.78);roof.rotation.y=Math.PI/4;roof.position.y=h+.55;roof.castShadow=true;g.add(roof);
+ box(.5,.75,.05,col,0,0,d/2+.01,g,0);return g}
+function warehouse(p,w,d,h,col){const g=new THREE.Group();p.add(g);box(w,h,d,col,0,0,0,g,.08);box(w+.2,.18,d+.2,C.blueDark,0,h,0,g,.05);
+ for(let i=0;i<5;i++)for(let j=0;j<2;j++){const s=box(w*.15,.08,d*.3,C.panel,-w*.38+i*w*.19,h+.18,-d*.2+j*d*.4,g,0);s.rotation.x=-.15}
+ for(let i=0;i<3;i++)box(w*.16,h*.62,.06,0xf3f4f8,-w*.28+i*w*.28,0,d/2+.02,g,0);
+ box(w*.12,.35,.06,C.orange,w*.42,h*.62,d/2+.02,g,0);return g}
+function tree(p,x,z,s=1,cone=false){const g=new THREE.Group();g.position.set(x,0,z);p.add(g);cyl(.07*s,.09*s,.5*s,C.trunk,0,0,0,g,8);
+ if(cone)mesh(new THREE.ConeGeometry(.42*s,1.1*s,10),C.greenDark,0,.5*s+.5*s,0,g);else mesh(new THREE.SphereGeometry(.42*s,16,12),C.green,0,.5*s+.32*s,0,g);return g}
+function lamp(p,x,z){cyl(.03,.03,1.2,0xb7bcc6,x,0,z,p,6);box(.25,.05,.12,0xb7bcc6,x+.1,1.2,z,p,0)}
+function van(p,col=0xffffff){const g=new THREE.Group();p.add(g);box(1.2,.55,.6,col,0,.12,0,g,.08);box(.32,.3,.56,C.dark,.42,.35,0,g,.04);
+ for(const a of[-.35,.35])for(const b of[-.3,.3]){const w=cyl(.13,.13,.08,0x22262e,a,0,b,g,12);w.rotation.x=Math.PI/2;w.position.y=.13}
+ box(.5,.06,.05,C.orange,-.2,.42,.31,g,0);return g}
+function crate(p,x,y,z,s=.42){return box(s,s,s,C.crate,x,y,z,p,.03)}
+function ring(p,col=C.orange){const m=new THREE.Mesh(new THREE.TorusGeometry(1,.05,8,64),new THREE.MeshBasicMaterial({color:col,transparent:true,opacity:.95}));m.rotation.x=-Math.PI/2;m.position.y=.06;p.add(m);return m}
+function road(p,x,z,w,d){box(w,.04,d,C.road,x,0,z,p,0);const n=Math.floor(Math.max(w,d)/1.4);for(let i=0;i<n;i++){if(w>d)box(.6,.02,.08,C.dash,x-w/2+.7+i*1.4,.04,z,p,0);else box(.08,.02,.6,C.dash,x,.04,z-d/2+.7+i*1.4,p,0)}}
+
+/* ---------- world construction ---------- */
+let world=null,clickables=[],anchors={},anim=[],vans=[],crates=[],build=[],selRing,currentKey='company',t0=0;
+function tag(g,id,h){g.userData.id=id;g.traverse(o=>{if(o.isMesh){o.userData.id=id;clickables.push(o)}});anchors[id]=anchors[id]||{g,h};build.push(g);return g}
+
+function slab(){const g=new THREE.Group();world.add(g);
+ mesh(new RoundedBoxGeometry(46,1.6,32,4,.5),C.slab,0,-.8,0,g);
+ const sd=mesh(new RoundedBoxGeometry(46.3,1.2,32.3,4,.5),C.slabSide,0,-1.05,0,g);sd.castShadow=false;
+ g.userData.base=true;return g}
+
+function buildCompany(){
+ // roads
+ road(world,0,7.5,44,2.2);road(world,-6,-1,2.2,15);
+ // Owner's keep (teal tower) — top of the dispatch line
+ const keep=tower(world,3,9,3,C.teal,'#c8f2e4',12);keep.position.set(10,0,-6);tag(keep,'keep',9.8);
+ // Coordinator inbox depot (blue warehouse)
+ const coord=warehouse(world,8,5,2.4,C.blue);coord.position.set(-13,0,-7);tag(coord,'coord',3);
+ crate(world,-9.6,0,-3.6);crate(world,-9.1,0,-3.6);crate(world,-9.35,.42,-3.6);crate(world,-16.5,0,-3.8);crate(world,-16,0,-3.8);
+ // dispatch line conveyor from depot to keep
+ const belt=new THREE.Group();world.add(belt);
+ box(17,.35,.9,0x8d939e,-.5,0,-3.2,belt,.05);for(let i=0;i<34;i++)cyl(.12,.12,.9,0x5f6570,-8.8+i*.5,.25,-3.2,belt,8).rotation.x=Math.PI/2;
+ box(.9,.35,6,0x8d939e,8.4,0,-5.7,belt,.05);
+ for(let i=0;i<6;i++){const c=crate(world,0,.45,0,.5);crates.push({m:c,o:i/6})}
+ // builder workshops, challenger, evaluator along the line
+ const b1=house(world,C.orange,2.4,2.2,1.4);b1.position.set(-4.5,0,-1);tag(b1,'builder',2.6);
+ const b2=house(world,C.orange,2.4,2.2,1.4);b2.position.set(-1.6,0,-1);tag(b2,'builder',2.6);
+ const rg=house(world,C.coral,2.2,2.2,1.3);rg.position.set(1.4,0,-1);tag(rg,'rogue',2.5);
+ const ev=house(world,C.teal,2.4,2.2,1.5);ev.position.set(4.4,0,-1);tag(ev,'evaluator',2.7);
+ // gauge on evaluator
+ const gauge=new THREE.Group();gauge.position.set(4.4,2.9,-1);world.add(gauge);const gd=mesh(new THREE.CylinderGeometry(.42,.42,.08,24),0xffffff,0,0,0,gauge);gd.rotation.x=Math.PI/2;
+ const nd=box(.05,.34,.04,C.red,0,0,.06,gauge,0);nd.geometry.translate(0,0,0);anim.push(t=>{nd.rotation.z=Math.sin(t*1.7)*1.1});
+ // herald + scribe offices
+ const he=house(world,C.purple,2.6,2.6,1.6);he.position.set(-15,0,2);tag(he,'herald',2.9);
+ const sc=house(world,C.purple,2.2,2.2,1.3);sc.position.set(16.5,0,1.5);tag(sc,'scribe',2.5);
+ // watchtower
+ const wt=new THREE.Group();wt.position.set(-19.5,0,-12);world.add(wt);
+ for(const a of[-.5,.5])for(const b of[-.5,.5]){const l=cyl(.08,.08,3.4,0xb9bec8,a,0,b,wt,6)}
+ box(1.7,.2,1.7,0xe8eaee,0,3.4,0,wt,.05);box(1.4,.9,1.4,C.greenDark,0,3.6,0,wt,.08);mesh(new THREE.ConeGeometry(1.15,.8,4),C.greenDark,0,4.9,0,wt).rotation.y=Math.PI/4;
+ const beam=new THREE.Mesh(new THREE.ConeGeometry(1.2,5,24,1,true),new THREE.MeshBasicMaterial({color:0xfff3b0,transparent:true,opacity:.28,side:THREE.DoubleSide,depthWrite:false}));beam.geometry.translate(0,-2.5,0);beam.rotation.z=Math.PI/2;
+ const bp=new THREE.Group();bp.position.y=4.1;bp.add(beam);wt.add(bp);anim.push(t=>bp.rotation.y=t*.9);tag(wt,'watch',5.4);
+ // forge: six stations
+ const forge=new THREE.Group();forge.position.set(-12,0,12.5);world.add(forge);box(11,.3,2.6,0xe6e8ed,0,0,0,forge,.08);
+ const fc=[C.blue,C.purple,C.orange,C.teal,C.coral,C.yellow];
+ for(let i=0;i<6;i++){const x=-4.4+i*1.76;box(1.2,.9,1.2,0xffffff,x,.3,0,forge,.06);const pi=box(.5,.5,.5,fc[i],x,1.9,0,forge,.05);box(.12,1,.12,0x9aa0aa,x,2.2,0,forge,0);
+  anim.push(t=>{const k=((t*1.2-i*.35)%4.2+4.2)%4.2;pi.position.y=2.15-(k<.5?Math.sin(k/.5*Math.PI)*.75:0)})}
+ box(.18,2,.18,0x9aa0aa,5.6,.3,-1,forge,0);box(.18,2,.18,0x9aa0aa,5.6,.3,1,forge,0);const gate=box(.12,1.2,2,C.teal,5.6,.3,0,forge,.03);anim.push(t=>{gate.position.y=.9+(Math.sin(t*.7)>.6?1:0)*.9});tag(forge,'forge',3);
+ // evidence vault with seal press
+ const vault=new THREE.Group();vault.position.set(3,0,12.8);world.add(vault);box(4.2,2,3,0xf5f6f8,0,0,0,vault,.12);box(4.4,.22,3.2,C.teal,0,2,0,vault,.08);
+ box(1.4,1.3,.08,0x3c4250,0,0,1.52,vault,0);const disc=cyl(.38,.38,.08,C.teal,0,.55,1.6,vault,24);disc.rotation.x=Math.PI/2;anim.push(t=>disc.rotation.y=t*2);
+ const press=box(.9,.6,.9,C.blue,0,2.6,0,vault,.06);anim.push(t=>{press.position.y=2.6+.3+Math.abs(Math.sin(t*1.6))*.5});tag(vault,'vault',3.2);
+ // council hall (round, slowly spinning crown)
+ const ch=new THREE.Group();ch.position.set(16,0,-10);world.add(ch);cyl(2.6,2.8,.4,0xe8eaee,0,0,0,ch,40);
+ const cr=new THREE.Group();cr.position.y=.4;ch.add(cr);cyl(1.8,1.8,1.6,0xf7f7f9,0,0,0,cr,36);
+ for(let i=0;i<4;i++){const a=i*Math.PI/2;cyl(.28,.28,1.1,[C.blue,C.teal,C.orange,C.purple][i],Math.cos(a)*2.25,0,Math.sin(a)*2.25,cr,16)}
+ mesh(new THREE.ConeGeometry(2.1,1.8,36),C.teal,0,2.5,0,cr);anim.push(t=>cr.rotation.y=t*.35);tag(ch,'council',3.6);
+ // the World: a board with six steps that light in order
+ const wb=new THREE.Group();wb.position.set(10.5,0,2.4);world.add(wb);
+ cyl(.07,.07,1.3,0x9aa0aa,-1.5,0,0,wb,6);cyl(.07,.07,1.3,0x9aa0aa,1.5,0,0,wb,6);box(3.8,1.5,.16,0xffffff,0,1.1,0,wb,.06);box(3.9,.14,.2,C.purple,0,2.6,0,wb,.04);
+ const wd=[];for(let i=0;i<6;i++)wd.push(box(.36,.36,.06,0xd5d8de,-1.4+i*.56,1.67,.1,wb,.04));
+ anim.push(t=>{const k=Math.floor(t*.9)%8;wd.forEach((d,i)=>{d.material=M(i<k?C.teal:i==k?C.orange:0xd5d8de)})});tag(wb,'world',3);
+ // decor
+ for(const [x,z,s,c] of [[-21,4,1.1],[-21,8,.9,1],[-19,11,1],[20,6,1.1],[21,10,1,1],[19,13,.9],[13,4.5,.9],[-9,4.5,.9,1],[8,4.5,1],[21,-3,1],[21,-13,1.1,1],[-8,-13,1],[-3,-13,1.2,1],[2,-13,1],[-21,-5,1],[6,-12.5,.9,1],[12,13.5,1],[-1,13,.9,1]])tree(world,x,z,s,c);
+ for(let i=0;i<5;i++)lamp(world,-18+i*9,9);
+ // vans on the ring road
+ for(let i=0;i<3;i++){const v=van(world,i==1?0xffffff:0xf7f7f9);tag(v,'van',1.2);vans.push({m:v,o:i/3,sp:.035})}
+}
+
+function buildMarket(){
+ road(world,0,7.5,44,2.2);road(world,-2,-3,2.2,19);
+ const hall=warehouse(world,9,5.4,2.8,C.blue);hall.position.set(-11,0,-6.5);tag(hall,'hall',3.4);
+ // awning stalls in front of hall (4 plugins)
+ const stc=[C.teal,C.orange,C.purple,C.coral];
+ for(let i=0;i<4;i++){const s=new THREE.Group();s.position.set(-15+i*2.7,0,-2.3);world.add(s);box(1.8,.8,1.2,0xffffff,0,0,0,s,.05);const aw=box(2,.12,1.4,stc[i],0,1.35,.1,s,.04);aw.rotation.x=.18;cyl(.04,.04,1.3,0xb9bec8,-.9,0,.7,s,6);cyl(.04,.04,1.3,0xb9bec8,.9,0,.7,s,6);crate(s,.35,.8,0,.3);tag(s,'hall',2)}
+ // audit tower with gauge
+ const au=tower(world,3,8,3,C.teal,'#c8f2e4',11);au.position.set(8,0,-8);tag(au,'audit',8.8);
+ const gg=new THREE.Group();gg.position.set(8,9.3,-8);world.add(gg);const face=cyl(1,1,.12,0xffffff,0,0,0,gg,32);face.rotation.x=Math.PI/2;face.position.set(0,0,0);
+ const needle=box(.08,.8,.06,C.red,0,0,.1,gg,0);needle.geometry.translate(0,.3,0);anim.push(t=>{needle.rotation.z=-1.2+((Math.sin(t*.8)+1)/2)*2.4});gg.rotation.y=Math.PI/4;
+ // init: scaffold houses
+ for(let i=0;i<3;i++){const h=house(world,C.orange,2,2,1.2+i*.2);h.position.set(13+i*2.6,0,-1.5);tag(h,'init',2.6)}
+ const scf=new THREE.Group();scf.position.set(18.6,0,-1.5);world.add(scf);for(let i=0;i<4;i++)for(let j=0;j<2;j++)box(.06,2.6,.06,0xc59a5c,-.6+j*1.2,0,-.6+(i%2)*1.2,scf,0);box(1.4,.06,1.4,0xc59a5c,0,1.3,0,scf,0);box(1.4,.06,1.4,0xc59a5c,0,2.6,0,scf,0);tag(scf,'init',2.8);
+ // core: purple block with 2 agent pods
+ const core=new THREE.Group();core.position.set(3,0,-1.2);world.add(core);box(3.4,2.2,2.6,C.purple,0,0,0,core,.12);box(3.6,.2,2.8,0x6f52d6,0,2.2,0,core,.06);
+ const podA=mesh(new THREE.SphereGeometry(.42,20,14),0xffffff,-.8,2.85,0,core),podB=mesh(new THREE.SphereGeometry(.42,20,14),C.tealLight,.8,2.85,0,core);
+ anim.push(t=>{podA.position.y=2.85+Math.sin(t*2)*.18;podB.position.y=2.85+Math.sin(t*2+1.5)*.18});tag(core,'core',3.4);
+ // red team fortress
+ const rt=new THREE.Group();rt.position.set(15,0,13);world.add(rt);box(4.6,1.5,3.4,0xf5f2f0,0,0,0,rt,.1);
+ for(const [a,b] of [[-2.1,-1.5],[2.1,-1.5],[-2.1,1.5],[2.1,1.5]]){cyl(.45,.5,2.3,0xf5f2f0,a,0,b,rt,16);mesh(new THREE.ConeGeometry(.55,.7,16),C.coral,a,2.65,b,rt)}
+ const tgt=new THREE.Group();tgt.position.set(0,2.4,0);rt.add(tgt);for(let i=0;i<3;i++){const r=new THREE.Mesh(new THREE.TorusGeometry(.75-i*.24,.09,10,40),M(i%2?0xffffff:C.coral));tgt.add(r)}
+ anim.push(t=>tgt.rotation.y=t*1.2);tag(rt,'redteam',3.4);
+ // ledger: chain of blocks
+ const lg=new THREE.Group();lg.position.set(-4,0,13);world.add(lg);box(10,.25,1.8,0xe6e8ed,0,0,0,lg,.06);const blocks=[];
+ for(let i=0;i<6;i++){const b=box(1,1,1,0xffffff,-3.75+i*1.5,.25,0,lg,.1);blocks.push(b);if(i<5)box(.5,.12,.12,0x9aa0aa,-3.0+i*1.5,.7,0,lg,0)}
+ anim.push(t=>{const k=Math.floor(t*1.3)%6;blocks.forEach((b,i)=>{b.material=M(i<=k?C.teal:0xffffff);b.scale.setScalar(i==k?1.12:1)})});tag(lg,'ledger',1.8);
+ // kit: 4 track pavilions
+ const kc=[C.coral,C.orange,C.blue,C.green];
+ for(let i=0;i<4;i++){const h=house(world,kc[i],1.9,1.9,1.1);h.position.set(-20+i*2.6,0,12.5);tag(h,'kit',2.4)}
+ // work-list board
+ const bd=new THREE.Group();bd.position.set(-17,0,1.5);world.add(bd);cyl(.06,.06,1.4,0x9aa0aa,-1,0,0,bd,6);cyl(.06,.06,1.4,0x9aa0aa,1,0,0,bd,6);box(2.6,1.7,.14,0xffffff,0,1.2,0,bd,.06);
+ for(let i=0;i<5;i++)box(.3,.22,.04,i==4?C.coral:C.teal,-.95,1.4+1.2-i*.32-.2,.08,bd,0),box(1.4,.08,.04,0xd5d8de,.05,1.47+1.2-i*.32-.2,.08,bd,0);
+ tag(bd,'board',3);
+ for(const [x,z,s,c] of [[-21,-12,1.1],[-17,-12.5,1,1],[-5,-12,1],[0,-13,1.1,1],[13,-12,1],[19,-11,1.1,1],[21,-6,1],[21,3,1,1],[10,4.5,.9],[-8,4.5,1,1],[-21,5,.9],[8,13,1],[21,9,1,1],[-11,10,.9]])tree(world,x,z,s,c);
+ for(let i=0;i<5;i++)lamp(world,-18+i*9,9);
+ for(let i=0;i<3;i++){const v=van(world);tag(v,'van',1.2);vans.push({m:v,o:i/3,sp:.03})}
+}
+
+/* paths */
+const ROAD=[[-21,7.9],[21,7.9],[21,7.1],[-21,7.1]];
+function roadPos(u,out){u=((u%1)+1)%1;const L=[42,.8,42,.8],T=84+1.6;let d=u*T,i=0;while(d>L[i]){d-=L[i];i++}const a=ROAD[i],b=ROAD[(i+1)%4],f=d/L[i];out.set(a[0]+(b[0]-a[0])*f,0,a[1]+(b[1]-a[1])*f);return Math.atan2(-(b[1]-a[1]),b[0]-a[0])}
+const BELT=[[-9,-3.2],[8.4,-3.2],[8.4,-6.2]];
+function beltPos(u,out){const l1=17.4,l2=3,T=l1+l2;let d=(((u%1)+1)%1)*T;if(d<l1)out.set(-9+d,.45,-3.2);else out.set(8.4,.45,-3.2-(d-l1));return d}
+
+function setWorld(key){
+ currentKey=key;hideCard();
+ if(world){scene.remove(world)}
+ world=new THREE.Group();scene.add(world);clickables=[];anchors={};anim=[];vans=[];crates=[];build=[];
+ slab();
+ key==='company'?buildCompany():buildMarket();
+ selRing=ring(world);selRing.visible=false;
+ // entrance animation: everything grows from the slab
+ const seen=new Set();let n=0;
+ world.children.forEach(o=>{if(o.userData.base||o===selRing)return;o.userData.delay=.25+(n++%40)*.03+Math.random()*.15;o.userData.sy=o.scale.y;o.scale.y=.001});
+ t0=clock.getElapsedTime();
+ const W=WORLDS[key];document.getElementById('title').textContent=W.title;document.getElementById('src').textContent=W.src;
+ document.querySelectorAll('.tabs button').forEach(b=>b.classList.toggle('on',b.dataset.w===key));
+ renderChips(W);try{history.replaceState(null,'',key==='market'?'#market':'#company')}catch(e){}
+}
+
+/* ---------- chips + leader lines ---------- */
+let chipEls=[];
+function renderChips(W){chipEls=[];for(const side of['L','R']){const host=document.getElementById('chips'+side);host.innerHTML='';
+ W.chips[side].forEach((c,i)=>{const d=document.createElement('div');d.className='chip';d.innerHTML=`<small><i style="background:${hex(c[3])}"></i>${c[1]}</small><b>${c[2]}</b>`;d.onclick=()=>select(c[4]);host.appendChild(d);chipEls.push({el:d,target:c[4],col:hex(c[3]),side});setTimeout(()=>d.classList.add('in'),900+i*140+(side==='R'?70:0))})}}
+
+/* ---------- card ---------- */
+const card=document.getElementById('card');let selected=null;
+function select(id){const E=WORLDS[currentKey].ents[id];if(!E)return;selected=id;
+ card.innerHTML=`<button class="x" aria-label="Close">×</button><div class="hd">${icon(E.i,hex(E.c))}<div><h3>${E.n}</h3><div class="live">SNAPSHOT</div></div></div>`+E.rows.map(r=>`<div class="row"><span>${r[0]}</span><b class="${r[2]||''}">${r[1]}</b></div>`).join('')+(E.note?`<div class="note">${E.note}</div>`:'');
+ card.querySelector('.x').onclick=e=>{e.stopPropagation();hideCard()};card.classList.add('show');
+ const a=anchors[id];if(a){const p=new THREE.Vector3();a.g.getWorldPosition(p);selRing.position.set(p.x,.06,p.z);const s=new THREE.Box3().setFromObject(a.g).getSize(new THREE.Vector3());selRing.userData.r=Math.min(4.2,Math.max(s.x,s.z)*.72+.4);selRing.visible=true;selRing.userData.t=clock.getElapsedTime()}
+ document.getElementById('hint').classList.remove('in');
+}
+function hideCard(){selected=null;card.classList.remove('show');if(selRing)selRing.visible=false}
+
+/* ---------- picking ---------- */
+const ray=new THREE.Raycaster(),ptr=new THREE.Vector2();let hovered=null,downAt=null;
+function pick(e){const r=renderer.domElement.getBoundingClientRect();ptr.set((e.clientX-r.left)/r.width*2-1,-(e.clientY-r.top)/r.height*2+1);ray.setFromCamera(ptr,camera);const h=ray.intersectObjects(clickables,false)[0];return h?h.object.userData.id:null}
+renderer.domElement.addEventListener('pointermove',e=>{const id=pick(e);hovered=id;renderer.domElement.style.cursor=id?'pointer':'grab'});
+renderer.domElement.addEventListener('pointerdown',e=>{downAt=[e.clientX,e.clientY];userTouched=true});
+renderer.domElement.addEventListener('pointerup',e=>{if(!downAt)return;const moved=Math.hypot(e.clientX-downAt[0],e.clientY-downAt[1]);downAt=null;if(moved>6)return;const id=pick(e);id?select(id):hideCard()});
+addEventListener('keydown',e=>{if(e.key==='Escape')hideCard()});
+
+/* ---------- layout ---------- */
+let userTouched=false;
+function framing(){const w=innerWidth,h=innerHeight,a=w/h,mob=w<760;const dist=Math.max(90,(innerWidth<760?36:29)/(Math.tan(13*Math.PI/180)*a));return{dist,target:new THREE.Vector3(0,mob?7:5.5,mob?-2:0)}}
+function resetView(){const f=framing();const az=Math.PI/4;const pol=.9;camera.position.set(f.target.x+f.dist*Math.sin(pol)*Math.sin(az),f.target.y+f.dist*Math.cos(pol),f.target.z+f.dist*Math.sin(pol)*Math.cos(az));controls.target.copy(f.target);controls.update();userTouched=false}
+function resize(){renderer.setSize(innerWidth,innerHeight);camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();document.getElementById('lines').setAttribute('viewBox',`0 0 ${innerWidth} ${innerHeight}`);resetView()}
+addEventListener('resize',resize);
+
+/* ---------- loop ---------- */
+const clock=new THREE.Clock(),tmp=new THREE.Vector3(),proj=new THREE.Vector3();
+const svg=document.getElementById('lines');
+const ease=x=>{const c1=1.70158,c3=c1+1;return 1+c3*Math.pow(x-1,3)+c1*Math.pow(x-1,2)};
+function screenOf(id){const a=anchors[id];if(!a)return null;a.g.getWorldPosition(tmp);tmp.y+=a.h*(a.g.scale.y||1);proj.copy(tmp).project(camera);return[(proj.x+1)/2*innerWidth,(1-proj.y)/2*innerHeight]}
+function frame(){const t=clock.getElapsedTime(),lt=t-t0;
+ // entry
+ world.children.forEach(o=>{if(o.userData.sy===undefined)return;const k=Math.min(1,Math.max(0,(lt-o.userData.delay)/.7));o.scale.y=Math.max(.001,ease(k)*o.userData.sy)});
+ anim.forEach(f=>f(t));
+ const p=new THREE.Vector3();
+ vans.forEach(v=>{const ang=roadPos(v.o+t*v.sp,p);v.m.position.copy(p);v.m.rotation.y=ang});
+ crates.forEach(c=>{beltPos(c.o+t*.06,c.m.position)});
+ // hover lift
+ build.forEach(g=>{const tgt=(hovered&&g.userData.id===hovered)||(selected&&g.userData.id===selected)?.25:0;g.position.y+=(tgt-g.position.y)*.15});
+ if(selRing&&selRing.visible){const k=Math.min(1,(t-selRing.userData.t)/.35);const s=selRing.userData.r*(.6+.4*k)*(1+Math.sin(t*3)*.03);selRing.scale.set(s,s,s)}
+ // gentle sway until user grabs
+ if(!userTouched){const f=framing();const az=Math.PI/4+Math.sin(t*.18)*.12,pol=.9;camera.position.set(f.target.x+f.dist*Math.sin(pol)*Math.sin(az),f.target.y+f.dist*Math.cos(pol),f.target.z+f.dist*Math.sin(pol)*Math.cos(az))}
+ controls.update();renderer.render(scene,camera);
+ // leader lines
+ let s='';
+ chipEls.forEach(c=>{if(!c.el.classList.contains('in'))return;const sp=screenOf(c.target);if(!sp)return;const r=c.el.getBoundingClientRect();const x0=c.side==='L'?r.right:r.left,y0=r.top+r.height/2;
+  if(innerWidth<760){const x1=r.left+r.width/2,y1=r.bottom;s+=`<path d="M${x1} ${y1} L${sp[0]} ${sp[1]}" stroke="${c.col}" stroke-width="1.3" stroke-dasharray="1.5 4" stroke-linecap="round" fill="none" opacity=".55"/>`}
+  else s+=`<path d="M${x0} ${y0} L${sp[0]} ${sp[1]}" stroke="${c.col}" stroke-width="1.6" stroke-dasharray="1.5 5" stroke-linecap="round" fill="none" opacity=".75"/>`;
+  s+=`<circle cx="${sp[0]}" cy="${sp[1]}" r="4.2" fill="${c.col}" stroke="#fff" stroke-width="1.6"/>`});
+ if(selected){const sp=screenOf(selected);if(sp){const mob=innerWidth<760;if(!mob){let x=sp[0]+40,y=sp[1]-card.offsetHeight-20;if(x+card.offsetWidth>innerWidth-16)x=sp[0]-card.offsetWidth-40;y=Math.max(215,Math.min(innerHeight-card.offsetHeight-60,y));card.style.left=x+'px';card.style.top=y+'px'}
+  const r=card.getBoundingClientRect();const cx=Math.max(r.left,Math.min(r.right,sp[0])),cy=mob?r.top:Math.max(r.top,Math.min(r.bottom,sp[1]));
+  s+=`<path d="M${cx} ${cy} L${sp[0]} ${sp[1]}" stroke="#2f47e0" stroke-width="1.8" stroke-dasharray="1.5 5" stroke-linecap="round" fill="none"/><circle cx="${sp[0]}" cy="${sp[1]}" r="5" fill="#2f47e0" stroke="#fff" stroke-width="2"/>`}}
+ svg.innerHTML=s;
+ requestAnimationFrame(frame)}
+
+/* ---------- ui ---------- */
+document.querySelectorAll('.tabs button').forEach(b=>b.onclick=()=>{if(b.dataset.w!==currentKey)setWorld(b.dataset.w)});
+document.getElementById('reset').onclick=()=>{hideCard();resetView()};
+const modal=document.getElementById('modal');
+document.getElementById('install').onclick=()=>modal.classList.add('show');
+document.getElementById('closeM').onclick=()=>modal.classList.remove('show');
+modal.onclick=e=>{if(e.target===modal)modal.classList.remove('show')};
+document.querySelectorAll('.cp').forEach(b=>b.onclick=async e=>{e.stopPropagation();const txt=b.parentElement.textContent.replace(/^Copy/,'').trim();try{await navigator.clipboard.writeText(txt);b.textContent='Copied'}catch(_){const r=document.createRange();r.selectNodeContents(b.parentElement);getSelection().removeAllRanges();getSelection().addRange(r);b.textContent='Selected'}setTimeout(()=>b.textContent='Copy',1500)});
+addEventListener('hashchange',()=>{const k=location.hash==='#market'?'market':'company';if(k!==currentKey)setWorld(k)});
+
+resize();
+setWorld(location.hash==='#market'?'market':'company');
+setTimeout(()=>{if(!selected)document.getElementById('hint').classList.add('in')},3200);
+setTimeout(()=>document.getElementById('hint').classList.remove('in'),8000);
+frame();
+</script>
+</body>
+</html>
