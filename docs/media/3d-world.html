@@ -15,7 +15,7 @@
   #lines{position:fixed;inset:0;pointer-events:none;z-index:2}
   header{position:fixed;top:0;left:0;right:0;text-align:center;padding:22px 16px 0;z-index:5;pointer-events:none}
   .badge{display:inline-flex;align-items:center;gap:6px;background:#d9603f;color:#fff;font-weight:600;font-size:13px;padding:4px 10px 4px 8px;border-radius:7px;letter-spacing:.01em}
-  .badge{font-family:Newsreader,Georgia,serif;font-size:17px;font-weight:500;padding:3px 11px 4px 9px}
+  .badge i{width:7px;height:7px;border-radius:50%;background:#fff}
   @keyframes pulse{50%{opacity:.25}}
   h1{font-family:Newsreader,Georgia,serif;font-weight:400;font-size:clamp(30px,5vw,54px);margin:10px 0 4px;letter-spacing:-.01em}
   .sub{color:var(--mute);font-size:14px;margin:0}
@@ -36,7 +36,7 @@
   .ic svg{width:18px;height:18px;fill:none;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
   .card h3{margin:0;font-size:16px;font-weight:700;line-height:1.15}
   .live{font:600 9.5px Inter;letter-spacing:.12em;color:var(--red);display:flex;align-items:center;gap:4px;margin-top:2px}
-  .live:before{content:"";width:5px;height:5px;border-radius:50%;background:currentColor;animation:pulse 1.6s infinite}
+  .live:before{content:"";width:5px;height:5px;border-radius:50%;background:currentColor}
   .row{display:flex;justify-content:space-between;gap:12px;font-size:13px;padding:5px 0;align-items:baseline}
   .row span{color:var(--mute)}
   .row b{font-weight:700;text-align:right}
@@ -77,7 +77,7 @@
 <div id="stage"></div>
 <svg id="lines"></svg>
 <header>
-  <span class="badge"><svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><g stroke="#fff" stroke-width="2.6" stroke-linecap="round"><path d="M12 3v18M3 12h18M5.6 5.6l12.8 12.8M18.4 5.6L5.6 18.4"/></g></svg>Claude</span>
+  <span class="badge"><i></i>Snapshot of GitHub main · 20 Nov 2026</span>
   <h1 id="title">Agent Company</h1>
   <p class="sub" id="sub">Click any building for its real numbers. Drag to turn, pinch or scroll to zoom.</p>
   <div class="tabs"><button data-w="company" class="on">Agent Company</button><button data-w="market">Harness Marketplace</button></div>
@@ -103,6 +103,7 @@
   <pre><button class="cp">Copy</button>git clone https://github.com/yencwu87-ui/agent-company.git
 cd agent-company
 python3 agent_company.py launch</pre>
+  <p style="margin-top:6px">launch opens the live 3D World in your browser and walks a repo through six steps.</p>
   <div class="step"><em>3</em>Suggested order for a repo</div>
   <p style="margin-top:2px">audit → init → core → redteam → audit again (from the marketplace README).</p>
   <div style="text-align:right;margin-top:10px"><button class="btn dark" id="closeM">Done</button></div>
@@ -141,33 +142,34 @@ const P={
 const hex=n=>'#'+n.toString(16).padStart(6,'0');
 const icon=(k,col)=>`<span class="ic" style="background:${col}1f"><svg viewBox="0 0 24 24" style="stroke:${col}">${P[k]}</svg></span>`;
 
-/* ---------- real data, read from the two GitHub repos on 20 Nov 2026 ---------- */
+/* ---------- a snapshot: figures read from the main branch of the two GitHub repos on 20 Nov 2026; the page does not refresh itself ---------- */
 const WORLDS={
  company:{
   title:'Agent Company',
-  src:'Source: github.com/yencwu87-ui/agent-company (v0.6.1), README, tests and docs/ops/council, read 20 Nov 2026',
+  src:'Snapshot of github.com/yencwu87-ui/agent-company, main at 0352da7 (v0.6.1): README, tests and docs/ops/council, read 20 Nov 2026',
   chips:{
    L:[['version','Version','0.6.1',C.blue,'keep'],['classes','Classes','8',C.purple,'herald'],['harness','Harness pieces','6 / 6',C.orange,'forge'],['council','Council rounds','7',C.teal,'council']],
-   R:[['tests','Unit tests','99',C.teal,'vault'],['guard','Guard & rule cases','590',C.coral,'vault'],['ui','Browser checks','45',C.blue,'evaluator'],['tpl','Templates','5',C.purple,'coord']]
+   R:[['tests','Unit tests','133',C.teal,'vault'],['guard','Guard & rule cases','590',C.coral,'vault'],['ui','Browser checks','45',C.blue,'evaluator'],['world','World steps','6',C.purple,'world']]
   },
   ents:{
    keep:{n:"Owner's Keep",i:'crown',c:C.blue,rows:[['Role','Owner (a person)'],['Keeps','Direction, judgement, repair'],['Code PRs waiting, cap','2'],['Review rounds, cap','3'],['Agents may merge','Never','bad']],note:'The only path into a protected branch is the owner merging.'},
    herald:{n:'Herald · Chief of staff',i:'pen',c:C.purple,rows:[['Turns goals into','Numbered instructions'],['Template','instruction.md'],['Must carry','Owner’s words, branch, tests'],['Stop point','“Don’t merge”']],note:'Builds or merges: never.'},
-   coord:{n:'Raid Leader · Coordinator',i:'inbox',c:C.blue,rows:[['Coordinators allowed','Exactly 1'],['Inbox order','By number'],['Worktrees','1 per instruction'],['STATUS.md','Rewritten every step'],['Templates','5']],note:'Templates: instruction, status, report, council, declaration card.'},
+   coord:{n:'Raid Leader · Coordinator',i:'inbox',c:C.blue,rows:[['Coordinators allowed','Exactly 1'],['Inbox order','By number'],['Worktrees','1 per instruction'],['STATUS.md','Rewritten every step'],['Templates','5'],['Background runner','run . --tool claude'],['Runner stops on','Kill switch or stop file']],note:'Templates: instruction, status, report, council, declaration card. The runner does one instruction, then stops. It never merges.'},
    builder:{n:'Artificer · Builder',i:'hammer',c:C.orange,rows:[['Branches each','1'],['Order','Failing tests first'],['Then','Upload, pull request, brief'],['Reviews own work','Never','bad']],note:'One builder per branch. It stops at the pull request.'},
    rogue:{n:'Rogue · Challenger',i:'bug',c:C.coral,rows:[['Job','Tries to break the work'],['With','Failing tests, counter-examples'],['Fixes','Never','bad']]},
    evaluator:{n:'Paladin · Evaluator',i:'shield',c:C.teal,rows:[['Reviews from','A clean checkout'],['Vendor','Different from builder'],['Browser checks','45'],['Edits builder branch','Never','bad']],note:'The readiness ring warns when evaluator and builder share a tool.'},
    scribe:{n:'Scribe · Claims officer',i:'pen',c:C.purple,rows:[['Checks','Every public sentence'],['Against','The evidence'],['Approves content','Never','bad']]},
    watch:{n:'Ranger · Watch',i:'eye',c:C.greenDark,rows:[['Reads STATUS','2–3 times a day'],['Then','Queues next builder step'],['And','Pings the owner']],note:'A report older than a day is treated as possibly stale.'},
-   forge:{n:'The Forge · OpenProof harness',i:'flame',c:C.orange,rows:[['Pieces fitted','6 / 6','ok'],['Worktree Helm','Own worktree only'],['Deny-rule Plate','Secrets blocked'],['No-merge Gauntlets','No merge, no push to main'],['Allowlist Belt','Ticked tools only'],['Constructed-data Boots','No real data'],['Evidence Amulet','Every action logged']],note:'The deploy gate lifts only at six of six.'},
-   vault:{n:'Evidence Vault',i:'lock',c:C.teal,rows:[['Unit tests','99'],['Guard & rule cases','590'],['Browser checks','45'],['Ledger records','2'],['“Done” without evidence','Unknown','bad']],note:'Counts from the README test section and tests/*.py.'},
+   forge:{n:'The Forge · OpenProof harness',i:'flame',c:C.orange,rows:[['Pieces fitted','6 / 6','ok'],['Worktree Helm','Own worktree only'],['Deny-rule Plate','Secrets blocked'],['No-merge Gauntlets','No merge, no push to main'],['Allowlist Belt','Ticked tools only'],['Constructed-data Boots','No real data'],['Evidence Amulet','Every action logged'],['Travels with the repo','Committed files','ok']],note:'The deploy gate lifts only at six of six. Step 3 of the World is done only when the harness files are committed.'},
+   vault:{n:'Evidence Vault',i:'lock',c:C.teal,rows:[['Unit tests','133'],['Guard & rule cases','590'],['Browser checks','45'],['Ledger records','2'],['“Done” without evidence','Unknown','bad']],note:'Unit tests counted from tests/*.py on main. Guard cases and browser checks are the README figures.'},
    council:{n:'Review Council',i:'scale',c:C.teal,rows:[['Rounds held','7'],['Span','0.5.0 → 0.6.0'],['Last verdict','Go with conditions'],['Option B score','6.5 / 10'],['Confidence','8 / 10'],['Seats abstained','1 (breaker)','bad']],note:'Last round: “Agent Company 0.6.0: default deny, the final council”.'},
+   world:{n:'The World · start screen',i:'grid',c:C.purple,rows:[['Opens with','agent_company.py launch'],['Steps','6'],['','Setup → Team → Harness'],['','Orders → Run → Proof'],['Reads the repo every','3 seconds'],['A step is done','Only after all earlier ones']],note:'On main since pull request #2. The Guild still opens with agent_company.py guild.'},
    van:{n:'Dispatch line',i:'truck',c:C.blue,rows:[['Route','Inbox → builder → challenger'],['Then','Evaluator → owner’s desk'],['Hand-offs','Files, not chat']]}
   }
  },
  market:{
   title:'Harness Marketplace',
-  src:'Source: github.com/yencwu87-ui/harness-marketplace (v1.3.0), marketplace.json, CHANGELOG and progress/feature_list.json, read 20 Nov 2026',
+  src:'Snapshot of github.com/yencwu87-ui/harness-marketplace, main at d615f32 (v1.3.0): marketplace.json, CHANGELOG and progress/feature_list.json, read 20 Nov 2026',
   chips:{
    L:[['plugins','Plugins','4',C.blue,'hall'],['mtests','Tests','37',C.teal,'ledger'],['areas','Audit areas','7',C.orange,'audit'],['tracks','Framework tracks','4',C.purple,'kit']],
    R:[['ver','Version','1.3.0',C.blue,'hall'],['work','Work list passing','4 / 5',C.coral,'board'],['bind','Binding tests','22',C.teal,'ledger'],['rt','Red-team tests','8',C.coral,'redteam']]
@@ -285,6 +287,11 @@ function buildCompany(){
  const cr=new THREE.Group();cr.position.y=.4;ch.add(cr);cyl(1.8,1.8,1.6,0xf7f7f9,0,0,0,cr,36);
  for(let i=0;i<4;i++){const a=i*Math.PI/2;cyl(.28,.28,1.1,[C.blue,C.teal,C.orange,C.purple][i],Math.cos(a)*2.25,0,Math.sin(a)*2.25,cr,16)}
  mesh(new THREE.ConeGeometry(2.1,1.8,36),C.teal,0,2.5,0,cr);anim.push(t=>cr.rotation.y=t*.35);tag(ch,'council',3.6);
+ // the World: a board with six steps that light in order
+ const wb=new THREE.Group();wb.position.set(10.5,0,2.4);world.add(wb);
+ cyl(.07,.07,1.3,0x9aa0aa,-1.5,0,0,wb,6);cyl(.07,.07,1.3,0x9aa0aa,1.5,0,0,wb,6);box(3.8,1.5,.16,0xffffff,0,1.1,0,wb,.06);box(3.9,.14,.2,C.purple,0,2.6,0,wb,.04);
+ const wd=[];for(let i=0;i<6;i++)wd.push(box(.36,.36,.06,0xd5d8de,-1.4+i*.56,1.67,.1,wb,.04));
+ anim.push(t=>{const k=Math.floor(t*.9)%8;wd.forEach((d,i)=>{d.material=M(i<k?C.teal:i==k?C.orange:0xd5d8de)})});tag(wb,'world',3);
  // decor
  for(const [x,z,s,c] of [[-21,4,1.1],[-21,8,.9,1],[-19,11,1],[20,6,1.1],[21,10,1,1],[19,13,.9],[13,4.5,.9],[-9,4.5,.9,1],[8,4.5,1],[21,-3,1],[21,-13,1.1,1],[-8,-13,1],[-3,-13,1.2,1],[2,-13,1],[-21,-5,1],[6,-12.5,.9,1],[12,13.5,1],[-1,13,.9,1]])tree(world,x,z,s,c);
  for(let i=0;i<5;i++)lamp(world,-18+i*9,9);
@@ -360,7 +367,7 @@ function renderChips(W){chipEls=[];for(const side of['L','R']){const host=docume
 /* ---------- card ---------- */
 const card=document.getElementById('card');let selected=null;
 function select(id){const E=WORLDS[currentKey].ents[id];if(!E)return;selected=id;
- card.innerHTML=`<button class="x" aria-label="Close">×</button><div class="hd">${icon(E.i,hex(E.c))}<div><h3>${E.n}</h3><div class="live">LIVE</div></div></div>`+E.rows.map(r=>`<div class="row"><span>${r[0]}</span><b class="${r[2]||''}">${r[1]}</b></div>`).join('')+(E.note?`<div class="note">${E.note}</div>`:'');
+ card.innerHTML=`<button class="x" aria-label="Close">×</button><div class="hd">${icon(E.i,hex(E.c))}<div><h3>${E.n}</h3><div class="live">SNAPSHOT</div></div></div>`+E.rows.map(r=>`<div class="row"><span>${r[0]}</span><b class="${r[2]||''}">${r[1]}</b></div>`).join('')+(E.note?`<div class="note">${E.note}</div>`:'');
  card.querySelector('.x').onclick=e=>{e.stopPropagation();hideCard()};card.classList.add('show');
  const a=anchors[id];if(a){const p=new THREE.Vector3();a.g.getWorldPosition(p);selRing.position.set(p.x,.06,p.z);const s=new THREE.Box3().setFromObject(a.g).getSize(new THREE.Vector3());selRing.userData.r=Math.min(4.2,Math.max(s.x,s.z)*.72+.4);selRing.visible=true;selRing.userData.t=clock.getElapsedTime()}
  document.getElementById('hint').classList.remove('in');
